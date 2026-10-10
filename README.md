@@ -7,10 +7,10 @@ database tools, built on a fast, natively compiled, GPU-rendered editor.
 > JetBrains.
 
 Brewery is a fork of [Zed](https://github.com/zed-industries/zed). Zed's
-collaboration, account, AI and telemetry features are switched off. Brewery still
-contacts Zed's servers in two cases, both started by you: browsing or updating
-extensions from Zed's extension gallery, and downloading Zed's remote server
-when you open a project over SSH.
+collaboration, account, AI and telemetry features are switched off. Brewery still contacts Zed's extension gallery: it installs Zed's default
+extensions on first start, checks installed extensions for updates, and serves
+the extensions you browse or install. It also downloads Zed's remote server when
+you open a project over SSH.
 
 **Status:** early development (milestone M0 — the fork itself). Not usable for
 Java work yet. See the [design](docs/superpowers/specs/2026-10-10-brewery-design.md).
