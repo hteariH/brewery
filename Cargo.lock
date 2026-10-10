@@ -12091,6 +12091,7 @@ name = "onboarding"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "brewery_cloud",
  "client",
  "cloud_api_types",
  "collections",
@@ -12102,6 +12103,7 @@ dependencies = [
  "gpui",
  "menu",
  "notifications",
+ "paths",
  "picker",
  "project",
  "schemars 1.0.4",
@@ -21919,6 +21921,7 @@ dependencies = [
  "menu",
  "node_runtime",
  "parking_lot",
+ "paths",
  "postage",
  "pretty_assertions",
  "project",

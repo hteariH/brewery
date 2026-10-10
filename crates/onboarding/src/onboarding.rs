@@ -350,12 +350,14 @@ impl Render for Onboarding {
                                             .child(Vector::square(VectorName::ZedLogo, rems(2.5)))
                                             .child(
                                                 v_flex()
+                                                    // brewery: product name
                                                     .child(
-                                                        Headline::new("Welcome to Zed")
+                                                        Headline::new(format!("Welcome to {}", paths::APP_NAME))
                                                             .size(HeadlineSize::Small),
                                                     )
+                                                    // brewery: product tagline
                                                     .child(
-                                                        Label::new("The editor for what's next")
+                                                        Label::new("A Java IDE on a native, GPU-rendered editor")
                                                             .color(Color::Muted)
                                                             .size(LabelSize::Small)
                                                             .italic(),

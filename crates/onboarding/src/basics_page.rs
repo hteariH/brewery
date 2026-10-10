@@ -444,7 +444,14 @@ fn render_worktree_auto_trust_switch(tab_index: &mut isize, cx: &mut App) -> imp
     SwitchField::new(
         "onboarding-auto-trust-worktrees",
         Some("Trust All Projects By Default"),
-        Some("Automatically mark all new projects as trusted to unlock all Zed's features".into()),
+        // brewery: product name
+        Some(
+            format!(
+                "Automatically mark all new projects as trusted to unlock all of {}'s features",
+                paths::APP_NAME
+            )
+            .into(),
+        ),
         toggle_state,
         {
             let fs = <dyn Fs>::global(cx);
@@ -727,6 +734,9 @@ pub(crate) fn render_basics_page(user_store: &Entity<UserStore>, cx: &mut App) -
         .child(render_import_settings_section(&mut tab_index, cx))
         .child(render_vim_mode_switch(&mut tab_index, cx))
         .child(render_worktree_auto_trust_switch(&mut tab_index, cx))
-        .child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
-        .child(render_telemetry_section(&mut tab_index, cx))
+        // brewery: telemetry can never be sent, so its switches would mislead
+        .when(brewery_cloud::ZED_CLOUD_ENABLED, |this| {
+            this.child(Divider::horizontal().color(ui::DividerColor::BorderVariant))
+                .child(render_telemetry_section(&mut tab_index, cx))
+        })
 }
