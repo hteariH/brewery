@@ -22,3 +22,10 @@ fn test_brewery_cloud_defaults_are_off() {
     assert_eq!(d["title_bar"]["show_user_picture"], off);
     assert_eq!(d["title_bar"]["show_onboarding_banner"], off);
 }
+
+#[test]
+fn test_brewery_fonts_are_default() {
+    let d = defaults();
+    assert_eq!(d["buffer_font_family"], Value::String("JetBrains Mono".into()));
+    assert_eq!(d["ui_font_family"], Value::String("Inter".into()));
+}
