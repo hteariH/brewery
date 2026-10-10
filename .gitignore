@@ -61,3 +61,6 @@ crates/docs_preprocessor/actions.json
 
 .local*
 .cache
+
+# brewery: brainstorming companion scratch files
+.superpowers/
