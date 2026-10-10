@@ -81,6 +81,7 @@ audio.workspace = true
 auto_update.workspace = true
 auto_update_ui.workspace = true
 breadcrumbs.workspace = true
+brewery_core.workspace = true # brewery:
 call.workspace = true
 call_hierarchy.workspace = true
 channel.workspace = true

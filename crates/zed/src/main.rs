@@ -675,6 +675,8 @@ fn main() {
             cx.background_executor().clone(),
         );
         command_palette::init(cx);
+        // brewery: hide Zed-cloud actions from the command palette
+        brewery_core::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: settings::CopilotSettings::get_global(cx)
                 .enterprise_uri
