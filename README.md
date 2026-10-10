@@ -22,6 +22,12 @@ Follow Zed's build guides — [Windows](docs/src/development/windows.md),
 
     cargo run -p zed
 
+Development builds also need the CLI helper next to the app binary, or the
+app prints `could not find zed-cli` on start (harmless, but git over SSH
+cannot ask for passwords):
+
+    cargo build -p cli -p zed
+
 ## Licence
 
 The editor is GPL-3.0-or-later, like Zed. See `LICENSE-GPL`.

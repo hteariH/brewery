@@ -92,7 +92,8 @@ def main() -> None:
         "Icons in this directory come from JetBrains/intellij-community\n"
         f"(commit {COMMIT}, platform/icons/src/expui),\n"
         "licensed under the Apache License, Version 2.0:\n"
-        "https://www.apache.org/licenses/LICENSE-2.0\n",
+        "https://www.apache.org/licenses/LICENSE-2.0\n"
+        "A copy of the Apache License 2.0 is in LICENSE-APACHE at the root of this repository.\n",
         encoding="utf-8",
         newline="\n",
     )
