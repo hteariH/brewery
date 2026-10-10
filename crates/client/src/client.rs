@@ -877,11 +877,27 @@ impl Client {
             .is_some()
     }
 
+    // brewery: Zed's account and collaboration servers are off limits, whatever the entry point
+    // (startup, Collab Panel, zed:// links). Clients driven by test overrides never reach the
+    // network, so Zed's own tests may still sign in.
+    fn zed_cloud_blocked(&self) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.authenticate.read().is_some() || self.establish_connection.read().is_some() {
+            return false;
+        }
+        !brewery_cloud::ZED_CLOUD_ENABLED
+    }
+
     pub async fn sign_in(
         self: &Arc<Self>,
         try_provider: bool,
         cx: &AsyncApp,
     ) -> Result<Credentials> {
+        // brewery: refuse before the keychain read and the HTTP validation below, both of which
+        // would touch the user's real Zed login.
+        if self.zed_cloud_blocked() {
+            return Err(anyhow!("Zed cloud sign-in is disabled in Brewery"));
+        }
         let is_reauthenticating = if self.status().borrow().is_signed_out() {
             self.set_status(Status::Authenticating, cx);
             false
@@ -1093,6 +1109,13 @@ impl Client {
         try_provider: bool,
         cx: &AsyncApp,
     ) -> ConnectionResult<()> {
+        // brewery: never open a Collab connection to Zed; report it as a failed connect.
+        if self.zed_cloud_blocked() {
+            log::info!("not connecting: Zed cloud is disabled in Brewery");
+            return ConnectionResult::Result(Err(anyhow!(
+                "Zed cloud connect is disabled in Brewery"
+            )));
+        }
         let was_disconnected = match *self.status().borrow() {
             Status::SignedOut | Status::Authenticated => true,
             Status::ConnectionError
@@ -2011,6 +2034,43 @@ mod tests {
             ProxySettings::from_settings(&content).proxy.as_deref(),
             Some("http://127.0.0.1:10809")
         );
+    }
+
+    // brewery: explicit sign-in and connect (Collab Panel, zed:// links) must never reach Zed's
+    // servers. Credentials are seeded so that, without the gate, sign-in would validate them over
+    // HTTP; that request is what the counter catches.
+    #[gpui::test]
+    async fn test_brewery_blocks_zed_sign_in_and_connect(cx: &mut TestAppContext) {
+        init_test(cx);
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let http = FakeHttpClient::create({
+            let requests = requests.clone();
+            move |_| {
+                let requests = requests.clone();
+                async move {
+                    requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(http_client::Response::builder()
+                        .status(200)
+                        .body(Default::default())
+                        .unwrap())
+                }
+            }
+        });
+        let client = cx.update(|cx| Client::new(Arc::new(FakeSystemClock::new()), http, cx));
+        client.state.write().credentials = Some(Credentials {
+            user_id: 1,
+            access_token: "token".to_string(),
+        });
+
+        assert!(client.sign_in(true, &cx.to_async()).await.is_err());
+        assert!(client.status().borrow().is_signed_out());
+
+        let connected = client.connect(true, &cx.to_async()).await;
+        assert!(!matches!(connected, ConnectionResult::Result(Ok(()))));
+        assert!(!client.status().borrow().is_connected());
+
+        cx.executor().run_until_parked();
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[gpui::test(iterations = 10)]
