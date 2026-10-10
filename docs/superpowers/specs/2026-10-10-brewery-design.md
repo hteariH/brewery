@@ -1,7 +1,7 @@
 # Brewery — design
 
 Date: 2026-10-10
-Status: approved in brainstorming, pending written-spec review
+Status: M0 done locally 2026-10-10 (builds and hook tests pass on Windows and Linux); CI not run yet — repo not published
 
 ## 1. Goal
 
