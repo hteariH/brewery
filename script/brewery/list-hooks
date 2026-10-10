@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Lists every place where Brewery touches files that came from Zed.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+git grep -n -E '(//|#) brewery:' -- . ':!docs/superpowers' ':!docs/brewery' ':!script/brewery'

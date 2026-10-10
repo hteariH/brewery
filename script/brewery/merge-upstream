@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Merges Zed's main into the current branch and resolves the conflicts that
+# always resolve the same way. Exits 1 and lists what is left for a human.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+git fetch --filter=blob:none upstream main
+git merge --no-edit --no-commit upstream/main || true
+
+if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+  echo "Already up to date with upstream/main."
+  exit 0
+fi
+
+for path in $(git diff --name-only --diff-filter=U); do
+  case "$path" in
+    .github/workflows/brewery_*) ;;
+    .github/workflows/*) git rm -q --ignore-unmatch -- "$path" ;;
+    README.md) git checkout --ours -- README.md && git add README.md ;;
+  esac
+done
+
+# Upstream may add new workflows without conflicting; drop them too.
+git ls-files .github/workflows | grep -v '/brewery_' | xargs -r git rm -q --
+
+remaining=$(git diff --name-only --diff-filter=U)
+if [ -n "$remaining" ]; then
+  echo "Resolve these by hand, then run 'git commit':"
+  echo "$remaining"
+  exit 1
+fi
+
+git commit --no-edit
+echo "Merged upstream/main."
