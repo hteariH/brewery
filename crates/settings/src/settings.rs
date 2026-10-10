@@ -7,6 +7,8 @@ mod keymap_file;
 mod settings_file;
 mod settings_store;
 mod vscode_import;
+#[cfg(test)]
+mod brewery_defaults; // brewery:
 
 pub use settings_macros::RegisterSetting;
 
