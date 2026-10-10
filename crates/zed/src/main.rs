@@ -855,7 +855,8 @@ fn main() {
         #[cfg(debug_assertions)]
         watch_languages(fs.clone(), app_state.languages.clone(), cx);
 
-        let menus = app_menus(cx);
+        // brewery: Brewery names, no Zed-only menu items
+        let menus = brewery_core::rebrand_menus(app_menus(cx));
         cx.set_menus(menus);
 
         if let Some(mut crash_handler) = crash_handler {

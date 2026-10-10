@@ -2402,6 +2402,7 @@ dependencies = [
  "command_palette_hooks",
  "gpui",
  "menu",
+ "zed_actions",
 ]
 
 [[package]]

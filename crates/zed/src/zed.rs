@@ -2322,7 +2322,8 @@ fn show_markdown_app_notification<F>(
 }
 
 fn reload_menus(cx: &mut App) {
-    let menus = app_menus(cx);
+    // brewery: Brewery names, no Zed-only menu items
+    let menus = brewery_core::rebrand_menus(app_menus(cx));
     cx.set_menus(menus);
 }
 
