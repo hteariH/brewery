@@ -3,10 +3,7 @@
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::App;
 
-/// Brewery never talks to Zed's cloud: no Zed account sign-in, collaboration,
-/// Zed AI, telemetry upload or Zed update checks. Hook-ins in Zed's crates
-/// check this instead of each carrying its own switch.
-pub const ZED_CLOUD_ENABLED: bool = false;
+pub use brewery_cloud::ZED_CLOUD_ENABLED;
 
 /// Command palette namespaces whose actions only work with a Zed account.
 pub const HIDDEN_CLOUD_NAMESPACES: &[&str] = &["client", "collab", "collab_panel", "auto_update"];

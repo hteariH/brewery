@@ -2390,9 +2390,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewery_cloud"
+version = "0.1.0"
+
+[[package]]
 name = "brewery_core"
 version = "0.1.0"
 dependencies = [
+ "brewery_cloud",
  "client",
  "command_palette_hooks",
  "gpui",
