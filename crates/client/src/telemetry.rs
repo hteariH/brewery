@@ -1113,7 +1113,9 @@ mod tests {
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let settings_store = SettingsStore::test(cx);
+            let mut settings_store = SettingsStore::test(cx);
+            // brewery: Brewery ships with metrics off; Zed's telemetry tests need them on
+            _ = settings_store.set_user_settings(r#"{ "telemetry": { "metrics": true } }"#, cx);
             cx.set_global(settings_store);
         });
     }
