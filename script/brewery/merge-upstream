@@ -4,24 +4,38 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-git fetch --filter=blob:none upstream main
-git merge --no-edit --no-commit upstream/main || true
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "Tracked files have uncommitted changes; commit or stash them first."
+  exit 1
+fi
 
-if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+git fetch --filter=blob:none upstream main
+
+if git merge-base --is-ancestor upstream/main HEAD; then
   echo "Already up to date with upstream/main."
   exit 0
 fi
 
-for path in $(git diff --name-only --diff-filter=U); do
+# A conflict makes git exit non-zero; that is expected, so keep going.
+git merge --no-ff --no-edit --no-commit upstream/main || true
+
+if ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+  echo "Merge did not start; see git output above."
+  exit 1
+fi
+
+while IFS= read -r path; do
   case "$path" in
     .github/workflows/brewery_*) ;;
     .github/workflows/*) git rm -q --ignore-unmatch -- "$path" ;;
     README.md) git checkout --ours -- README.md && git add README.md ;;
   esac
-done
+done < <(git diff --name-only --diff-filter=U)
 
 # Upstream may add new workflows without conflicting; drop them too.
-git ls-files .github/workflows | grep -v '/brewery_' | xargs -r git rm -q --
+while IFS= read -r path; do
+  git rm -q -f -- "$path"
+done < <(git ls-files .github/workflows | { grep -v '/brewery_' || true; })
 
 remaining=$(git diff --name-only --diff-filter=U)
 if [ -n "$remaining" ]; then
