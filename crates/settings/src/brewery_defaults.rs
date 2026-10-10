@@ -29,3 +29,11 @@ fn test_brewery_fonts_are_default() {
     assert_eq!(d["buffer_font_family"], Value::String("JetBrains Mono".into()));
     assert_eq!(d["ui_font_family"], Value::String("Inter".into()));
 }
+
+#[test]
+fn test_brewery_theme_is_default() {
+    let d = defaults();
+    assert_eq!(d["theme"]["mode"], Value::String("system".into()));
+    assert_eq!(d["theme"]["dark"], Value::String("Brewery Dark".into()));
+    assert_eq!(d["theme"]["light"], Value::String("Brewery Light".into()));
+}

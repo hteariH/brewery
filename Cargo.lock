@@ -2405,6 +2405,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewery_theme"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "log",
+ "paths",
+ "rust-embed",
+ "serde_json",
+ "theme",
+ "theme_settings",
+]
+
+[[package]]
 name = "brush-parser"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

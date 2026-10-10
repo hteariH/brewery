@@ -25,6 +25,7 @@ members = [
     "crates/breadcrumbs",
     "crates/brewery_cloud", # brewery:
     "crates/brewery_core", # brewery:
+    "crates/brewery_theme", # brewery:
     "crates/buffer_diff",
     "crates/call",
     "crates/call_hierarchy",
@@ -304,6 +305,7 @@ bedrock = { path = "crates/bedrock" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 brewery_cloud = { path = "crates/brewery_cloud" } # brewery:
 brewery_core = { path = "crates/brewery_core" } # brewery:
+brewery_theme = { path = "crates/brewery_theme" } # brewery:
 buffer_diff = { path = "crates/buffer_diff" }
 call = { path = "crates/call" }
 call_hierarchy = { path = "crates/call_hierarchy" }
