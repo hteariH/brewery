@@ -5,10 +5,11 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -41,7 +42,10 @@ jobs:
         shell: pwsh
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          Start-Process -Wait -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
+          $p = Start-Process -Wait -PassThru -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
+          # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: brewery-check
@@ -52,7 +56,7 @@ jobs:
 
   build:
     name: Build (${{ matrix.os }})
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: check
     strategy:
       fail-fast: false
@@ -68,6 +72,9 @@ jobs:
     continue-on-error: ${{ matrix.unsupported == true }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
+    env:
+      # release-fast inherits full debuginfo, which is too heavy for hosted runners.
+      CARGO_PROFILE_RELEASE_FAST_DEBUG: limited
     steps:
       - name: Free disk space
         if: runner.os == 'Linux'
@@ -83,7 +90,10 @@ jobs:
         shell: pwsh
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          Start-Process -Wait -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
+          $p = Start-Process -Wait -PassThru -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
+          # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: brewery-build
