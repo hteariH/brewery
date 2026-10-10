@@ -668,6 +668,8 @@ fn main() {
         );
 
         theme_settings::init(theme::LoadThemes::All(Box::new(Assets)), cx);
+        // brewery: IntelliJ file icons (colour icons must live on disk)
+        brewery_theme::init(cx);
         eager_load_active_theme_and_icon_theme(fs.clone(), cx);
         theme_extension::init(
             extension_host_proxy,

@@ -37,3 +37,10 @@ fn test_brewery_theme_is_default() {
     assert_eq!(d["theme"]["dark"], Value::String("Brewery Dark".into()));
     assert_eq!(d["theme"]["light"], Value::String("Brewery Light".into()));
 }
+
+#[test]
+fn test_brewery_icon_theme_is_default() {
+    let d = defaults();
+    assert_eq!(d["icon_theme"]["dark"], Value::String("Brewery Icons Dark".into()));
+    assert_eq!(d["icon_theme"]["light"], Value::String("Brewery Icons Light".into()));
+}

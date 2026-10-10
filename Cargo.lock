@@ -22425,6 +22425,7 @@ dependencies = [
  "auto_update_ui",
  "breadcrumbs",
  "brewery_core",
+ "brewery_theme",
  "call",
  "call_hierarchy",
  "channel",

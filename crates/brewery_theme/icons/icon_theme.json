@@ -1,0 +1,579 @@
+{
+  "$schema": "https://zed.dev/schema/icon_themes/v0.3.0.json",
+  "name": "Brewery Icons",
+  "author": "Brewery contributors; icons from JetBrains/intellij-community (Apache 2.0)",
+  "themes": [
+    {
+      "name": "Brewery Icons Dark",
+      "appearance": "dark",
+      "directory_icons": {
+        "collapsed": "dark/nodes_folder.svg",
+        "expanded": "dark/nodes_folder.svg"
+      },
+      "file_icons": {
+        "astro": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "audio": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "ballerina": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "bicep": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "bun": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "c": {
+          "path": "dark/fileTypes_c.svg"
+        },
+        "cairo": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "code": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "coffeescript": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "cpp": {
+          "path": "dark/fileTypes_cpp.svg"
+        },
+        "crystal": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "csharp": {
+          "path": "dark/fileTypes_Csharp.svg"
+        },
+        "csproj": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "css": {
+          "path": "dark/fileTypes_css.svg"
+        },
+        "cue": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "dart": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "default": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "diff": {
+          "path": "dark/fileTypes_patch.svg"
+        },
+        "docker": {
+          "path": "dark/fileTypes_docker.svg"
+        },
+        "document": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "editorconfig": {
+          "path": "dark/fileTypes_editorConfig.svg"
+        },
+        "elixir": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "elm": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "erlang": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "eslint": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "font": {
+          "path": "dark/fileTypes_font.svg"
+        },
+        "fsharp": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "fsproj": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "gitlab": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "gleam": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "go": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "graphql": {
+          "path": "dark/fileTypes_graphql.svg"
+        },
+        "haskell": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "hcl": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "helm": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "heroku": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "html": {
+          "path": "dark/fileTypes_html.svg"
+        },
+        "image": {
+          "path": "dark/fileTypes_image.svg"
+        },
+        "ipynb": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "java": {
+          "path": "dark/fileTypes_java.svg"
+        },
+        "javascript": {
+          "path": "dark/fileTypes_javaScript.svg"
+        },
+        "json": {
+          "path": "dark/fileTypes_json.svg"
+        },
+        "julia": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "kdl": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "kotlin": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "lock": {
+          "path": "dark/fileTypes_config.svg"
+        },
+        "log": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "lua": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "luau": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "markdown": {
+          "path": "dark/fileTypes_markdown.svg"
+        },
+        "metal": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "nim": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "nix": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "ocaml": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "odin": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "phoenix": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "php": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "prettier": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "prisma": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "puppet": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "python": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "r": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "react": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "roc": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "ruby": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "rust": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "sass": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "scala": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "settings": {
+          "path": "dark/fileTypes_config.svg"
+        },
+        "solidity": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "storage": {
+          "path": "dark/fileTypes_sql.svg"
+        },
+        "stylelint": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "surrealql": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "svelte": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "swift": {
+          "path": "dark/fileTypes_swiftLang.svg"
+        },
+        "tcl": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "template": {
+          "path": "dark/fileTypes_xml.svg"
+        },
+        "terminal": {
+          "path": "dark/fileTypes_shell.svg"
+        },
+        "terraform": {
+          "path": "dark/fileTypes_terraform.svg"
+        },
+        "toml": {
+          "path": "dark/fileTypes_toml.svg"
+        },
+        "typescript": {
+          "path": "dark/fileTypes_typeScript.svg"
+        },
+        "v": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "vbproj": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "vcs": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "video": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "vs_sln": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "vs_suo": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "vue": {
+          "path": "dark/fileTypes_vue.svg"
+        },
+        "vyper": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "wgsl": {
+          "path": "dark/fileTypes_text.svg"
+        },
+        "yaml": {
+          "path": "dark/fileTypes_yaml.svg"
+        },
+        "zig": {
+          "path": "dark/fileTypes_text.svg"
+        }
+      }
+    },
+    {
+      "name": "Brewery Icons Light",
+      "appearance": "light",
+      "directory_icons": {
+        "collapsed": "light/nodes_folder.svg",
+        "expanded": "light/nodes_folder.svg"
+      },
+      "file_icons": {
+        "astro": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "audio": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "ballerina": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "bicep": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "bun": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "c": {
+          "path": "light/fileTypes_c.svg"
+        },
+        "cairo": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "code": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "coffeescript": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "cpp": {
+          "path": "light/fileTypes_cpp.svg"
+        },
+        "crystal": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "csharp": {
+          "path": "light/fileTypes_Csharp.svg"
+        },
+        "csproj": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "css": {
+          "path": "light/fileTypes_css.svg"
+        },
+        "cue": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "dart": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "default": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "diff": {
+          "path": "light/fileTypes_patch.svg"
+        },
+        "docker": {
+          "path": "light/fileTypes_docker.svg"
+        },
+        "document": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "editorconfig": {
+          "path": "light/fileTypes_editorConfig.svg"
+        },
+        "elixir": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "elm": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "erlang": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "eslint": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "font": {
+          "path": "light/fileTypes_font.svg"
+        },
+        "fsharp": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "fsproj": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "gitlab": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "gleam": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "go": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "graphql": {
+          "path": "light/fileTypes_graphql.svg"
+        },
+        "haskell": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "hcl": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "helm": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "heroku": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "html": {
+          "path": "light/fileTypes_html.svg"
+        },
+        "image": {
+          "path": "light/fileTypes_image.svg"
+        },
+        "ipynb": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "java": {
+          "path": "light/fileTypes_java.svg"
+        },
+        "javascript": {
+          "path": "light/fileTypes_javaScript.svg"
+        },
+        "json": {
+          "path": "light/fileTypes_json.svg"
+        },
+        "julia": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "kdl": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "kotlin": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "lock": {
+          "path": "light/fileTypes_config.svg"
+        },
+        "log": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "lua": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "luau": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "markdown": {
+          "path": "light/fileTypes_markdown.svg"
+        },
+        "metal": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "nim": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "nix": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "ocaml": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "odin": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "phoenix": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "php": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "prettier": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "prisma": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "puppet": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "python": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "r": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "react": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "roc": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "ruby": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "rust": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "sass": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "scala": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "settings": {
+          "path": "light/fileTypes_config.svg"
+        },
+        "solidity": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "storage": {
+          "path": "light/fileTypes_sql.svg"
+        },
+        "stylelint": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "surrealql": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "svelte": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "swift": {
+          "path": "light/fileTypes_swiftLang.svg"
+        },
+        "tcl": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "template": {
+          "path": "light/fileTypes_xml.svg"
+        },
+        "terminal": {
+          "path": "light/fileTypes_shell.svg"
+        },
+        "terraform": {
+          "path": "light/fileTypes_terraform.svg"
+        },
+        "toml": {
+          "path": "light/fileTypes_toml.svg"
+        },
+        "typescript": {
+          "path": "light/fileTypes_typeScript.svg"
+        },
+        "v": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "vbproj": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "vcs": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "video": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "vs_sln": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "vs_suo": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "vue": {
+          "path": "light/fileTypes_vue.svg"
+        },
+        "vyper": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "wgsl": {
+          "path": "light/fileTypes_text.svg"
+        },
+        "yaml": {
+          "path": "light/fileTypes_yaml.svg"
+        },
+        "zig": {
+          "path": "light/fileTypes_text.svg"
+        }
+      }
+    }
+  ]
+}
