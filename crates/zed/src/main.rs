@@ -878,11 +878,14 @@ fn main() {
 
         cx.activate(true);
 
-        cx.spawn({
-            let client = app_state.client.clone();
-            async move |cx| authenticate(client, cx).await
-        })
-        .detach_and_log_err(cx);
+        // brewery: never sign in to Zed's cloud on startup
+        if brewery_core::ZED_CLOUD_ENABLED {
+            cx.spawn({
+                let client = app_state.client.clone();
+                async move |cx| authenticate(client, cx).await
+            })
+            .detach_and_log_err(cx);
+        }
 
         let urls: Vec<_> = args
             .paths_or_urls

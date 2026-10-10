@@ -699,6 +699,11 @@ impl Telemetry {
             )
         };
 
+        // brewery: events stay in the local telemetry log; nothing is uploaded
+        if !brewery_cloud::ZED_CLOUD_ENABLED {
+            return Ok(());
+        }
+
         let request = self.build_request(json_bytes, &request_body)?;
         let response = self.http_client.send(request).await?;
         if response.status() != 200 {
@@ -819,6 +824,53 @@ mod tests {
         cx.update(|_cx| {
             assert!(is_empty_state(&telemetry));
         });
+    }
+
+    // brewery: telemetry must never leave the machine, even if the user enables metrics
+    #[gpui::test]
+    async fn test_brewery_never_uploads_telemetry(
+        executor: BackgroundExecutor,
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let http = FakeHttpClient::create({
+            let requests = requests.clone();
+            move |_| {
+                let requests = requests.clone();
+                async move {
+                    requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(http_client::Response::builder()
+                        .status(200)
+                        .body(Default::default())
+                        .unwrap())
+                }
+            }
+        });
+        let clock = Arc::new(FakeSystemClock::new());
+
+        let telemetry = cx.update(|cx| {
+            let telemetry = Telemetry::new(clock.clone(), http, cx);
+            telemetry.state.lock().max_queue_size = 1;
+            telemetry.start(
+                Some("system_id".to_string()),
+                Some("installation_id".to_string()),
+                "session_id".to_string(),
+                cx,
+            );
+            telemetry.state.lock().settings.metrics = true;
+            telemetry
+        });
+
+        cx.update(|_cx| {
+            telemetry.report_event(Event::Flexible(FlexibleEvent {
+                event_type: "test".to_string(),
+                event_properties: HashMap::default(),
+            }));
+        });
+        executor.run_until_parked();
+
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[gpui::test]

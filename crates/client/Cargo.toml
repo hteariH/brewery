@@ -19,6 +19,7 @@ test-support = ["clock/test-support", "collections/test-support", "gpui/test-sup
 anyhow.workspace = true
 async-channel.workspace = true
 async-tungstenite = { workspace = true, features = ["tokio", "tokio-rustls-manual-roots"] }
+brewery_cloud.workspace = true # brewery:
 chrono.workspace = true
 clock.workspace = true
 cloud_api_client.workspace = true

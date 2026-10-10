@@ -200,7 +200,8 @@ impl ReleaseChannel {
 
     /// Returns whether we want to poll for updates for this [`ReleaseChannel`]
     pub fn poll_for_updates(&self) -> bool {
-        !matches!(self, ReleaseChannel::Dev)
+        // brewery: never poll Zed's update server; M6 switches to GitHub Releases
+        false
     }
 
     /// Returns the display name for this [`ReleaseChannel`].
@@ -305,6 +306,14 @@ mod tests {
             ReleaseChannel::Stable.docs_url("settings"),
             "https://zed.dev/docs/settings"
         );
+    }
+
+    // brewery: Zed's update server ships Zed, not Brewery
+    #[test]
+    fn test_brewery_never_polls_zed_updates() {
+        for channel in ReleaseChannel::ALL {
+            assert!(!channel.poll_for_updates(), "{channel:?} polls for updates");
+        }
     }
 
     // brewery: identity guard against upstream merges

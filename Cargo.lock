@@ -3069,6 +3069,7 @@ dependencies = [
  "anyhow",
  "async-channel 2.5.0",
  "async-tungstenite",
+ "brewery_cloud",
  "chrono",
  "clock",
  "cloud_api_client",
