@@ -6,7 +6,7 @@ version = "1.25.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
-default-run = "zed"
+default-run = "brewery" # brewery: binary name must equal paths::APP_NAME_LOWERCASE
 
 [lints]
 workspace = true
@@ -55,7 +55,7 @@ visual-tests = [
 ]
 
 [[bin]]
-name = "zed"
+name = "brewery" # brewery: binary name must equal paths::APP_NAME_LOWERCASE
 path = "src/main.rs"
 
 [[bin]]

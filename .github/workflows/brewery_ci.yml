@@ -59,11 +59,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            binary: target/release-fast/zed
+            binary: target/release-fast/brewery
           - os: windows-2025
-            binary: target/release-fast/zed.exe
+            binary: target/release-fast/brewery.exe
           - os: macos-15
-            binary: target/release-fast/zed
+            binary: target/release-fast/brewery
             unsupported: true
     continue-on-error: ${{ matrix.unsupported == true }}
     runs-on: ${{ matrix.os }}
