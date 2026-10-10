@@ -439,7 +439,11 @@ fn render_worktree_auto_trust_switch(tab_index: &mut isize, cx: &mut App) -> imp
         ui::ToggleState::Unselected
     };
 
-    let tooltip_description = "Zed can only allow services like language servers, project settings, and MCP servers to run after you mark a new project as trusted.";
+    // brewery: product name
+    let tooltip_description = format!(
+        "{} can only allow services like language servers, project settings, and MCP servers to run after you mark a new project as trusted.",
+        paths::APP_NAME
+    );
 
     SwitchField::new(
         "onboarding-auto-trust-worktrees",
