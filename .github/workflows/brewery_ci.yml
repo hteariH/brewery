@@ -1,0 +1,96 @@
+name: Brewery CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: Check and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: script/linux
+      - name: Install MSVC Spectre libraries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Start-Process -Wait -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: brewery-check
+      - name: Check
+        run: cargo check -p zed --locked
+      - name: Test Brewery hook-ins
+        run: cargo test --locked -p brewery_cloud -p brewery_core -p release_channel -p paths -p settings -p client
+
+  build:
+    name: Build (${{ matrix.os }})
+    if: github.event_name == 'push'
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            binary: target/release-fast/zed
+          - os: windows-2025
+            binary: target/release-fast/zed.exe
+          - os: macos-15
+            binary: target/release-fast/zed
+            unsupported: true
+    continue-on-error: ${{ matrix.unsupported == true }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    steps:
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: script/linux
+      - name: Install MSVC Spectre libraries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          Start-Process -Wait -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: brewery-build
+      - name: Build
+        run: cargo build --locked --profile release-fast -p zed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brewery-${{ matrix.os }}
+          path: ${{ matrix.binary }}
+          retention-days: 14
