@@ -1920,7 +1920,8 @@ mod tests {
                 WorktreeId::from_usize(1),
                 LocalSettingsPath::InWorktree(rel_path("root2").into()),
                 LocalSettingsKind::Settings,
-                Some(r#"{ "tab_size": 9, "auto_update": true}"#),
+                // brewery: the opposite of the user value, so the check below shows it is ignored
+                Some(r#"{ "tab_size": 9, "auto_update": false}"#),
                 cx,
             )
             .unwrap();
@@ -1955,7 +1956,7 @@ mod tests {
                 tab_size: 9.try_into().unwrap(),
             }
         );
-        // brewery: user override flips the default
+        // brewery: local settings must not override auto_update; the user value (true) wins
         assert_eq!(
             store.get::<AutoUpdateSetting>(Some(SettingsLocation {
                 worktree_id: WorktreeId::from_usize(1),
