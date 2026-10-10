@@ -15,7 +15,8 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 /// and state directory paths.
 ///
 /// Forks should change this to avoid colliding with Zed's user data.
-pub const APP_NAME: &str = "Zed";
+// brewery: own name, so Brewery never shares config/data dirs with Zed
+pub const APP_NAME: &str = "Brewery";
 
 /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
 /// Linux/FreeBSD and the macOS `~/.config` fallback.
@@ -634,4 +635,30 @@ pub fn global_gitignore_path() -> Option<PathBuf> {
     GLOBAL_GITIGNORE_PATH
         .get_or_init(::ignore::gitignore::gitconfig_excludes_path)
         .clone()
+}
+
+// brewery: identity guard against upstream merges
+#[cfg(test)]
+mod brewery_tests {
+    use super::*;
+
+    #[test]
+    fn test_app_name_is_brewery() {
+        assert_eq!(APP_NAME, "Brewery");
+        assert_eq!(APP_NAME_LOWERCASE, "brewery");
+    }
+
+    #[test]
+    fn test_config_dir_is_brewerys_own() {
+        let name = config_dir()
+            .file_name()
+            .expect("config dir has a name")
+            .to_string_lossy()
+            .into_owned();
+        if cfg!(target_os = "windows") {
+            assert_eq!(name, "Brewery");
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(name, "brewery");
+        }
+    }
 }

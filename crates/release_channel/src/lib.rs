@@ -43,11 +43,12 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 /// The app identifier for the current release channel, Windows only.
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
+    // brewery: must differ from Zed's, or Brewery would forward to a running Zed
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Dev => "Brewery-Editor-Dev",
+        ReleaseChannel::Nightly => "Brewery-Editor-Nightly",
+        ReleaseChannel::Preview => "Brewery-Editor-Preview",
+        ReleaseChannel::Stable => "Brewery-Editor-Stable",
     }
 }
 
@@ -204,11 +205,12 @@ impl ReleaseChannel {
 
     /// Returns the display name for this [`ReleaseChannel`].
     pub fn display_name(&self) -> &'static str {
+        // brewery: product name
         match self {
-            ReleaseChannel::Dev => "Zed Dev",
-            ReleaseChannel::Nightly => "Zed Nightly",
-            ReleaseChannel::Preview => "Zed Preview",
-            ReleaseChannel::Stable => "Zed",
+            ReleaseChannel::Dev => "Brewery Dev",
+            ReleaseChannel::Nightly => "Brewery Nightly",
+            ReleaseChannel::Preview => "Brewery Preview",
+            ReleaseChannel::Stable => "Brewery",
         }
     }
 
@@ -226,11 +228,12 @@ impl ReleaseChannel {
     /// and WM_CLASS on X11.
     /// This also has to match the bundle identifier for Zed on macOS.
     pub fn app_id(&self) -> &'static str {
+        // brewery: own app id (Wayland app id, X11 WM_CLASS, desktop file)
         match self {
-            ReleaseChannel::Dev => "dev.zed.Zed-Dev",
-            ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
-            ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            ReleaseChannel::Dev => "io.github.htearih.Brewery-Dev",
+            ReleaseChannel::Nightly => "io.github.htearih.Brewery-Nightly",
+            ReleaseChannel::Preview => "io.github.htearih.Brewery-Preview",
+            ReleaseChannel::Stable => "io.github.htearih.Brewery",
         }
     }
 
@@ -302,5 +305,34 @@ mod tests {
             ReleaseChannel::Stable.docs_url("settings"),
             "https://zed.dev/docs/settings"
         );
+    }
+
+    // brewery: identity guard against upstream merges
+    #[test]
+    fn test_brewery_display_names() {
+        assert_eq!(ReleaseChannel::Stable.display_name(), "Brewery");
+        assert_eq!(ReleaseChannel::Preview.display_name(), "Brewery Preview");
+        assert_eq!(ReleaseChannel::Nightly.display_name(), "Brewery Nightly");
+        assert_eq!(ReleaseChannel::Dev.display_name(), "Brewery Dev");
+    }
+
+    #[test]
+    fn test_brewery_app_ids() {
+        assert_eq!(ReleaseChannel::Stable.app_id(), "io.github.htearih.Brewery");
+        assert_eq!(
+            ReleaseChannel::Preview.app_id(),
+            "io.github.htearih.Brewery-Preview"
+        );
+        assert_eq!(
+            ReleaseChannel::Nightly.app_id(),
+            "io.github.htearih.Brewery-Nightly"
+        );
+        assert_eq!(ReleaseChannel::Dev.app_id(), "io.github.htearih.Brewery-Dev");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_app_identifier_never_collides_with_zed() {
+        assert!(super::app_identifier().starts_with("Brewery-Editor-"));
     }
 }
