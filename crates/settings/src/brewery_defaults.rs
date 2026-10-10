@@ -44,3 +44,9 @@ fn test_brewery_icon_theme_is_default() {
     assert_eq!(d["icon_theme"]["dark"], Value::String("Brewery Icons Dark".into()));
     assert_eq!(d["icon_theme"]["light"], Value::String("Brewery Icons Light".into()));
 }
+
+#[test]
+fn test_jetbrains_keymap_is_default() {
+    let d = defaults();
+    assert_eq!(d["base_keymap"], Value::String("JetBrains".into()));
+}

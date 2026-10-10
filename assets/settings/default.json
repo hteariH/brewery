@@ -30,7 +30,8 @@
   // 7. "Emacs"
   // 8. "Cursor"
   // 9. "None"
-  "base_keymap": "Zed",
+  // brewery: IntelliJ shortcuts by default
+  "base_keymap": "JetBrains",
   // The name of a font to use for rendering text in the editor
   // ".ZedMono" currently aliases to Lilex
   // but this may change in the future.
