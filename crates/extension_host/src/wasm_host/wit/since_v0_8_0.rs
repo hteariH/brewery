@@ -1095,8 +1095,18 @@ impl ExtensionImports for WasmState {
 
             // brewery: retry flaky downloads (jdtls is ~50 MB)
             let host = self.host.clone();
+            // Only clean up a partial download we created ourselves: never delete
+            // pre-existing content or the extension's work dir itself.
+            let cleanup_allowed = destination_path != extension_work_dir
+                && host
+                    .fs
+                    .metadata(&destination_path)
+                    .await
+                    .map(|metadata| metadata.is_none())
+                    .unwrap_or(false);
             run_with_retry(
                 &url,
+                cleanup_allowed,
                 || download_attempt(&host, &url, &destination_path, &path, file_type),
                 || async {
                     let options = fs::RemoveOptions {
@@ -1166,8 +1176,11 @@ fn should_retry(attempt: usize, error: &DownloadError) -> Option<std::time::Dura
     })
 }
 
+// Filesystem errors during write/extract are deliberately treated as retryable: they
+// cannot be told apart from body-read errors inside `create_file_with`.
 async fn run_with_retry<A, AFut, C, CFut, S, SFut>(
     url: &str,
+    cleanup_allowed: bool,
     mut attempt_download: A,
     mut cleanup: C,
     mut sleep: S,
@@ -1192,7 +1205,9 @@ where
                     "download of {url} failed on attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS}, retrying in {delay:?}: {:#}",
                     error.into_anyhow()
                 );
-                cleanup().await;
+                if cleanup_allowed {
+                    cleanup().await;
+                }
                 sleep(delay).await;
                 attempt += 1;
             }
@@ -1290,6 +1305,7 @@ mod download_retry_tests {
         let sleeps = RefCell::new(Vec::new());
         let result = futures::executor::block_on(run_with_retry(
             "https://example.com/jdtls.tar.gz",
+            true,
             || {
                 calls.set(calls.get() + 1);
                 let outcome = if calls.get() == 1 {
@@ -1319,6 +1335,7 @@ mod download_retry_tests {
         let calls = Cell::new(0);
         let result = futures::executor::block_on(run_with_retry(
             "https://example.com/missing",
+            true,
             || {
                 calls.set(calls.get() + 1);
                 async { Err(DownloadError::Status(404)) }
@@ -1335,6 +1352,7 @@ mod download_retry_tests {
         let calls = Cell::new(0);
         let result = futures::executor::block_on(run_with_retry(
             "https://example.com/flaky",
+            true,
             || {
                 calls.set(calls.get() + 1);
                 async { Err(io_error()) }
@@ -1344,5 +1362,32 @@ mod download_retry_tests {
         ));
         assert!(result.is_err());
         assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn preexisting_target_is_never_cleaned_up() {
+        let cleanups = Cell::new(0);
+        let calls = Cell::new(0);
+        let result = futures::executor::block_on(run_with_retry(
+            "https://example.com/jdtls.tar.gz",
+            false,
+            || {
+                calls.set(calls.get() + 1);
+                let outcome = if calls.get() == 1 {
+                    Err(io_error())
+                } else {
+                    Ok(())
+                };
+                async move { outcome }
+            },
+            || {
+                cleanups.set(cleanups.get() + 1);
+                async {}
+            },
+            |_| async {},
+        ));
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cleanups.get(), 0);
     }
 }
