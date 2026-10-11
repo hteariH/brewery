@@ -897,7 +897,8 @@
     // Default width of the project panel.
     "default_width": 240,
     // Where to dock the project panel. Can be 'left' or 'right'.
-    "dock": "right",
+    // brewery: IntelliJ keeps this tool window on the left
+    "dock": "left",
     // Spacing between worktree entries in the project panel. Can be 'comfortable' or 'standard'.
     "entry_spacing": "comfortable",
     // Whether to show file icons in the project panel.
@@ -1021,7 +1022,8 @@
     // Default width of the outline panel.
     "default_width": 300,
     // Where to dock the outline panel. Can be 'left' or 'right'.
-    "dock": "right",
+    // brewery: IntelliJ keeps this tool window on the left
+    "dock": "left",
     // Whether to show file icons in the outline panel.
     "file_icons": true,
     // What to show for directories in the outline panel.
@@ -1094,7 +1096,8 @@
     // Whether to show the git panel button in the status bar.
     "button": true,
     // Where to dock the git panel. Can be 'left' or 'right'.
-    "dock": "right",
+    // brewery: IntelliJ keeps this tool window on the left
+    "dock": "left",
     // Default width of the git panel.
     "default_width": 360,
     // Style of the git status indicator in the panel.

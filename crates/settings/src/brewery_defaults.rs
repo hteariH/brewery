@@ -63,3 +63,14 @@ fn test_brewery_theme_selection_default_is_brewery() {
         other => panic!("expected dynamic theme selection, got {other:?}"),
     }
 }
+
+#[test]
+fn test_intellij_tool_window_placement() {
+    let d = defaults();
+    for panel in ["project_panel", "outline_panel", "git_panel"] {
+        assert_eq!(d[panel]["dock"], Value::String("left".into()), "{panel}");
+    }
+    for panel in ["terminal", "debugger"] {
+        assert_eq!(d[panel]["dock"], Value::String("bottom".into()), "{panel}");
+    }
+}
