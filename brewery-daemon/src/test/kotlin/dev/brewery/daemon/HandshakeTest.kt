@@ -21,6 +21,7 @@ class HandshakeTest {
         serverLauncher.startListening()
 
         val clientLauncher = Launcher.createLauncher(object : BreweryClient {
+            override fun springChanged(params: SpringChanged) {}
             override fun projectChanged(params: ProjectChanged) {}
         }, BreweryServer::class.java, clientIn, clientToServer)
         clientLauncher.startListening()

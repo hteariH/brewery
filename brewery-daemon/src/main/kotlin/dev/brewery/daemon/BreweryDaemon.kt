@@ -4,6 +4,8 @@ import dev.brewery.daemon.project.GradleModelReader
 import dev.brewery.daemon.project.MavenModelReader
 import dev.brewery.daemon.project.detectBuildTool
 import dev.brewery.daemon.project.isBuildFileName
+import dev.brewery.daemon.spring.SpringModel
+import dev.brewery.daemon.spring.SpringScanner
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.ResponseError
 import java.io.IOException
@@ -38,10 +40,15 @@ class BreweryDaemon(
     private var cached: CompletableFuture<ProjectModel>? = null
     private var watcher: BuildFileWatcher? = null
     private var pendingNotification: ScheduledFuture<*>? = null
+    private var cachedSpring: CompletableFuture<SpringModel>? = null
+    private var pendingSpringNotification: ScheduledFuture<*>? = null
+    private val springScanner = SpringScanner()
 
     // One import at a time: an invalidation during a running import just queues the next one behind it
     // instead of racing a parallel Gradle/Maven run against the same project.
     private val importer = Executors.newSingleThreadExecutor(daemonThreads("brewery-import"))
+    // Scanning parses every source file, so it gets its own thread rather than delaying the next import.
+    private val scanner = Executors.newSingleThreadExecutor(daemonThreads("brewery-spring-scan"))
     private val notifier = Executors.newSingleThreadScheduledExecutor(daemonThreads("brewery-notify"))
 
     fun connect(client: BreweryClient) {
@@ -64,9 +71,12 @@ class BreweryDaemon(
             watcher = null
             pendingNotification?.cancel(false)
             pendingNotification = null
+            pendingSpringNotification?.cancel(false)
+            pendingSpringNotification = null
         }
         notifier.shutdownNow()
         importer.shutdownNow()
+        scanner.shutdownNow()
     }
 
     override fun openProject(params: OpenProjectParams): CompletableFuture<Any?> {
@@ -80,7 +90,7 @@ class BreweryDaemon(
         }
         // Built before any state changes, so a failure here cannot leave a half-switched project.
         val newWatcher = try {
-            BuildFileWatcher(dir) { onBuildFileChanged(dir) }
+            BuildFileWatcher(dir, { onBuildFileChanged(dir) }, { onJavaSourceChanged(dir) })
         } catch (e: Exception) {
             System.err.println("brewery: build-file watching disabled for $dir: $e")
             null
@@ -90,9 +100,12 @@ class BreweryDaemon(
             watcher = newWatcher
             root = dir
             cached = null
+            cachedSpring = null
             // A notification armed for the previous project would tell the client to refresh the wrong one.
             pendingNotification?.cancel(false)
             pendingNotification = null
+            pendingSpringNotification?.cancel(false)
+            pendingSpringNotification = null
         }
         return CompletableFuture.completedFuture(null)
     }
@@ -105,6 +118,46 @@ class BreweryDaemon(
             // client cancels a request, and that must not cancel the import other callers share.
             return shared.thenApply { it }
         }
+    }
+
+    override fun springModel(params: SpringModelParams): CompletableFuture<SpringModel> {
+        synchronized(lock) {
+            val dir = root ?: return failed(ErrorCodes.NOT_OPENED, "No project is open")
+            val shared = cachedSpring ?: startScan(dir).also { cachedSpring = it }
+            return shared.thenApply { it }
+        }
+    }
+
+    // Caller holds [lock].
+    private fun startScan(dir: Path): CompletableFuture<SpringModel> {
+        val model = cached ?: startImport(dir).also { cached = it }
+        val future = CompletableFuture<SpringModel>()
+        model.whenComplete { project, error ->
+            if (error != null) {
+                future.completeExceptionally(error)
+                return@whenComplete
+            }
+            try {
+                scanner.execute {
+                    // Same staleness check as imports: the project may have been replaced while this waited.
+                    if (synchronized(lock) { root != dir }) {
+                        future.cancel(false)
+                        return@execute
+                    }
+                    try {
+                        future.complete(springScanner.scan(project))
+                    } catch (e: Throwable) {
+                        future.completeExceptionally(e)
+                    }
+                }
+            } catch (e: RejectedExecutionException) {
+                future.completeExceptionally(e)
+            }
+        }
+        future.whenComplete { _, error ->
+            if (error != null) synchronized(lock) { if (cachedSpring === future) cachedSpring = null }
+        }
+        return future
     }
 
     private fun startImport(dir: Path): CompletableFuture<ProjectModel> {
@@ -165,6 +218,8 @@ class BreweryDaemon(
             if (root != dir) return
             // Dropped immediately so a request arriving inside the debounce window already re-imports.
             cached = null
+            // The module list decides which source roots exist.
+            cachedSpring = null
             // Trailing edge: every event restarts the timer, so the client hears about a burst once, after
             // the last write, and its re-import sees the finished files rather than a half-saved set.
             pendingNotification?.cancel(false)
@@ -184,6 +239,26 @@ class BreweryDaemon(
         }
     }
 
+    internal fun onJavaSourceChanged(dir: Path) {
+        synchronized(lock) {
+            if (root != dir) return
+            cachedSpring = null
+            pendingSpringNotification?.cancel(false)
+            try {
+                lateinit var task: ScheduledFuture<*>
+                task = notifier.schedule({
+                    val current = synchronized(lock) {
+                        (pendingSpringNotification === task).also { if (it) pendingSpringNotification = null }
+                    }
+                    if (current) client?.springChanged(SpringChanged())
+                }, debounceMillis, TimeUnit.MILLISECONDS)
+                pendingSpringNotification = task
+            } catch (_: RejectedExecutionException) {
+                // Closed while an event was in flight.
+            }
+        }
+    }
+
     private companion object {
         const val MAX_MESSAGE = 2000
         const val DEFAULT_DEBOUNCE_MILLIS = 500L
@@ -196,10 +271,14 @@ class BreweryDaemon(
 }
 
 /**
- * Watches the project root and its module directories for build-file edits.
- * Runs on its own daemon thread so it never keeps the JVM alive.
+ * Watches the project root and its module directories for build-file edits, and every `src/main/java`
+ * tree for Java edits. Runs on its own daemon thread so it never keeps the JVM alive.
  */
-private class BuildFileWatcher(root: Path, private val onChange: () -> Unit) : AutoCloseable {
+private class BuildFileWatcher(
+    private val root: Path,
+    private val onBuildChange: () -> Unit,
+    private val onJavaChange: () -> Unit,
+) : AutoCloseable {
     private val service: WatchService = root.fileSystem.newWatchService()
     private val skipped = setOf("build", "target", "node_modules", ".git", ".gradle", ".idea")
     private val thread = Thread(::run, "brewery-build-watcher").apply { isDaemon = true }
@@ -214,15 +293,37 @@ private class BuildFileWatcher(root: Path, private val onChange: () -> Unit) : A
         thread.start()
     }
 
-    private fun register(root: Path) {
-        // Module layouts are shallow; a bounded walk avoids registering whole dependency trees.
+    private fun isJavaRoot(dir: Path): Boolean {
+        val rel = root.relativize(dir)
+        val n = rel.nameCount
+        return n >= 3 && rel.getName(n - 1).toString() == "java" && rel.getName(n - 2).toString() == "main" &&
+            rel.getName(n - 3).toString() == "src"
+    }
+
+    private fun underJavaRoot(dir: Path): Boolean {
+        var current: Path? = dir
+        while (current != null && current != root) {
+            if (isJavaRoot(current)) return true
+            current = current.parent
+        }
+        return false
+    }
+
+    private fun register(start: Path) {
+        // Module layouts are shallow; a bounded walk avoids registering whole dependency trees. The walk may
+        // go deeper only along src/main/java, where package directories nest much further.
         Files.walkFileTree(
-            root,
+            start,
             emptySet(),
-            MAX_DEPTH,
+            Int.MAX_VALUE,
             object : SimpleFileVisitor<Path>() {
                 override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
                     if (dir != root && dir.fileName.toString() in skipped) return FileVisitResult.SKIP_SUBTREE
+                    val depth = root.relativize(dir).nameCount
+                    val inJava = underJavaRoot(dir)
+                    val name = dir.fileName.toString()
+                    val towardsJava = name == "src" || (name == "main" && dir.parent?.fileName?.toString() == "src")
+                    if (depth > MAX_DEPTH && !inJava && !towardsJava) return FileVisitResult.SKIP_SUBTREE
                     runCatching {
                         dir.register(
                             service,
@@ -243,16 +344,40 @@ private class BuildFileWatcher(root: Path, private val onChange: () -> Unit) : A
         try {
             while (true) {
                 val key = service.take()
-                val relevant = key.pollEvents().any {
-                    it.kind() == StandardWatchEventKinds.OVERFLOW ||
-                        (it.context() as? Path)?.fileName?.toString()?.let(::isBuildFileName) == true
+                val dir = key.watchable() as? Path
+                var build = false
+                var java = false
+                val inJava = dir != null && underJavaRoot(dir)
+                for (event in key.pollEvents()) {
+                    if (event.kind() == StandardWatchEventKinds.OVERFLOW) {
+                        build = true
+                        java = true
+                        continue
+                    }
+                    val name = (event.context() as? Path)?.fileName?.toString() ?: continue
+                    if (isBuildFileName(name)) build = true
+                    // A name without an extension may be a package directory appearing or disappearing.
+                    if (inJava && (name.endsWith(".java") || !name.contains('.'))) {
+                        java = true
+                        if (event.kind() == StandardWatchEventKinds.ENTRY_CREATE) {
+                            val created = dir.resolve(name)
+                            if (Files.isDirectory(created)) runCatching { register(created) }
+                        }
+                    }
                 }
                 key.reset()
-                if (relevant) {
+                if (build) {
                     try {
-                        onChange()
+                        onBuildChange()
                     } catch (e: Exception) {
                         System.err.println("brewery: project/changed failed: $e")
+                    }
+                }
+                if (java) {
+                    try {
+                        onJavaChange()
+                    } catch (e: Exception) {
+                        System.err.println("brewery: spring/changed failed: $e")
                     }
                 }
             }

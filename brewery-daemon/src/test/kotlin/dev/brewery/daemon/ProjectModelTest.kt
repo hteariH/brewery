@@ -84,6 +84,7 @@ class ProjectModelTest {
         daemon.connect(serverLauncher.remoteProxy)
         serverLauncher.startListening()
         val clientLauncher = Launcher.createLauncher(object : BreweryClient {
+            override fun springChanged(params: SpringChanged) {}
             override fun projectChanged(params: ProjectChanged) {}
         }, BreweryServer::class.java, clientIn, clientToServer)
         clientLauncher.startListening()
@@ -119,6 +120,7 @@ class ProjectModelTest {
         val changed = CountDownLatch(1)
         val daemon = BreweryDaemon()
         daemon.connect(object : BreweryClient {
+            override fun springChanged(params: SpringChanged) {}
             override fun projectChanged(params: ProjectChanged) = changed.countDown()
         })
         daemon.openProject(OpenProjectParams(dir.toString())).get(10, TimeUnit.SECONDS)
@@ -205,6 +207,7 @@ class ProjectModelTest {
         val count = AtomicInteger()
         val daemon = slowDaemon(CountDownLatch(0), debounce = 200)
         daemon.connect(object : BreweryClient {
+            override fun springChanged(params: SpringChanged) {}
             override fun projectChanged(params: ProjectChanged) {
                 count.incrementAndGet()
             }
@@ -227,6 +230,7 @@ class ProjectModelTest {
         val count = AtomicInteger()
         val daemon = slowDaemon(CountDownLatch(0), debounce = 1500)
         daemon.connect(object : BreweryClient {
+            override fun springChanged(params: SpringChanged) {}
             override fun projectChanged(params: ProjectChanged) {
                 count.incrementAndGet()
             }
@@ -252,6 +256,7 @@ class ProjectModelTest {
         val count = AtomicInteger()
         val daemon = slowDaemon(CountDownLatch(0), debounce = 1500)
         daemon.connect(object : BreweryClient {
+            override fun springChanged(params: SpringChanged) {}
             override fun projectChanged(params: ProjectChanged) {
                 count.incrementAndGet()
             }

@@ -6,6 +6,7 @@ import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonWriter
 import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
 import org.eclipse.lsp4j.jsonrpc.services.JsonRequest
+import dev.brewery.daemon.spring.SpringModel
 import java.util.concurrent.CompletableFuture
 
 const val PROTOCOL_VERSION = 1
@@ -16,6 +17,8 @@ data class InitializeResult(val protocolVersion: Int, val daemonVersion: String)
 data class OpenProjectParams(val rootDir: String)
 class ProjectModelParams
 class ProjectChanged
+class SpringModelParams
+class SpringChanged
 
 enum class BuildTool { gradle, maven, none }
 data class BuildTask(val name: String, val group: String?, val description: String?)
@@ -54,8 +57,10 @@ interface BreweryServer {
     @JsonNotification("exit") fun exit()
     @JsonRequest("project/open") fun openProject(params: OpenProjectParams): CompletableFuture<Any?>
     @JsonRequest("project/model") fun projectModel(params: ProjectModelParams): CompletableFuture<ProjectModel>
+    @JsonRequest("spring/model") fun springModel(params: SpringModelParams): CompletableFuture<SpringModel>
 }
 
 interface BreweryClient {
     @JsonNotification("project/changed") fun projectChanged(params: ProjectChanged)
+    @JsonNotification("spring/changed") fun springChanged(params: SpringChanged)
 }

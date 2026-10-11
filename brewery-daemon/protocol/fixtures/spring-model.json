@@ -1,0 +1,24 @@
+{
+  "applications": [
+    {
+      "name": "PetshopApplication",
+      "mainClass": "com.example.petshop.PetshopApplication",
+      "modulePath": ":",
+      "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/PetshopApplication.java",
+      "line": 6
+    }
+  ],
+  "beans": [
+    { "name": "appConfig", "type": "com.example.petshop.AppConfig", "kind": "configuration", "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/AppConfig.java", "line": 7 },
+    { "name": "clock", "type": "Clock", "kind": "bean", "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/AppConfig.java", "line": 9 },
+    { "name": "ownerController", "type": "com.example.petshop.OwnerController", "kind": "restController", "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/OwnerController.java", "line": 10 },
+    { "name": "ownerRepository", "type": "com.example.petshop.OwnerRepository", "kind": "repository", "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/OwnerRepository.java", "line": 7 },
+    { "name": "ownerService", "type": "com.example.petshop.OwnerService", "kind": "service", "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/OwnerService.java", "line": 6 }
+  ],
+  "endpoints": [
+    { "method": "GET", "path": "/owners", "handler": "OwnerController#list", "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/OwnerController.java", "line": 19 },
+    { "method": "GET", "path": "/owners/{id}", "handler": "OwnerController#get", "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/OwnerController.java", "line": 24 },
+    { "method": "POST", "path": "/owners", "handler": "OwnerController#create", "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/OwnerController.java", "line": 29 },
+    { "method": "ANY", "path": "/owners/legacy", "handler": "OwnerController#legacy", "file": "/path/to/spring-petshop/src/main/java/com/example/petshop/OwnerController.java", "line": 34 }
+  ]
+}
