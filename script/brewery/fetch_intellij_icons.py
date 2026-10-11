@@ -14,6 +14,7 @@ from pathlib import Path
 
 COMMIT = "d0936c36705bdaf87deca0f157a40c651345600c"
 BASE = f"https://raw.githubusercontent.com/JetBrains/intellij-community/{COMMIT}/platform/icons/src/expui"
+NOTICE_URL = f"https://raw.githubusercontent.com/JetBrains/intellij-community/{COMMIT}/NOTICE.txt"
 OUT = Path("crates/brewery_theme/icons")
 ZED_ICON_THEME = Path("crates/theme/src/icon_theme.rs")
 
@@ -55,6 +56,12 @@ def fetch(name: str, variant: str) -> bytes:
     raise SystemExit(f"missing icon {name} ({variant})")
 
 
+def upstream_notice() -> str:
+    # Apache 2.0 section 4(d): the upstream NOTICE text travels with the icons.
+    with urllib.request.urlopen(NOTICE_URL, timeout=30) as response:
+        return response.read().decode("utf-8").replace("\r\n", "\n")
+
+
 def main() -> None:
     keys = zed_icon_keys()
     mapping = {key: SPECIFIC.get(key, FALLBACK) for key in keys}
@@ -93,7 +100,10 @@ def main() -> None:
         f"(commit {COMMIT}, platform/icons/src/expui),\n"
         "licensed under the Apache License, Version 2.0:\n"
         "https://www.apache.org/licenses/LICENSE-2.0\n"
-        "A copy of the Apache License 2.0 is in LICENSE-APACHE at the root of this repository.\n",
+        "A copy of the Apache License 2.0 is in LICENSE-APACHE at the root of this repository.\n"
+        "\n"
+        "The NOTICE file of JetBrains/intellij-community at that commit follows verbatim.\n"
+        "\n" + upstream_notice(),
         encoding="utf-8",
         newline="\n",
     )
