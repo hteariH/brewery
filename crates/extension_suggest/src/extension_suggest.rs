@@ -108,7 +108,8 @@ const SUGGESTIONS_BY_EXTENSION_ID: &[(&str, &[&str])] = &[
     ("json5", &["json5"]),
     ("julia", &["jl"]),
     ("just", &["JUSTFILE", "Justfile", "just", "justfile"]),
-    ("kotlin", &["kt", "kts"]),
+    // brewery: .kts (Gradle KTS) is handled by the Java extension, not Kotlin
+    ("kotlin", &["kt"]),
     (
         "latex",
         &[
@@ -405,6 +406,16 @@ mod tests {
                 file_name_or_extension: ".gitattributes".into()
             })
         );
+    }
+
+    // brewery: Gradle KTS files must not prompt for the Kotlin extension.
+    #[test]
+    pub fn test_kotlin_suggested_for_kt_but_not_kts() {
+        assert_eq!(
+            suggest_extension(rel_path("Main.kt")).map(|s| s.extension_id),
+            Some("kotlin".into())
+        );
+        assert_eq!(suggest_extension(rel_path("build.gradle.kts")), None);
     }
 
     #[test]

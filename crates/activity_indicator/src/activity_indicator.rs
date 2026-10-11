@@ -240,11 +240,18 @@ impl ActivityIndicator {
             this
         });
 
+        // brewery: a server that keeps failing (e.g. an extension whose download 404s)
+        // re-reports the same error; remember what was shown so repeated clicks on the
+        // status item do not pile up identical log tabs.
+        let mut shown_statuses = HashSet::default();
         cx.subscribe_in(&this, window, move |_, _, event, window, cx| match event {
             Event::ShowStatus {
                 server_name,
                 status,
             } => {
+                if !should_open_status_tab(&mut shown_statuses, server_name, status) {
+                    return;
+                }
                 let create_buffer =
                     project.update(cx, |project, cx| project.create_buffer(None, false, cx));
                 let status = status.clone();
@@ -726,6 +733,15 @@ impl ActivityIndicator {
             })),
         })
     }
+}
+
+// brewery: true the first time a given server/message pair is shown.
+fn should_open_status_tab(
+    shown: &mut HashSet<(LanguageServerName, SharedString)>,
+    server_name: &LanguageServerName,
+    status: &SharedString,
+) -> bool {
+    shown.insert((server_name.clone(), status.clone()))
 }
 
 impl EventEmitter<Event> for ActivityIndicator {}
