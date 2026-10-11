@@ -5,6 +5,7 @@ use project::Project;
 use serde_json::json;
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use util::path;
 use workspace::{AppState, MultiWorkspace};
 
@@ -257,4 +258,130 @@ fn reload_refetches_unless_the_daemon_is_unreachable() {
         reload_action(false, Some(ErrorKind::Import)),
         ReloadAction::Restart
     );
+}
+
+#[test]
+fn restart_policy_allows_three_restarts_per_window() {
+    let mut policy = RestartPolicy::default();
+    let start = Instant::now();
+    assert!(policy.allow(start));
+    assert!(policy.allow(start + Duration::from_secs(10)));
+    assert!(policy.allow(start + Duration::from_secs(20)));
+    assert!(!policy.allow(start + Duration::from_secs(30)));
+    // A refused restart is not recorded, so it does not extend the ban.
+    assert!(!policy.allow(start + Duration::from_secs(299)));
+    // The first restart leaves the window after five minutes.
+    assert!(policy.allow(start + Duration::from_secs(300)));
+    assert!(!policy.allow(start + Duration::from_secs(301)));
+}
+
+#[test]
+fn restart_policy_reset_forgets_history() {
+    let mut policy = RestartPolicy::default();
+    let now = Instant::now();
+    for _ in 0..3 {
+        assert!(policy.allow(now));
+    }
+    assert!(!policy.allow(now));
+    policy.reset();
+    assert!(policy.allow(now));
+}
+
+type ExitHandlers = Arc<std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+
+/// A daemon that serves an empty model until the test makes it die.
+struct FakeDaemon {
+    exit_handlers: ExitHandlers,
+}
+
+impl Daemon for FakeDaemon {
+    fn project_model(&self) -> LocalBoxFuture<'_, Result<ProjectModel>> {
+        async { Ok(model(BuildTool::Gradle, Path::new("/root"))) }.boxed_local()
+    }
+
+    fn on_project_changed(&self, _: Box<dyn Fn() + Send>) -> Box<dyn Any> {
+        Box::new(())
+    }
+
+    fn on_exit(&self, f: Box<dyn FnOnce() + Send>) {
+        self.exit_handlers.lock().unwrap().push(f);
+    }
+}
+
+fn dying_daemon(
+    started: Rc<RefCell<usize>>,
+    exit_handlers: ExitHandlers,
+) -> StartDaemon {
+    Rc::new(move |_, _| {
+        *started.borrow_mut() += 1;
+        let daemon: Rc<dyn Daemon> = Rc::new(FakeDaemon {
+            exit_handlers: exit_handlers.clone(),
+        });
+        async move { Ok(daemon) }.boxed_local()
+    })
+}
+
+#[gpui::test]
+async fn a_dead_daemon_is_restarted_a_few_times_then_reported(cx: &mut TestAppContext) {
+    let app_state = init_test(cx);
+    app_state
+        .fs
+        .as_fake()
+        .insert_tree(path!("/root"), json!({ "build.gradle": "" }))
+        .await;
+    let project = Project::test(app_state.fs.clone(), [path!("/root").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let started = Rc::new(RefCell::new(0));
+    let exit_handlers: ExitHandlers = Default::default();
+    let start_daemon = dying_daemon(started.clone(), exit_handlers.clone());
+    let panel = workspace.update_in(cx, |workspace, window, cx| {
+        let weak = workspace.weak_handle();
+        let project = workspace.project().clone();
+        let panel = cx.new(|cx| BuildPanel::new(weak, project, start_daemon, window, cx));
+        workspace.add_panel(panel.clone(), window, cx);
+        panel
+    });
+
+    cx.dispatch_action(ToggleBuildPanel);
+    cx.run_until_parked();
+    assert_eq!(*started.borrow(), 1);
+    panel.read_with(cx, |panel, _| {
+        assert!(panel.model.is_some());
+        assert!(panel.error.is_none());
+    });
+
+    let kill = |cx: &mut VisualTestContext| {
+        let handlers = std::mem::take(&mut *exit_handlers.lock().unwrap());
+        assert_eq!(handlers.len(), 1, "exactly the live daemon is watched");
+        handlers.into_iter().for_each(|handler| handler());
+        cx.run_until_parked();
+    };
+
+    for restarts in 1..=3 {
+        kill(cx);
+        assert_eq!(*started.borrow(), 1 + restarts);
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.error.is_none());
+            assert!(panel.model.is_some());
+        });
+    }
+
+    kill(cx);
+    assert_eq!(*started.borrow(), 4, "the fourth death is not restarted");
+    panel.read_with(cx, |panel, _| {
+        let error = panel.error.as_ref().expect("the failure should be shown");
+        assert_eq!(error.kind, ErrorKind::Connection);
+        assert_eq!(error.message, DAEMON_KEEPS_STOPPING);
+        assert!(panel.client.is_none());
+    });
+
+    // Reload is the way out, and it gets a fresh allowance.
+    panel.update(cx, |panel, cx| panel.reload(cx));
+    cx.run_until_parked();
+    assert_eq!(*started.borrow(), 5);
+    panel.read_with(cx, |panel, _| assert!(panel.error.is_none()));
+    kill(cx);
+    assert_eq!(*started.borrow(), 6);
 }

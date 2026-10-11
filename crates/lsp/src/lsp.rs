@@ -1492,6 +1492,17 @@ impl LanguageServer {
         self.server.lock().as_ref().map(|child| child.id())
     }
 
+    // brewery: lets the daemon client notice that the process died; the language servers
+    // of Zed learn about it through the project instead.
+    /// Whether the process has terminated on its own. A server that was shut down
+    /// through `shutdown` has no process left to ask, so it never counts as exited.
+    pub fn has_exited(&self) -> bool {
+        self.server
+            .lock()
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_status(), Ok(Some(_))))
+    }
+
     /// Get the binary information of the running language server.
     pub fn binary(&self) -> &LanguageServerBinary {
         &self.binary

@@ -12,7 +12,7 @@ pub use jdk::{JdkCandidate, find_daemon_jar, find_java, parse_release_version, p
 pub use protocol::{BuildModule, BuildTask, BuildTool, PROTOCOL_VERSION, ProjectModel};
 
 use anyhow::{Context as _, Error, Result, bail};
-use gpui::{AppContext as _, AsyncApp};
+use gpui::{AppContext as _, AsyncApp, BackgroundExecutor, Task};
 use parking_lot::Mutex;
 use protocol::{
     GetProjectModel, Initialize, InitializeParams, OpenProject, OpenProjectParams, ProjectChanged,
@@ -29,6 +29,8 @@ const MIN_JAVA_MAJOR: u32 = 21;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// The first Gradle import may download a distribution, so this is generous.
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(600);
+/// `lsp::LanguageServer` has no exit event, so the process is polled.
+const EXIT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Whether a daemon call failed because the build files could not be imported, as opposed to the
 /// daemon being unreachable. The first is fixed by editing the build; the second needs a restart.
@@ -46,6 +48,9 @@ pub fn is_import_error(error: &Error) -> bool {
 /// down on drop. `shutdown` is for callers that want to wait for that to finish.
 pub struct DaemonClient {
     server: Arc<lsp::LanguageServer>,
+    executor: BackgroundExecutor,
+    /// Dropped with the client, so a deliberate shutdown never reports an exit.
+    exit_watch: Mutex<Option<Task<()>>>,
 }
 
 impl DaemonClient {
@@ -75,6 +80,8 @@ impl DaemonClient {
         .context("failed to start brewery-daemon")?;
         let client = Self {
             server: Arc::new(server),
+            executor: cx.background_executor().clone(),
+            exit_watch: Mutex::new(None),
         };
 
         match client.handshake(root).await {
@@ -132,6 +139,23 @@ impl DaemonClient {
     pub fn on_project_changed(&self, f: impl Fn() + Send + 'static) -> lsp::Subscription {
         self.server
             .on_notification::<ProjectChanged, _>(move |_, _| f())
+    }
+
+    /// Calls `f` once if the daemon process terminates by itself. Nothing is reported once
+    /// the client is dropped or shut down, so only unexpected deaths show up here.
+    pub fn on_exit(&self, f: impl FnOnce() + Send + 'static) {
+        let server = self.server.clone();
+        let executor = self.executor.clone();
+        let watch = self.executor.spawn(async move {
+            loop {
+                executor.timer(EXIT_POLL_INTERVAL).await;
+                if server.has_exited() {
+                    f();
+                    return;
+                }
+            }
+        });
+        *self.exit_watch.lock() = Some(watch);
     }
 
     pub async fn shutdown(self) {
