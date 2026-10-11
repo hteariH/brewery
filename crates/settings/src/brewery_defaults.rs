@@ -50,3 +50,16 @@ fn test_jetbrains_keymap_is_default() {
     let d = defaults();
     assert_eq!(d["base_keymap"], Value::String("JetBrains".into()));
 }
+
+#[test]
+fn test_brewery_theme_selection_default_is_brewery() {
+    // The Settings UI inserts `ThemeSelection::default()` when the user has no
+    // theme key yet, so it must not fall back to Zed's One Light/One Dark.
+    match crate::ThemeSelection::default() {
+        crate::ThemeSelection::Dynamic { light, dark, .. } => {
+            assert_eq!(light.0.as_ref(), "Brewery Light");
+            assert_eq!(dark.0.as_ref(), "Brewery Dark");
+        }
+        other => panic!("expected dynamic theme selection, got {other:?}"),
+    }
+}

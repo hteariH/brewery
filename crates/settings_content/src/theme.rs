@@ -348,8 +348,8 @@ impl Default for ThemeSelection {
     fn default() -> Self {
         Self::Dynamic {
             mode: ThemeAppearanceMode::default(),
-            light: ThemeName(DEFAULT_LIGHT_THEME.into()),
-            dark: ThemeName(DEFAULT_DARK_THEME.into()),
+            light: ThemeName("Brewery Light".into()), // brewery: Brewery default instead of One Light
+            dark: ThemeName("Brewery Dark".into()), // brewery: Brewery default instead of One Dark
         }
     }
 }

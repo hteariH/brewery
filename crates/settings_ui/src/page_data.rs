@@ -758,7 +758,12 @@ fn appearance_page() -> SettingsPage {
                                 return;
                             };
                             let settings_value = settings_content.theme.icon_theme.get_or_insert_with(|| {
-                                settings::IconThemeSelection::Static(settings::IconThemeName(theme::default_icon_theme().name.clone().into()))
+                                // brewery: Brewery icon themes instead of "Zed (Default)"
+                                settings::IconThemeSelection::Dynamic {
+                                    mode: settings::ThemeAppearanceMode::System,
+                                    light: settings::IconThemeName("Brewery Icons Light".into()),
+                                    dark: settings::IconThemeName("Brewery Icons Dark".into()),
+                                }
                             });
                             *settings_value = match value {
                                 settings::IconThemeSelectionDiscriminants::Static => {
