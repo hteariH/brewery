@@ -84,22 +84,40 @@ pub fn git_shell_candidates(
     candidates
 }
 
-/// Rewrites `ZED_*` path variables in `env` to the form a MSYS shell expects
-/// and returns the `(original, rewritten)` pairs, longest original first, so
-/// the same values can be rewritten where they were substituted into the
-/// task's command text.
+/// Zed task variables (`task::VariableName`) holding absolute paths.
+const ABSOLUTE_PATH_VARIABLES: [&str; 5] = [
+    "ZED_FILE",
+    "ZED_DIRNAME",
+    "ZED_WORKTREE_ROOT",
+    "ZED_MAIN_GIT_WORKTREE",
+    "ZED_GIT_REPOSITORY_PATH",
+];
+
+/// Zed task variables holding paths relative to the worktree root.
+const RELATIVE_PATH_VARIABLES: [&str; 2] = ["ZED_RELATIVE_FILE", "ZED_RELATIVE_DIR"];
+
+/// Rewrites Zed's path-valued task variables in `env` to the form a MSYS
+/// shell expects and returns the `(original, rewritten)` pairs, longest
+/// original first, so the same values can be rewritten where they were
+/// substituted into the task's command text.
+///
+/// Only the variables Zed defines as paths are touched: selected text,
+/// symbols and extension-provided (`ZED_CUSTOM_*`) values may look like
+/// Windows paths but are the user's data.
 pub fn msys_env(env: &mut HashMap<String, String>) -> Vec<(String, String)> {
     let mut replacements = Vec::new();
     for (name, value) in env.iter_mut() {
-        if !name.starts_with("ZED_") {
+        let rewritten = if ABSOLUTE_PATH_VARIABLES.contains(&name.as_str()) {
+            match to_msys_path(value) {
+                Some(rewritten) => rewritten,
+                None => continue,
+            }
+        } else if RELATIVE_PATH_VARIABLES.contains(&name.as_str()) {
+            // Relative paths stay relative, but the script compares them
+            // against `/`-separated paths.
+            value.replace('\\', "/")
+        } else {
             continue;
-        }
-        let rewritten = match to_msys_path(value) {
-            Some(rewritten) => rewritten,
-            // Relative paths (`ZED_RELATIVE_FILE`) stay relative, but the
-            // script compares them against `/`-separated paths.
-            None if name.starts_with("ZED_RELATIVE_") => value.replace('\\', "/"),
-            None => continue,
         };
         if rewritten != *value {
             replacements.push((std::mem::replace(value, rewritten.clone()), rewritten));
@@ -111,12 +129,36 @@ pub fn msys_env(env: &mut HashMap<String, String>) -> Vec<(String, String)> {
     replacements
 }
 
-/// Replaces every original value with its rewritten form.
+/// Replaces every whole occurrence of an original value with its rewritten
+/// form. An occurrence must end where a path component ends, so `C:\proj`
+/// is not rewritten inside `C:\proj2\x`.
 pub fn rewrite_text(text: &str, replacements: &[(String, String)]) -> String {
+    fn ends_path(next: Option<char>) -> bool {
+        next.is_none_or(|next| {
+            matches!(next, '\\' | '/' | '"' | '\'' | ';' | ':') || next.is_whitespace()
+        })
+    }
+
     replacements
         .iter()
         .fold(text.to_owned(), |text, (original, rewritten)| {
-            text.replace(original.as_str(), rewritten)
+            if original.is_empty() {
+                return text;
+            }
+            let mut result = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            while let Some(index) = rest.find(original.as_str()) {
+                let after = &rest[index + original.len()..];
+                result.push_str(&rest[..index]);
+                if ends_path(after.chars().next()) {
+                    result.push_str(rewritten);
+                } else {
+                    result.push_str(original);
+                }
+                rest = after;
+            }
+            result.push_str(rest);
+            result
         })
 }
 
@@ -160,9 +202,18 @@ pub fn adapt_posix_task(
     // Left alone, Git's shell derives `$PWD` from the working directory but
     // reports its own mount points (`%TEMP%` becomes `/tmp`), and scripts
     // that strip `$PWD/` from `$ZED_FILE` then see two spellings of one
-    // directory. A `PWD` naming the working directory is kept as is.
-    if let Some(cwd) = cwd.and_then(|cwd| to_msys_path(&cwd.to_string_lossy())) {
-        env.insert("PWD".to_owned(), cwd);
+    // directory. A `PWD` naming the working directory is kept as is. With no
+    // task cwd the terminal starts in the project directory, which for a
+    // file's task is its worktree root (already rewritten above).
+    let pwd = match cwd {
+        Some(cwd) => to_msys_path(&cwd.to_string_lossy()),
+        None => env
+            .get("ZED_WORKTREE_ROOT")
+            .filter(|root| root.starts_with('/'))
+            .cloned(),
+    };
+    if let Some(pwd) = pwd {
+        env.insert("PWD".to_owned(), pwd);
     }
     true
 }
@@ -340,6 +391,92 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].0.len() >= pair[1].0.len())
         );
+    }
+
+    #[test]
+    fn converts_every_path_variable_zed_defines() {
+        let mut env = env_of(&[
+            ("ZED_MAIN_GIT_WORKTREE", r"C:\repo"),
+            ("ZED_GIT_REPOSITORY_PATH", r"C:\repo\.git"),
+        ]);
+        msys_env(&mut env);
+        assert_eq!(env["ZED_MAIN_GIT_WORKTREE"], "/c/repo");
+        assert_eq!(env["ZED_GIT_REPOSITORY_PATH"], "/c/repo/.git");
+    }
+
+    #[test]
+    fn leaves_non_path_variables_alone_even_if_they_look_like_paths() {
+        let original = env_of(&[
+            ("ZED_SELECTED_TEXT", r"C:\foo"),
+            ("ZED_SYMBOL", r"C:\foo"),
+            ("ZED_CUSTOM_x", r"C:\foo"),
+            ("ZED_RELATIVE_FILE_NOT_REALLY", r"a\b"),
+        ]);
+        let mut env = original.clone();
+        let replacements = msys_env(&mut env);
+        assert_eq!(env, original);
+        assert!(replacements.is_empty());
+        assert_eq!(
+            rewrite_text(r#"echo "C:\foo""#, &replacements),
+            r#"echo "C:\foo""#
+        );
+    }
+
+    #[test]
+    fn rewrites_only_whole_path_values() {
+        let mut env = env_of(&[("ZED_WORKTREE_ROOT", r"C:\proj")]);
+        let replacements = msys_env(&mut env);
+        assert_eq!(
+            rewrite_text(
+                r#"a=C:\proj2\x b="C:\proj" c='C:\proj' d=C:\proj\x e=C:\proj/x f=C:\proj;g=C:\proj:h C:\proj"#,
+                &replacements
+            ),
+            r#"a=C:\proj2\x b="/c/proj" c='/c/proj' d=/c/proj\x e=/c/proj/x f=/c/proj;g=/c/proj:h /c/proj"#
+        );
+    }
+
+    #[test]
+    fn rewrites_paths_with_spaces() {
+        let mut env = env_of(&[
+            ("ZED_FILE", r"C:\My Projects\demo\src\Main.java"),
+            ("ZED_WORKTREE_ROOT", r"C:\My Projects\demo"),
+        ]);
+        let replacements = msys_env(&mut env);
+        assert_eq!(
+            rewrite_text(
+                r#"f="C:\My Projects\demo\src\Main.java"; cd "C:\My Projects\demo""#,
+                &replacements
+            ),
+            r#"f="/c/My Projects/demo/src/Main.java"; cd "/c/My Projects/demo""#
+        );
+    }
+
+    #[test]
+    fn pwd_falls_back_to_worktree_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("Git").join("bin");
+        touch(&bin.join("sh.exe"));
+        let mut env = env_of(&[("ZED_WORKTREE_ROOT", r"C:\proj")]);
+        assert!(adapt_posix_task(
+            &mut Shell::Program("/bin/sh".to_owned()),
+            &mut None,
+            &mut [],
+            &mut env,
+            None,
+            std::slice::from_ref(&bin)
+        ));
+        assert_eq!(env["PWD"], "/c/proj");
+
+        let mut env = HashMap::default();
+        assert!(adapt_posix_task(
+            &mut Shell::Program("/bin/sh".to_owned()),
+            &mut None,
+            &mut [],
+            &mut env,
+            None,
+            std::slice::from_ref(&bin)
+        ));
+        assert!(!env.contains_key("PWD"));
     }
 
     #[test]
