@@ -1,16 +1,31 @@
 package dev.brewery.daemon
 
+import dev.brewery.daemon.springconfig.SpringConfigServer
 import org.eclipse.lsp4j.jsonrpc.Launcher
+import org.eclipse.lsp4j.launch.LSPLauncher
 import java.io.InputStream
 import java.io.OutputStream
 import kotlin.system.exitProcess
 
-fun main() {
+fun main(args: Array<String>) {
     // JSON-RPC owns the real stdout; anything else that prints (libraries, stray println) goes to stderr
     // so it can never corrupt the framed stream.
     val rpcOut = System.out
     System.setOut(System.err)
-    runDaemon(System.`in`, rpcOut) { exitProcess(it) }
+    if ("--spring-config-lsp" in args) {
+        runSpringConfigLsp(System.`in`, rpcOut) { exitProcess(it) }
+    } else {
+        runDaemon(System.`in`, rpcOut) { exitProcess(it) }
+    }
+}
+
+/** Serves the Spring configuration language server over [input]/[rpcOut] until EOF or the `exit` notification. */
+fun runSpringConfigLsp(input: InputStream, rpcOut: OutputStream, exit: (Int) -> Unit) {
+    val server = SpringConfigServer(onExit = { exit(0) })
+    val launcher = LSPLauncher.createServerLauncher(server, input, rpcOut)
+    server.connect(launcher.remoteProxy)
+    launcher.startListening().get()
+    exit(0)
 }
 
 /**

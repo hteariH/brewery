@@ -15,7 +15,7 @@ repositories {
 }
 
 dependencies {
-    implementation("org.eclipse.lsp4j:org.eclipse.lsp4j.jsonrpc:1.0.0")
+    implementation("org.eclipse.lsp4j:org.eclipse.lsp4j:1.0.0")
     implementation("org.gradle:gradle-tooling-api:9.8.1")
     implementation("org.apache.maven:maven-model:3.9.16")
     implementation("com.github.javaparser:javaparser-core:3.28.2")
