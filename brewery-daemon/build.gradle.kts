@@ -36,21 +36,66 @@ tasks.test {
 }
 
 // Shadow keeps only the first META-INF/LICENSE it meets and drops the rest, which would strip the notices
-// that Apache-licensed dependencies require us to ship. This collects every dependency's own license and
-// notice files into one file inside the jar instead.
+// that Apache-licensed dependencies require us to ship. This writes one section per runtime jar instead:
+// name, version, the licence declared in its POM (following <parent> POMs) and any licence/notice text
+// found inside the jar. It also lists the jars in build/notices/runtime-jars.txt so a test can check coverage.
 val thirdPartyNotices = tasks.register("thirdPartyNotices") {
-    val jars = configurations.runtimeClasspath
+    val runtime = configurations.runtimeClasspath
     val output = layout.buildDirectory.file("notices/THIRD-PARTY-NOTICES.txt")
-    inputs.files(jars)
-    outputs.file(output)
+    val jarList = layout.buildDirectory.file("notices/runtime-jars.txt")
+    inputs.files(runtime)
+    outputs.files(output, jarList)
     doLast {
-        val noticeName = Regex("""META-INF/(LICENSE|NOTICE|DEPENDENCIES)[^/]*""", RegexOption.IGNORE_CASE)
+        val fileName = Regex(
+            """(META-INF/(LICENSE|NOTICE|DEPENDENCIES)[^/]*|(LICENSE|NOTICE)[^/]*|about\.html)""",
+            RegexOption.IGNORE_CASE,
+        )
+        val pomCache = HashMap<String, org.w3c.dom.Element?>()
+        fun pomOf(group: String, name: String, version: String): org.w3c.dom.Element? =
+            pomCache.getOrPut("$group:$name:$version") {
+                runCatching {
+                    val cfg = project.configurations.detachedConfiguration(
+                        project.dependencies.create("$group:$name:$version@pom"),
+                    ).apply { isTransitive = false }
+                    val factory = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+                    factory.isNamespaceAware = false
+                    factory.newDocumentBuilder().parse(cfg.singleFile).documentElement
+                }.getOrNull()
+            }
+        fun org.w3c.dom.Element.child(tag: String): org.w3c.dom.Element? =
+            (0 until childNodes.length).map { childNodes.item(it) }
+                .filterIsInstance<org.w3c.dom.Element>().firstOrNull { it.tagName == tag }
+        fun org.w3c.dom.Element.childText(tag: String): String? = child(tag)?.textContent?.trim()
+        fun licensesOf(group: String, name: String, version: String, depth: Int = 0): List<Pair<String, String>> {
+            val pom = pomOf(group, name, version) ?: return emptyList()
+            val found = pom.child("licenses")?.let { l ->
+                (0 until l.childNodes.length).map { l.childNodes.item(it) }.filterIsInstance<org.w3c.dom.Element>()
+                    .filter { it.tagName == "license" }
+                    .map { (it.childText("name") ?: "unknown") to (it.childText("url") ?: "") }
+            }.orEmpty()
+            if (found.isNotEmpty() || depth > 5) return found
+            val parent = pom.child("parent") ?: return emptyList()
+            return licensesOf(
+                parent.childText("groupId") ?: return emptyList(),
+                parent.childText("artifactId") ?: return emptyList(),
+                parent.childText("version") ?: return emptyList(),
+                depth + 1,
+            )
+        }
+
+        val artifacts = runtime.get().resolvedConfiguration.resolvedArtifacts
+            .filter { it.file.extension == "jar" }
+            .sortedBy { it.file.name }
         val text = StringBuilder("Third-party notices for the dependencies bundled in brewery-daemon-all.jar\n")
-        for (jar in jars.get().files.sortedBy { it.name }.filter { it.extension == "jar" }) {
-            ZipFile(jar).use { zip ->
-                val entries = zip.entries().asSequence().filter { !it.isDirectory && noticeName.matches(it.name) }.toList()
-                if (entries.isEmpty()) return@use
-                text.append("\n==== ").append(jar.name).append(" ====\n")
+        for (artifact in artifacts) {
+            val id = artifact.moduleVersion.id
+            text.append("\n==== ").append(artifact.file.name).append(" (").append(id.group).append(':')
+                .append(id.name).append(':').append(id.version).append(") ====\n")
+            val licenses = licensesOf(id.group, id.name, id.version)
+            if (licenses.isEmpty()) text.append("License: not declared in POM\n")
+            for ((n, u) in licenses) text.append("License: ").append(n).append(if (u.isEmpty()) "" else " <$u>").append("\n")
+            ZipFile(artifact.file).use { zip ->
+                val entries = zip.entries().asSequence().filter { !it.isDirectory && fileName.matches(it.name) }.toList()
                 for (entry in entries.sortedBy { it.name }) {
                     text.append("\n--- ").append(entry.name).append(" ---\n")
                     text.append(zip.getInputStream(entry).readBytes().toString(Charsets.UTF_8).replace("\r\n", "\n")).append("\n")
@@ -58,11 +103,12 @@ val thirdPartyNotices = tasks.register("thirdPartyNotices") {
             }
         }
         output.get().asFile.apply { parentFile.mkdirs() }.writeText(text.toString())
+        jarList.get().asFile.writeText(artifacts.joinToString("\n", postfix = "\n") { it.file.name })
     }
 }
 
 tasks.shadowJar {
-    from(thirdPartyNotices)
+    from(thirdPartyNotices) { exclude("runtime-jars.txt") }
     archiveBaseName.set("brewery-daemon")
     archiveClassifier.set("all")
     archiveVersion.set("")

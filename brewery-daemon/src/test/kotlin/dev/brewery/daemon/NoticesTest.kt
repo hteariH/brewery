@@ -15,6 +15,14 @@ class NoticesTest {
             assertTrue(entry != null, "jar has no THIRD-PARTY-NOTICES.txt")
             val text = zip.getInputStream(entry).readBytes().toString(Charsets.UTF_8)
             assertTrue("Apache License" in text, "notices lack license text")
+
+            // The build writes the runtime jar list, so a dependency without a section fails here.
+            val runtimeJars = File("build/notices/runtime-jars.txt").readLines().filter { it.isNotBlank() }
+            assertTrue(runtimeJars.size > 3, "runtime jar list looks empty: $runtimeJars")
+            for (name in runtimeJars) {
+                assertTrue("==== $name (" in text, "no notices section for $name")
+            }
+            assertTrue("about.html" in text, "lsp4j's about.html is missing")
         }
     }
 }
