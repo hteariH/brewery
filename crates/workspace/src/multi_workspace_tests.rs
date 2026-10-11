@@ -17,6 +17,9 @@ fn init_test(cx: &mut TestAppContext) {
         cx.set_global(settings_store);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         DisableAiSettings::register(cx);
+        // brewery: Brewery ships with AI disabled, which turns multi-workspace
+        // off; these tests exercise upstream multi-workspace behaviour.
+        DisableAiSettings::override_global(DisableAiSettings { disable_ai: false }, cx);
     });
 }
 

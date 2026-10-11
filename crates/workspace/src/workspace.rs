@@ -12495,9 +12495,9 @@ mod tests {
         DismissEvent, Empty, EventEmitter, FocusHandle, Focusable, Render, TestAppContext,
         UpdateGlobal, VisualTestContext, px,
     };
-    use project::{Project, ProjectEntryId, WorktreeId};
+    use project::{DisableAiSettings, Project, ProjectEntryId, WorktreeId};
     use serde_json::json;
-    use settings::SettingsStore;
+    use settings::{Settings as _, SettingsStore};
     use util::path;
     use util::rel_path::rel_path;
 
@@ -12998,7 +12998,7 @@ mod tests {
             });
         });
         cx.executor().run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("Zed — root1, root2"));
+        assert_eq!(cx.window_title().as_deref(), Some("Brewery — root1, root2")); // brewery: app name
 
         let item = cx.new(|cx| {
             TestItem::new(cx).with_project_items(&[TestProjectItem::new_in_worktree(
@@ -13015,7 +13015,7 @@ mod tests {
         let expected_file_path = path!("/root1/src/one.txt");
         assert_eq!(
             cx.window_title().as_deref(),
-            Some(format!("Zed — root1, root2 — one — {expected_file_path}").as_str())
+            Some(format!("Brewery — root1, root2 — one — {expected_file_path}").as_str()) // brewery: app name
         );
     }
 
@@ -19293,6 +19293,10 @@ mod tests {
             cx.set_global(settings_store);
             cx.set_global(db::AppDatabase::test_new());
             theme_settings::init(theme::LoadThemes::JustBase, cx);
+            // brewery: Brewery ships with AI disabled, which turns multi-workspace
+            // off; these tests exercise upstream multi-workspace behaviour.
+            DisableAiSettings::register(cx);
+            DisableAiSettings::override_global(DisableAiSettings { disable_ai: false }, cx);
         });
     }
 
@@ -19348,8 +19352,9 @@ mod tests {
             parsed["theme"],
             serde_json::json!({
                 "mode": "system",
-                "light": "One Light",
-                "dark": "One Dark"
+                // brewery: Brewery's default theme pair
+                "light": "Brewery Light",
+                "dark": "Brewery Dark"
             })
         );
 
