@@ -25,6 +25,7 @@ members = [
     "crates/breadcrumbs",
     "crates/brewery_cloud", # brewery:
     "crates/brewery_core", # brewery:
+    "crates/brewery_daemon_client", # brewery:
     "crates/brewery_run_widget", # brewery:
     "crates/brewery_search_everywhere", # brewery:
     "crates/brewery_theme", # brewery:
@@ -307,6 +308,7 @@ bedrock = { path = "crates/bedrock" }
 breadcrumbs = { path = "crates/breadcrumbs" }
 brewery_cloud = { path = "crates/brewery_cloud" } # brewery:
 brewery_core = { path = "crates/brewery_core" } # brewery:
+brewery_daemon_client = { path = "crates/brewery_daemon_client" } # brewery:
 brewery_run_widget = { path = "crates/brewery_run_widget" } # brewery:
 brewery_search_everywhere = { path = "crates/brewery_search_everywhere" } # brewery:
 brewery_theme = { path = "crates/brewery_theme" } # brewery:

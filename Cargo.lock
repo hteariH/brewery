@@ -2406,6 +2406,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewery_daemon_client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "log",
+ "lsp",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "util",
+]
+
+[[package]]
 name = "brewery_run_widget"
 version = "0.1.0"
 dependencies = [
