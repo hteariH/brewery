@@ -659,6 +659,24 @@ impl TerminalPanel {
             task.shell.clone()
         };
 
+        // brewery: run `/bin/sh` tasks (Java gutter runnables, task picker)
+        // through Git for Windows, with the paths they see in MSYS form.
+        #[cfg(windows)]
+        let (task, shell) = &{
+            let mut task = task.clone();
+            let mut shell = shell;
+            if remote_client.is_none() {
+                util::brewery_msys::adapt_posix_task_for_windows(
+                    &mut shell,
+                    &mut task.command,
+                    &mut task.args,
+                    &mut task.env,
+                    task.cwd.as_deref(),
+                );
+            }
+            (task, shell)
+        };
+
         let task = prepare_task_for_spawn(task, &shell, is_windows);
 
         if task.allow_concurrent_runs && task.use_new_terminal {

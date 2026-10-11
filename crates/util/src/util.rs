@@ -15,6 +15,9 @@ pub mod shell;
 pub mod shell_builder;
 #[cfg(not(target_family = "wasm"))]
 pub mod shell_env;
+// brewery: POSIX-shell tasks on Windows via Git for Windows
+#[cfg(not(target_family = "wasm"))]
+pub mod brewery_msys;
 
 pub mod disambiguate;
 pub mod markdown;
