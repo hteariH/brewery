@@ -1,5 +1,9 @@
 package dev.brewery.daemon
 
+import com.google.gson.TypeAdapter
+import com.google.gson.annotations.JsonAdapter
+import com.google.gson.stream.JsonReader
+import com.google.gson.stream.JsonWriter
 import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
 import org.eclipse.lsp4j.jsonrpc.services.JsonRequest
 import java.util.concurrent.CompletableFuture
@@ -16,7 +20,28 @@ class ProjectChanged
 enum class BuildTool { gradle, maven, none }
 data class BuildTask(val name: String, val group: String?, val description: String?)
 data class BuildModule(val name: String, val path: String, val tasks: List<BuildTask>)
-data class ProjectModel(val buildTool: BuildTool, val rootDir: String, val modules: List<BuildModule>)
+
+// lsp4j's Gson registers a factory that writes enums as their ordinal; the wire format wants the name.
+// A field-level adapter takes precedence over that factory.
+class BuildToolAdapter : TypeAdapter<BuildTool>() {
+    override fun write(out: JsonWriter, value: BuildTool?) {
+        if (value == null) out.nullValue() else out.value(value.name)
+    }
+
+    override fun read(reader: JsonReader): BuildTool? =
+        if (reader.peek() == com.google.gson.stream.JsonToken.NULL) {
+            reader.nextNull()
+            null
+        } else {
+            BuildTool.valueOf(reader.nextString())
+        }
+}
+
+data class ProjectModel(
+    @field:JsonAdapter(BuildToolAdapter::class) val buildTool: BuildTool,
+    val rootDir: String,
+    val modules: List<BuildModule>,
+)
 
 object ErrorCodes {
     const val BUILD_IMPORT_FAILED = -32001

@@ -63,6 +63,14 @@ class ProjectModelTest {
     }
 
     @Test
+    fun `buildTool is serialised by name`() {
+        val gson = MessageJsonHandler(emptyMap()).gson
+        val json = gson.toJson(ProjectModel(BuildTool.maven, "/x", emptyList()))
+        assertTrue("\"buildTool\":\"maven\"" in json, json)
+        assertEquals(BuildTool.maven, gson.fromJson(json, ProjectModel::class.java).buildTool)
+    }
+
+    @Test
     fun `projectModel before openProject fails with NOT_OPENED over the wire`() {
         val clientToServer = PipedOutputStream()
         val serverIn = PipedInputStream(clientToServer)
