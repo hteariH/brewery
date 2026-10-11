@@ -681,6 +681,8 @@ fn main() {
         brewery_core::init(cx);
         // brewery: Search Everywhere (Shift Shift) hosts the finder, symbols and palette
         brewery_search_everywhere::init(cx);
+        // brewery: Gradle/Maven tool window actions
+        brewery_build::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: settings::CopilotSettings::get_global(cx)
                 .enterprise_uri

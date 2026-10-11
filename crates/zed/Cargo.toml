@@ -81,6 +81,7 @@ audio.workspace = true
 auto_update.workspace = true
 auto_update_ui.workspace = true
 breadcrumbs.workspace = true
+brewery_build.workspace = true # brewery:
 brewery_core.workspace = true # brewery:
 brewery_search_everywhere.workspace = true # brewery:
 brewery_theme.workspace = true # brewery:
