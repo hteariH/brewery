@@ -245,4 +245,33 @@ class SpringScannerTest {
         assertEquals(2, attempts.get())
         daemon.close()
     }
+
+    @Test
+    fun `second scan parses only changed files and drops removed ones`() {
+        val root = copyPetshop()
+        val scanner = SpringScanner()
+        val first = scanner.scan(model(root))
+        val total = scanner.parsedFiles
+        assertTrue(total > 0)
+        assertEquals(first, scanner.scan(model(root)))
+        assertEquals(total, scanner.parsedFiles, "unchanged files must not be parsed again")
+
+        val dir = Files.createDirectories(root.resolve("src/main/java/com/example/petshop/extra"))
+        val extra = dir.resolve("Extra.java")
+        Files.writeString(extra, "package x;\n@Component\npublic class Extra {}\n")
+        assertTrue("extra" in scanner.scan(model(root)).beans.map { it.name })
+        assertEquals(total + 1, scanner.parsedFiles)
+
+        Files.delete(extra)
+        assertEquals(first, scanner.scan(model(root)))
+        assertEquals(total + 1, scanner.parsedFiles)
+    }
+
+    @Test
+    fun `files over one megabyte are skipped`() {
+        val root = copyPetshop()
+        val dir = Files.createDirectories(root.resolve("src/main/java/big"))
+        Files.writeString(dir.resolve("Big.java"), "package big;\n@Component\npublic class Big {}\n" + "//" + "x".repeat(1 shl 20) + "\n")
+        assertTrue("big" !in scan(root).beans.map { it.name })
+    }
 }

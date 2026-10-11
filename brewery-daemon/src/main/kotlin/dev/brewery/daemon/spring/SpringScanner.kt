@@ -35,31 +35,74 @@ class SpringScanner {
             .setAttributeComments(false),
     )
 
+    /** Parsed files so far; tests read it to prove unchanged files are not parsed again. */
+    @Volatile
+    var parsedFiles = 0
+        private set
+
+    private class Stamp(val modifiedMillis: Long, val size: Long, val modulePath: String)
+    private class FileResult(val stamp: Stamp, val apps: List<SpringApp>, val beans: List<SpringBean>, val endpoints: List<SpringEndpoint>)
+
+    // Keyed by absolute path. Rebuilt on every scan, so files that disappeared drop out.
+    private var cache = mapOf<String, FileResult>()
+
+    @Synchronized
     fun scan(model: ProjectModel): SpringModel {
         val root = Path.of(model.rootDir)
         val parser = newParser()
         val apps = mutableListOf<SpringApp>()
         val beans = mutableListOf<SpringBean>()
         val endpoints = mutableListOf<SpringEndpoint>()
+        val next = HashMap<String, FileResult>()
         for (module in model.modules) {
             for (file in javaFiles(sourceRoot(root, model.buildTool, module.path))) {
-                val unit = try {
-                    val result = parser.parse(file)
-                    // A partial tree from a file with syntax errors would yield wrong beans, so skip it whole.
-                    if (!result.isSuccessful) continue
-                    result.result.orElse(null) ?: continue
+                val path = file.toAbsolutePath().normalize().toString()
+                val stamp = try {
+                    val size = Files.size(file)
+                    // Generated or vendored giants are not worth the parse time; real Spring classes are tiny.
+                    if (size > MAX_FILE_BYTES) continue
+                    Stamp(Files.getLastModifiedTime(file).toMillis(), size, module.path)
                 } catch (e: IOException) {
                     continue
-                } catch (e: RuntimeException) {
-                    continue
                 }
-                val path = file.toAbsolutePath().normalize().toString()
-                for (type in unit.findAll(ClassOrInterfaceDeclaration::class.java)) {
-                    scanType(type, module.path, path, apps, beans, endpoints)
+                val known = cache[path]
+                val result = if (known != null && known.stamp.same(stamp)) {
+                    known
+                } else {
+                    parseFile(parser, file, path, stamp) ?: continue
                 }
+                next[path] = result
+                apps += result.apps
+                beans += result.beans
+                endpoints += result.endpoints
             }
         }
+        cache = next
         return SpringModel(apps, beans, endpoints)
+    }
+
+    private fun Stamp.same(other: Stamp) =
+        modifiedMillis == other.modifiedMillis && size == other.size && modulePath == other.modulePath
+
+    private fun parseFile(parser: JavaParser, file: Path, path: String, stamp: Stamp): FileResult? {
+        parsedFiles++
+        val unit = try {
+            val result = parser.parse(file)
+            // A partial tree from a file with syntax errors would yield wrong beans, so skip it whole.
+            if (!result.isSuccessful) return null
+            result.result.orElse(null) ?: return null
+        } catch (e: IOException) {
+            return null
+        } catch (e: RuntimeException) {
+            return null
+        }
+        val apps = mutableListOf<SpringApp>()
+        val beans = mutableListOf<SpringBean>()
+        val endpoints = mutableListOf<SpringEndpoint>()
+        for (type in unit.findAll(ClassOrInterfaceDeclaration::class.java)) {
+            scanType(type, stamp.modulePath, path, apps, beans, endpoints)
+        }
+        return FileResult(stamp, apps, beans, endpoints)
     }
 
     private fun scanType(
@@ -149,6 +192,7 @@ class SpringScanner {
     }
 
     private companion object {
+        const val MAX_FILE_BYTES = 1L shl 20
         val SKIPPED_DIRS = setOf("build", "target", ".gradle")
 
         // Order matters: a class carrying several stereotypes is reported as the most specific one.
