@@ -784,6 +784,9 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
         // brewery: Gradle/Maven tool window
         let build_panel = brewery_build::BuildPanel::load(workspace_handle.clone(), cx.clone());
+        // brewery: Services tool window (Spring Boot apps, endpoints, beans)
+        let services_panel =
+            brewery_services::ServicesPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -809,6 +812,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(build_panel, workspace_handle.clone(), cx.clone()), // brewery:
+            add_panel_when_ready(services_panel, workspace_handle.clone(), cx.clone()), // brewery:
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
 

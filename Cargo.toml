@@ -29,6 +29,7 @@ members = [
     "crates/brewery_daemon_client", # brewery:
     "crates/brewery_run_widget", # brewery:
     "crates/brewery_search_everywhere", # brewery:
+    "crates/brewery_services", # brewery:
     "crates/brewery_theme", # brewery:
     "crates/buffer_diff",
     "crates/call",
@@ -313,6 +314,7 @@ brewery_core = { path = "crates/brewery_core" } # brewery:
 brewery_daemon_client = { path = "crates/brewery_daemon_client" } # brewery:
 brewery_run_widget = { path = "crates/brewery_run_widget" } # brewery:
 brewery_search_everywhere = { path = "crates/brewery_search_everywhere" } # brewery:
+brewery_services = { path = "crates/brewery_services" } # brewery:
 brewery_theme = { path = "crates/brewery_theme" } # brewery:
 buffer_diff = { path = "crates/buffer_diff" }
 call = { path = "crates/call" }

@@ -683,6 +683,8 @@ fn main() {
         brewery_search_everywhere::init(cx);
         // brewery: Gradle/Maven tool window actions
         brewery_build::init(cx);
+        // brewery: Services tool window actions
+        brewery_services::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: settings::CopilotSettings::get_global(cx)
                 .enterprise_uri

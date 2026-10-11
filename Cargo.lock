@@ -2479,6 +2479,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewery_services"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "brewery_daemon_client",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "log",
+ "menu",
+ "project",
+ "serde_json",
+ "task",
+ "text",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "brewery_theme"
 version = "0.1.0"
 dependencies = [
@@ -22506,6 +22528,7 @@ dependencies = [
  "brewery_build",
  "brewery_core",
  "brewery_search_everywhere",
+ "brewery_services",
  "brewery_theme",
  "call",
  "call_hierarchy",
