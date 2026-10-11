@@ -2416,6 +2416,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewery_search_everywhere"
+version = "0.1.0"
+dependencies = [
+ "command_palette",
+ "editor",
+ "file_finder",
+ "gpui",
+ "menu",
+ "picker",
+ "picker_preview",
+ "project",
+ "project_symbols",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "brewery_theme"
 version = "0.1.0"
 dependencies = [
@@ -22441,6 +22463,7 @@ dependencies = [
  "auto_update_ui",
  "breadcrumbs",
  "brewery_core",
+ "brewery_search_everywhere",
  "brewery_theme",
  "call",
  "call_hierarchy",

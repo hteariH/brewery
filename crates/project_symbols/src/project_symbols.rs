@@ -50,7 +50,8 @@ pub struct ProjectSymbolsDelegate {
 }
 
 impl ProjectSymbolsDelegate {
-    fn new(workspace: WeakEntity<Workspace>, project: Entity<Project>) -> Self {
+    // brewery: public so Search Everywhere can host the project-symbols picker in a tab.
+    pub fn new(workspace: WeakEntity<Workspace>, project: Entity<Project>) -> Self {
         Self {
             workspace,
             project,

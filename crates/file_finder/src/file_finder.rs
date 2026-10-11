@@ -115,6 +115,30 @@ impl FileFinder {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Task<()> {
+        // brewery: construction lives in `build` so Search Everywhere can host the finder in a tab.
+        let build = Self::build(workspace, separate_history, include_ignored, cx);
+        cx.spawn_in(window, async move |workspace, cx| {
+            let build = build.await;
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.toggle_modal(window, cx, |window, cx| build(seed_query, window, cx));
+                })
+                .ok();
+        })
+    }
+
+    // brewery: split out of `open` and public so Search Everywhere can embed a file finder
+    // (with the same navigation history) instead of opening it as its own modal.
+    /// Collects the navigation history and resolves to a constructor for a [`FileFinder`]
+    /// that can be passed to `cx.new`.
+    pub fn build(
+        workspace: &mut Workspace,
+        separate_history: bool,
+        include_ignored: Option<bool>,
+        cx: &mut Context<Workspace>,
+    ) -> Task<impl FnOnce(Option<String>, &mut Window, &mut Context<Self>) -> Self + use<>> {
+        let project_entity = workspace.project().clone();
+        let weak_workspace = cx.entity().downgrade();
         let project = workspace.project().read(cx);
         let fs = project.fs();
 
@@ -149,30 +173,24 @@ impl FileFinder {
                 }
             })
             .collect::<Vec<_>>();
-        cx.spawn_in(window, async move |workspace, cx| {
+        cx.spawn(async move |_, _| {
             let history_items = join_all(history_items).await.into_iter().flatten();
 
-            workspace
-                .update_in(cx, |workspace, window, cx| {
-                    let project = workspace.project().clone();
-                    let weak_workspace = cx.entity().downgrade();
-                    workspace.toggle_modal(window, cx, |window, cx| {
-                        let delegate = FileFinderDelegate::new(
-                            cx.entity().downgrade(),
-                            weak_workspace,
-                            project,
-                            currently_opened_path,
-                            history_items.collect(),
-                            separate_history,
-                            include_ignored,
-                            window,
-                            cx,
-                        );
+            move |seed_query: Option<String>, window: &mut Window, cx: &mut Context<Self>| {
+                let delegate = FileFinderDelegate::new(
+                    cx.entity().downgrade(),
+                    weak_workspace,
+                    project_entity,
+                    currently_opened_path,
+                    history_items.collect(),
+                    separate_history,
+                    include_ignored,
+                    window,
+                    cx,
+                );
 
-                        FileFinder::new(delegate, seed_query, window, cx)
-                    });
-                })
-                .ok();
+                FileFinder::new(delegate, seed_query, window, cx)
+            }
         })
     }
 
@@ -366,6 +384,17 @@ impl FileFinder {
         self.picker.update(cx, |picker, cx| {
             picker.delegate.confirm_without_dismiss(window, cx);
         });
+    }
+
+    // brewery: Search Everywhere carries the query across its tabs.
+    pub fn query(&self, cx: &App) -> String {
+        self.picker.read(cx).query(cx)
+    }
+
+    // brewery: Search Everywhere carries the query across its tabs.
+    pub fn set_query(&self, query: &str, window: &mut Window, cx: &mut App) {
+        self.picker
+            .update(cx, |picker, cx| picker.set_query(query, window, cx));
     }
 
     pub fn modal_max_width(width_setting: ModalWidthContent, window: &mut Window) -> Pixels {

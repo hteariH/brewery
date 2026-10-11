@@ -47,4 +47,14 @@
       "ctrl-shift-enter": "text_finder::ToggleFoldAll",
     },
   },
+  // brewery: Search Everywhere tab switching, as in IntelliJ. It lives here because it
+  // must beat the FileFinder `tab` binding above and the `Picker > Editor` / `Editor`
+  // tab bindings of the base keymaps.
+  {
+    "context": "SearchEverywhere > Picker > Editor",
+    "bindings": {
+      "tab": "brewery::NextSearchTab",
+      "shift-tab": "brewery::PreviousSearchTab",
+    },
+  },
 ]

@@ -5909,6 +5909,7 @@ mod tests {
                 "branch_picker",
                 "bedrock",
                 "branches",
+                "brewery", // brewery: Search Everywhere actions
                 "buffer_search",
                 "call_hierarchy",
                 "channel_modal",

@@ -110,7 +110,8 @@ impl CommandPalette {
         });
     }
 
-    fn new(
+    // brewery: public so Search Everywhere can host the command palette in a tab.
+    pub fn new(
         previous_focus_handle: FocusHandle,
         query: &str,
         entity: WeakEntity<Workspace>,
@@ -152,6 +153,11 @@ impl CommandPalette {
             picker
         });
         Self { picker }
+    }
+
+    // brewery: Search Everywhere carries the query across its tabs.
+    pub fn query(&self, cx: &App) -> String {
+        self.picker.read(cx).query(cx)
     }
 
     pub fn set_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
