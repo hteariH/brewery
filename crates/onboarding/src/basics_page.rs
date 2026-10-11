@@ -26,12 +26,13 @@ use crate::{
     theme_preview::{ThemePreviewStyle, ThemePreviewTile},
 };
 
-const LIGHT_THEMES: [&str; 3] = ["One Light", "Ayu Light", "Gruvbox Light"];
-const DARK_THEMES: [&str; 3] = ["One Dark", "Ayu Dark", "Gruvbox Dark"];
+// brewery: Brewery is the first theme family offered during onboarding.
+const LIGHT_THEMES: [&str; 3] = ["Brewery Light", "One Light", "Ayu Light"];
+const DARK_THEMES: [&str; 3] = ["Brewery Dark", "One Dark", "Ayu Dark"];
 const FAMILY_NAMES: [SharedString; 3] = [
+    SharedString::new_static("Brewery"),
     SharedString::new_static("One"),
     SharedString::new_static("Ayu"),
-    SharedString::new_static("Gruvbox"),
 ];
 
 fn get_theme_family_themes(theme_name: &str) -> Option<(&'static str, &'static str)> {

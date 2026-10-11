@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 pub use settings::{FontFamilyName, IconThemeName, ThemeAppearanceMode, ThemeName};
 use settings::{IntoGpui, RegisterSetting, Settings, SettingsContent};
 use std::sync::Arc;
-use theme::{Appearance, DEFAULT_ICON_THEME_NAME, SyntaxTheme, Theme, UiDensity};
+// brewery: DEFAULT_ICON_THEME_NAME no longer used here (set_mode writes Brewery icons).
+use theme::{Appearance, SyntaxTheme, Theme, UiDensity};
 
 const MIN_FONT_SIZE: Pixels = px(6.0);
 const MAX_FONT_SIZE: Pixels = px(100.0);
@@ -317,6 +318,13 @@ pub fn set_icon_theme(
     }
 }
 
+// brewery: names written by `set_mode`. Zed's `DEFAULT_*` constants stay untouched
+// because they are fallbacks used across Zed and its tests.
+const BREWERY_LIGHT_THEME: &str = "Brewery Light";
+const BREWERY_DARK_THEME: &str = "Brewery Dark";
+const BREWERY_LIGHT_ICON_THEME: &str = "Brewery Icons Light";
+const BREWERY_DARK_ICON_THEME: &str = "Brewery Icons Dark";
+
 /// Sets the mode for the theme.
 pub fn set_mode(content: &mut SettingsContent, mode: ThemeAppearanceMode) {
     let theme = content.theme.as_mut();
@@ -326,8 +334,8 @@ pub fn set_mode(content: &mut SettingsContent, mode: ThemeAppearanceMode) {
             settings::ThemeSelection::Static(_) => {
                 *selection = settings::ThemeSelection::Dynamic {
                     mode: ThemeAppearanceMode::System,
-                    light: ThemeName(settings::DEFAULT_LIGHT_THEME.into()),
-                    dark: ThemeName(settings::DEFAULT_DARK_THEME.into()),
+                    light: ThemeName(BREWERY_LIGHT_THEME.into()), // brewery: Brewery default instead of One Light
+                    dark: ThemeName(BREWERY_DARK_THEME.into()), // brewery: Brewery default instead of One Dark
                 };
             }
             settings::ThemeSelection::Dynamic {
@@ -338,8 +346,8 @@ pub fn set_mode(content: &mut SettingsContent, mode: ThemeAppearanceMode) {
     } else {
         theme.theme = Some(settings::ThemeSelection::Dynamic {
             mode,
-            light: ThemeName(settings::DEFAULT_LIGHT_THEME.into()),
-            dark: ThemeName(settings::DEFAULT_DARK_THEME.into()),
+            light: ThemeName(BREWERY_LIGHT_THEME.into()), // brewery: Brewery default instead of One Light
+            dark: ThemeName(BREWERY_DARK_THEME.into()), // brewery: Brewery default instead of One Dark
         });
     }
 
@@ -358,9 +366,12 @@ pub fn set_mode(content: &mut SettingsContent, mode: ThemeAppearanceMode) {
             } => *mode_to_update = mode,
         }
     } else {
-        theme.icon_theme = Some(settings::IconThemeSelection::Static(IconThemeName(
-            DEFAULT_ICON_THEME_NAME.into(),
-        )));
+        // brewery: Brewery icon themes instead of the static "Zed (Default)".
+        theme.icon_theme = Some(settings::IconThemeSelection::Dynamic {
+            mode,
+            light: IconThemeName(BREWERY_LIGHT_ICON_THEME.into()),
+            dark: IconThemeName(BREWERY_DARK_ICON_THEME.into()),
+        });
     }
 }
 
@@ -887,5 +898,53 @@ mod tests {
                 .color(::theme::ThemeColorField::EditorCodeLensForeground),
             green
         );
+    }
+}
+
+// brewery: tests for the Brewery theme names written by `set_mode`.
+#[cfg(test)]
+mod brewery_tests {
+    use super::*;
+
+    fn assert_brewery_selections(content: &SettingsContent, expected_mode: ThemeAppearanceMode) {
+        match content.theme.theme.as_ref() {
+            Some(settings::ThemeSelection::Dynamic { mode, light, dark }) => {
+                assert_eq!(*mode, expected_mode);
+                assert_eq!(light.0.as_ref(), "Brewery Light");
+                assert_eq!(dark.0.as_ref(), "Brewery Dark");
+            }
+            other => panic!("expected dynamic theme selection, got {other:?}"),
+        }
+        match content.theme.icon_theme.as_ref() {
+            Some(settings::IconThemeSelection::Dynamic { mode, light, dark }) => {
+                assert_eq!(*mode, expected_mode);
+                assert_eq!(light.0.as_ref(), "Brewery Icons Light");
+                assert_eq!(dark.0.as_ref(), "Brewery Icons Dark");
+            }
+            other => panic!("expected dynamic icon theme selection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_mode_on_empty_settings_writes_brewery_themes() {
+        let mut content = SettingsContent::default();
+        set_mode(&mut content, ThemeAppearanceMode::Dark);
+        assert_brewery_selections(&content, ThemeAppearanceMode::Dark);
+    }
+
+    #[test]
+    fn set_mode_resets_static_theme_to_brewery_themes() {
+        let mut content = SettingsContent::default();
+        content.theme.theme = Some(settings::ThemeSelection::Static(ThemeName(
+            "Gruvbox Dark".into(),
+        )));
+        set_mode(&mut content, ThemeAppearanceMode::Dark);
+        match content.theme.theme.as_ref() {
+            Some(settings::ThemeSelection::Dynamic { light, dark, .. }) => {
+                assert_eq!(light.0.as_ref(), "Brewery Light");
+                assert_eq!(dark.0.as_ref(), "Brewery Dark");
+            }
+            other => panic!("expected dynamic theme selection, got {other:?}"),
+        }
     }
 }
