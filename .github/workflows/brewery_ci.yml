@@ -52,7 +52,9 @@ jobs:
       - name: Check
         run: cargo check -p zed --locked
       - name: Test Brewery hook-ins
-        run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client
+        run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder
+      - name: Test workspace hook-ins
+        run: cargo test --locked -p workspace --lib
 
   build:
     name: Build (${{ matrix.os }})
