@@ -144,11 +144,15 @@ impl DaemonClient {
     /// Calls `f` once if the daemon process terminates by itself. Nothing is reported once
     /// the client is dropped or shut down, so only unexpected deaths show up here.
     pub fn on_exit(&self, f: impl FnOnce() + Send + 'static) {
-        let server = self.server.clone();
+        // Weak, so the watcher alone never keeps the server (and its process handle) alive.
+        let server = Arc::downgrade(&self.server);
         let executor = self.executor.clone();
         let watch = self.executor.spawn(async move {
             loop {
                 executor.timer(EXIT_POLL_INTERVAL).await;
+                let Some(server) = server.upgrade() else {
+                    return;
+                };
                 if server.has_exited() {
                     f();
                     return;

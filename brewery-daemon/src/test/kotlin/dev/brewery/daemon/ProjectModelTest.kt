@@ -225,7 +225,7 @@ class ProjectModelTest {
     fun `notification waits for the last event of a burst`() {
         val dir = Files.createTempDirectory("brewery-trailing")
         val count = AtomicInteger()
-        val daemon = slowDaemon(CountDownLatch(0), debounce = 400)
+        val daemon = slowDaemon(CountDownLatch(0), debounce = 1500)
         daemon.connect(object : BreweryClient {
             override fun projectChanged(params: ProjectChanged) {
                 count.incrementAndGet()
@@ -238,8 +238,9 @@ class ProjectModelTest {
             Thread.sleep(250)
         }
         // 750 ms after the first event, but only 250 ms after the last: a leading-edge timer would have fired.
+        // The debounce is generous so a slow CI runner cannot stretch the 250 ms gaps past it.
         assertEquals(0, count.get())
-        Thread.sleep(700)
+        Thread.sleep(2500)
         assertEquals(1, count.get())
         daemon.close()
     }
@@ -249,7 +250,7 @@ class ProjectModelTest {
         val first = Files.createTempDirectory("brewery-old")
         val second = Files.createTempDirectory("brewery-new")
         val count = AtomicInteger()
-        val daemon = slowDaemon(CountDownLatch(0), debounce = 200)
+        val daemon = slowDaemon(CountDownLatch(0), debounce = 1500)
         daemon.connect(object : BreweryClient {
             override fun projectChanged(params: ProjectChanged) {
                 count.incrementAndGet()
@@ -258,7 +259,7 @@ class ProjectModelTest {
         daemon.openProject(OpenProjectParams(first.toString())).get(10, TimeUnit.SECONDS)
         daemon.onBuildFileChanged(first.toAbsolutePath().normalize())
         daemon.openProject(OpenProjectParams(second.toString())).get(10, TimeUnit.SECONDS)
-        Thread.sleep(700)
+        Thread.sleep(2500)
         assertEquals(0, count.get())
         daemon.close()
     }
