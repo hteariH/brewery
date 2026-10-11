@@ -85,3 +85,10 @@ fn test_brewery_first_run_files_parse() {
     settings_json::parse_json_with_comments::<Value>(&crate::initial_project_settings_content())
         .expect("initial_local_settings.json parses");
 }
+
+#[test]
+fn test_java_support_is_preinstalled() {
+    let d = defaults();
+    assert_eq!(d["auto_install_extensions"]["java"], Value::Bool(true));
+    assert_eq!(d["lsp"]["jdtls"]["settings"]["jdk_auto_download"], Value::Bool(true));
+}

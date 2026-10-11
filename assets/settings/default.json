@@ -2364,6 +2364,8 @@
   // and change the value to `false`.
   "auto_install_extensions": {
     "html": true,
+    // brewery: Java support out of the box (zed-extensions/java, Apache 2.0)
+    "java": true,
   },
   // Whether to suggest installing extensions based on the files you open.
   "suggest_extensions": true,
@@ -2762,6 +2764,12 @@
   },
   // LSP Specific settings.
   "lsp": {
+    // brewery: let the Java extension download a JDK 21+ for jdtls when none is installed
+    "jdtls": {
+      "settings": {
+        "jdk_auto_download": true,
+      },
+    },
     // Specify the LSP name as a key here.
     // "rust-analyzer": {
     //     // A special flag for rust-analyzer integration, to use server-provided tasks
