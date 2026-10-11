@@ -42,7 +42,9 @@ impl ReqwestClient {
             .pool_idle_timeout(Duration::from_secs(30))
             .http2_keep_alive_interval(Duration::from_secs(15))
             .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_keep_alive_while_idle(true);
+            .http2_keep_alive_while_idle(true)
+            // brewery: large downloads over HTTP/2 crawl with hyper's default 64 KiB window (jdtls from download.eclipse.org)
+            .http2_adaptive_window(true);
         match read_timeout {
             Some(read_timeout) => builder.read_timeout(read_timeout),
             None => builder,
