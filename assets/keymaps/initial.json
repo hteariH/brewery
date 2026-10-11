@@ -1,7 +1,8 @@
-// Zed keymap
+// brewery: header rebranded from Zed to Brewery
+// Brewery keymap
 //
-// For information on binding keys, see the Zed
-// documentation: https://zed.dev/docs/key-bindings
+// For information on binding keys, see the
+// Zed documentation: https://zed.dev/docs/key-bindings
 //
 // To see the default key bindings run `zed: open default keymap`
 // from the command palette.

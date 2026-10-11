@@ -74,3 +74,14 @@ fn test_intellij_tool_window_placement() {
         assert_eq!(d[panel]["dock"], Value::String("bottom".into()), "{panel}");
     }
 }
+
+#[test]
+fn test_brewery_first_run_files_parse() {
+    // Their headers were rebranded by hand, so make sure they still load as JSONC.
+    settings_json::parse_json_with_comments::<Value>(&crate::initial_user_settings_content())
+        .expect("initial_user_settings.json parses");
+    settings_json::parse_json_with_comments::<Value>(&crate::initial_keymap_content())
+        .expect("keymaps/initial.json parses");
+    settings_json::parse_json_with_comments::<Value>(&crate::initial_project_settings_content())
+        .expect("initial_local_settings.json parses");
+}
