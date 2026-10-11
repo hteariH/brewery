@@ -212,6 +212,9 @@ pub struct ServicesPanel {
     /// Holds `Entry::Section` and `Entry::Group` values.
     collapsed: HashSet<Entry>,
     selected: Option<usize>,
+    active: bool,
+    /// The sources changed while the panel was hidden; refetch when it is shown again.
+    stale: bool,
 }
 
 impl ServicesPanel {
@@ -247,6 +250,8 @@ impl ServicesPanel {
             busy: None,
             collapsed: HashSet::new(),
             selected: None,
+            active: false,
+            stale: false,
         }
     }
 
@@ -294,7 +299,14 @@ impl ServicesPanel {
             // Run configurations depend on the build files as well as on the sources.
             ProjectDaemonEvent::Ready
             | ProjectDaemonEvent::ProjectChanged
-            | ProjectDaemonEvent::SpringChanged => self.fetch_model(cx),
+            | ProjectDaemonEvent::SpringChanged => {
+                // Scanning for a hidden panel is wasted work; catch up when it is shown.
+                if self.active {
+                    self.fetch_model(cx);
+                } else {
+                    self.stale = true;
+                }
+            }
             ProjectDaemonEvent::Failed { gave_up } => {
                 if let DaemonState::Failed { error, kind } = daemon.read(cx).state().clone() {
                     self.show_failure(error, kind, cx);
@@ -356,6 +368,7 @@ impl ServicesPanel {
         if !daemon.is_ready() {
             return;
         }
+        self.stale = false;
         let model = daemon.spring_model(cx);
         let configurations = daemon.run_configurations(cx);
         self.busy = Some("Scanning sources…".into());
@@ -857,8 +870,14 @@ impl Panel for ServicesPanel {
 
     fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
         // The JVM is only worth starting once someone looks at the panel.
-        if active && self.daemon.is_none() {
+        self.active = active;
+        if !active {
+            return;
+        }
+        if self.daemon.is_none() {
             self.connect(cx);
+        } else if self.stale {
+            self.fetch_model(cx);
         }
     }
 

@@ -322,6 +322,29 @@ async fn changed_sources_are_scanned_again(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn changes_while_hidden_are_fetched_when_shown(cx: &mut TestAppContext) {
+    let (fixture, cx) =
+        workspace_with_panel(fixture_model(), json!({ "build.gradle": "" }), cx).await;
+    cx.dispatch_action(ToggleServicesPanel);
+    cx.run_until_parked();
+    assert_eq!(*fixture.spring_requests.borrow(), 1);
+
+    fixture.workspace.update_in(cx, |workspace, window, cx| {
+        workspace.close_panel::<ServicesPanel>(window, cx)
+    });
+    cx.run_until_parked();
+    for handler in fixture.spring_changed.lock().unwrap().iter() {
+        handler();
+    }
+    cx.run_until_parked();
+    assert_eq!(*fixture.spring_requests.borrow(), 1, "hidden panel must not fetch");
+
+    cx.dispatch_action(ToggleServicesPanel);
+    cx.run_until_parked();
+    assert_eq!(*fixture.spring_requests.borrow(), 2);
+}
+
+#[gpui::test]
 async fn activating_an_endpoint_opens_its_file_at_the_line(cx: &mut TestAppContext) {
     let source =
         "package demo;\n\nclass OwnerController {\n    @GetMapping\n    void list() {}\n}\n";
