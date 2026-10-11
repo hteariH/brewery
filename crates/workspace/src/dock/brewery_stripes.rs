@@ -156,6 +156,7 @@ fn render_button(
             // The active state is part of the id so a cached tooltip does not
             // outlive a state change made from the keyboard.
             let button = IconButton::new((name, active as u64), icon)
+                .tab_index(0isize)
                 .icon_size(IconSize::Medium)
                 .toggle_state(active)
                 .aria_label(tooltip.clone())
@@ -245,6 +246,7 @@ mod tests {
     /// button by `persistent_name`, which is a per-type constant.
     struct StripeTestPanel<const N: u32> {
         focus_handle: FocusHandle,
+        position: DockPosition,
     }
 
     impl<const N: u32> EventEmitter<PanelEvent> for StripeTestPanel<N> {}
@@ -263,17 +265,17 @@ mod tests {
 
     impl<const N: u32> Panel for StripeTestPanel<N> {
         fn persistent_name() -> &'static str {
-            if N == 1 {
-                "StripeFirst"
-            } else {
-                "StripeSecond"
+            match N {
+                1 => "StripeFirst",
+                2 => "StripeSecond",
+                _ => "StripeThird",
             }
         }
         fn panel_key() -> &'static str {
             Self::persistent_name()
         }
         fn position(&self, _: &Window, _: &App) -> DockPosition {
-            DockPosition::Left
+            self.position
         }
         fn position_is_valid(&self, _: DockPosition) -> bool {
             true
@@ -312,9 +314,11 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             let first = cx.new(|cx| StripeTestPanel::<1> {
                 focus_handle: cx.focus_handle(),
+                position: DockPosition::Left,
             });
             let second = cx.new(|cx| StripeTestPanel::<2> {
                 focus_handle: cx.focus_handle(),
+                position: DockPosition::Left,
             });
             workspace.add_panel(first, window, cx);
             workspace.add_panel(second, window, cx);
@@ -338,6 +342,56 @@ mod tests {
             assert_eq!(
                 summary(&stripe_buttons(dock, window, cx)),
                 vec![("StripeFirst", false), ("StripeSecond", false)]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_stripe_buttons_follow_bottom_and_right_docks(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let left = cx.new(|cx| StripeTestPanel::<1> {
+                focus_handle: cx.focus_handle(),
+                position: DockPosition::Left,
+            });
+            let bottom = cx.new(|cx| StripeTestPanel::<2> {
+                focus_handle: cx.focus_handle(),
+                position: DockPosition::Bottom,
+            });
+            let right = cx.new(|cx| StripeTestPanel::<3> {
+                focus_handle: cx.focus_handle(),
+                position: DockPosition::Right,
+            });
+            workspace.add_panel(left, window, cx);
+            workspace.add_panel(bottom, window, cx);
+            workspace.add_panel(right, window, cx);
+            workspace.bottom_dock().update(cx, |dock, cx| {
+                dock.activate_panel(0, window, cx);
+                dock.set_open(true, window, cx);
+            });
+
+            // The left stripe's lower group is the bottom dock; the right
+            // stripe shows only the right dock. Each reports its own panels.
+            let bottom_dock = workspace.bottom_dock().read(cx);
+            assert_eq!(
+                summary(&stripe_buttons(bottom_dock, window, cx)),
+                vec![("StripeSecond", true)]
+            );
+            let right_dock = workspace.right_dock().read(cx);
+            assert_eq!(
+                summary(&stripe_buttons(right_dock, window, cx)),
+                vec![("StripeThird", false)]
+            );
+            let left_dock = workspace.left_dock().read(cx);
+            assert_eq!(
+                summary(&stripe_buttons(left_dock, window, cx)),
+                vec![("StripeFirst", false)]
             );
         });
     }

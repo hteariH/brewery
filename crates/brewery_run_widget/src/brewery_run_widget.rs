@@ -1,5 +1,7 @@
 //! IntelliJ-style Run/Debug controls for the title bar.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use gpui::{Action, AnyElement, App, SharedString, Window};
 use ui::{Button, ButtonStyle, Icon, IconButton, IconName, IconSize, Tooltip, prelude::*};
 
@@ -15,10 +17,16 @@ pub fn widget_actions(cx: &App) -> Vec<(SharedString, Box<dyn Action>)> {
         (PICKER_LABEL.into(), Box::new(zed_actions::Spawn::modal())),
         ("Run".into(), Box::new(zed_actions::Rerun::default())),
     ];
+    // The title bar renders this every frame; log the omission only once.
+    static LOGGED_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
     for (label, name) in [("Debug", "debugger::Start"), ("Stop", "debugger::Stop")] {
         match cx.build_action(name, None) {
             Ok(action) => actions.push((label.into(), action)),
-            Err(error) => log::debug!("Run widget: `{name}` unavailable, omitting: {error}"),
+            Err(error) => {
+                if !LOGGED_UNAVAILABLE.swap(true, Ordering::Relaxed) {
+                    log::debug!("Run widget: `{name}` unavailable, omitting: {error}");
+                }
+            }
         }
     }
     actions
