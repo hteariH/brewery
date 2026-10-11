@@ -58,6 +58,7 @@ settings.workspace = true
 smallvec.workspace = true
 telemetry.workspace = true
 theme.workspace = true
+brewery_run_widget.workspace = true # brewery:
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true

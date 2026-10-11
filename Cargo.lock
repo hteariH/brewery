@@ -2406,6 +2406,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewery_run_widget"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "log",
+ "ui",
+ "zed_actions",
+]
+
+[[package]]
 name = "brewery_theme"
 version = "0.1.0"
 dependencies = [
@@ -18381,6 +18391,7 @@ dependencies = [
  "anyhow",
  "arrayvec",
  "auto_update",
+ "brewery_run_widget",
  "call",
  "channel",
  "chrono",
