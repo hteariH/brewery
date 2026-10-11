@@ -308,10 +308,7 @@ impl Daemon for FakeDaemon {
     }
 }
 
-fn dying_daemon(
-    started: Rc<RefCell<usize>>,
-    exit_handlers: ExitHandlers,
-) -> StartDaemon {
+fn dying_daemon(started: Rc<RefCell<usize>>, exit_handlers: ExitHandlers) -> StartDaemon {
     Rc::new(move |_, _| {
         *started.borrow_mut() += 1;
         let daemon: Rc<dyn Daemon> = Rc::new(FakeDaemon {
@@ -375,6 +372,14 @@ async fn a_dead_daemon_is_restarted_a_few_times_then_reported(cx: &mut TestAppCo
         assert_eq!(error.kind, ErrorKind::Connection);
         assert_eq!(error.message, DAEMON_KEEPS_STOPPING);
         assert!(panel.client.is_none());
+    });
+    cx.run_until_parked();
+    workspace.read_with(cx, |workspace, _| {
+        assert_eq!(
+            workspace.notification_ids().len(),
+            1,
+            "giving up should also raise a notification"
+        );
     });
 
     // Reload is the way out, and it gets a fresh allowance.

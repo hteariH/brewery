@@ -18,8 +18,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use task::{TaskContext, TaskTemplate};
 use ui::{ListItem, ListItemSpacing, Tooltip, prelude::*};
-use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
+use workspace::notifications::NotificationId;
+use workspace::{OpenLog, Toast, Workspace};
 
 actions!(
     brewery,
@@ -207,7 +208,8 @@ impl RestartPolicy {
     }
 }
 
-const DAEMON_KEEPS_STOPPING: &str = "The Brewery daemon stopped repeatedly. Check the log (Help → Open Log) and press Reload.";
+const DAEMON_KEEPS_STOPPING: &str =
+    "The Brewery daemon stopped repeatedly. Open the log and press Reload.";
 
 pub struct BuildPanel {
     workspace: WeakEntity<Workspace>,
@@ -423,7 +425,31 @@ impl BuildPanel {
         self.disconnect();
         self.busy = None;
         self.error = Some(PanelError::connection(DAEMON_KEEPS_STOPPING));
+        self.notify_daemon_gave_up(cx);
         cx.notify();
+    }
+
+    /// The panel may be hidden when the daemon gives up, so say it in a toast too. Deferred because
+    /// this runs inside a panel update that may itself be nested in a workspace update.
+    fn notify_daemon_gave_up(&self, cx: &mut Context<Self>) {
+        struct DaemonStopped;
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.show_toast(
+                        Toast::new(
+                            NotificationId::unique::<DaemonStopped>(),
+                            DAEMON_KEEPS_STOPPING,
+                        )
+                        .on_click("Open Log", |window, cx| {
+                            window.dispatch_action(OpenLog.boxed_clone(), cx)
+                        }),
+                        cx,
+                    );
+                })
+                .ok();
+        });
     }
 
     fn fetch_model(&mut self, cx: &mut Context<Self>) {
@@ -658,6 +684,10 @@ impl BuildPanel {
                 Button::new("build-panel-error-reload", "Reload")
                     .style(ButtonStyle::Filled)
                     .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+            )
+            .child(
+                Button::new("build-panel-error-open-log", "Open Log")
+                    .on_click(|_, window, cx| window.dispatch_action(OpenLog.boxed_clone(), cx)),
             )
     }
 
