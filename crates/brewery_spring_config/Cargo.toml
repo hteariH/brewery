@@ -1,0 +1,26 @@
+[package]
+name = "brewery_spring_config"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/brewery_spring_config.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+brewery_daemon_client.workspace = true
+futures.workspace = true
+gpui.workspace = true
+language.workspace = true
+log.workspace = true
+lsp.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

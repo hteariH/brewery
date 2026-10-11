@@ -2501,6 +2501,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewery_spring_config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "brewery_daemon_client",
+ "futures 0.3.34",
+ "gpui",
+ "language",
+ "log",
+ "lsp",
+]
+
+[[package]]
 name = "brewery_theme"
 version = "0.1.0"
 dependencies = [
@@ -22529,6 +22543,7 @@ dependencies = [
  "brewery_core",
  "brewery_search_everywhere",
  "brewery_services",
+ "brewery_spring_config",
  "brewery_theme",
  "call",
  "call_hierarchy",
