@@ -1,0 +1,16 @@
+[
+  {
+    "label": "PetshopApplication",
+    "command": "/path/to/spring-petshop/gradlew",
+    "args": ["bootRun"],
+    "cwd": "/path/to/spring-petshop",
+    "kind": "springBoot"
+  },
+  {
+    "label": "ReportsApplication",
+    "command": "gradle",
+    "args": [":reports:run", "-PmainClass=com.example.reports.ReportsApplication"],
+    "cwd": "/path/to/spring-petshop",
+    "kind": "application"
+  }
+]

@@ -4,6 +4,9 @@ import dev.brewery.daemon.project.GradleModelReader
 import dev.brewery.daemon.project.MavenModelReader
 import dev.brewery.daemon.project.detectBuildTool
 import dev.brewery.daemon.project.isBuildFileName
+import dev.brewery.daemon.run.RunConfiguration
+import dev.brewery.daemon.run.RunConfigurations
+import dev.brewery.daemon.run.RunConfigurationsParams
 import dev.brewery.daemon.spring.SpringModel
 import dev.brewery.daemon.spring.SpringScanner
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
@@ -32,6 +35,9 @@ import kotlin.system.exitProcess
  */
 class BreweryDaemon(
     private val debounceMillis: Long = DEFAULT_DEBOUNCE_MILLIS,
+    // Injected so tests can pick the wrapper spelling without depending on the host OS.
+    private val windows: Boolean = System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true),
+    // Last so call sites can pass the reader as a trailing lambda.
     private val modelReader: ((Path) -> ProjectModel)? = null,
 ) : BreweryServer, AutoCloseable {
     private var client: BreweryClient? = null
@@ -126,6 +132,12 @@ class BreweryDaemon(
             val shared = cachedSpring ?: startScan(dir).also { cachedSpring = it }
             return shared.thenApply { it }
         }
+    }
+
+    override fun runConfigurations(params: RunConfigurationsParams): CompletableFuture<List<RunConfiguration>> {
+        val project = projectModel(ProjectModelParams())
+        val spring = springModel(SpringModelParams())
+        return project.thenCombine(spring) { p, s -> RunConfigurations.build(p, s, windows) }
     }
 
     // Caller holds [lock].

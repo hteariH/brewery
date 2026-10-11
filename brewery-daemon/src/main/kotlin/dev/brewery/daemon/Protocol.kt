@@ -6,6 +6,8 @@ import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonWriter
 import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
 import org.eclipse.lsp4j.jsonrpc.services.JsonRequest
+import dev.brewery.daemon.run.RunConfiguration
+import dev.brewery.daemon.run.RunConfigurationsParams
 import dev.brewery.daemon.spring.SpringModel
 import java.util.concurrent.CompletableFuture
 
@@ -58,6 +60,7 @@ interface BreweryServer {
     @JsonRequest("project/open") fun openProject(params: OpenProjectParams): CompletableFuture<Any?>
     @JsonRequest("project/model") fun projectModel(params: ProjectModelParams): CompletableFuture<ProjectModel>
     @JsonRequest("spring/model") fun springModel(params: SpringModelParams): CompletableFuture<SpringModel>
+    @JsonRequest("run/configurations") fun runConfigurations(params: RunConfigurationsParams): CompletableFuture<List<RunConfiguration>>
 }
 
 interface BreweryClient {
