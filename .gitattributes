@@ -3,3 +3,7 @@
 
 # Ensure the WSL script always has LF line endings, even on Windows
 crates/zed/resources/windows/zed.sh text eol=lf
+
+# brewery: gradle wrapper needs fixed line endings on CI checkouts
+brewery-daemon/gradlew text eol=lf
+brewery-daemon/gradlew.bat text eol=crlf
