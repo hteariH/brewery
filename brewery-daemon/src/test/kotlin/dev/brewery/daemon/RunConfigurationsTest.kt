@@ -88,15 +88,61 @@ class RunConfigurationsTest {
         )
     }
 
+    private val bootPlugin = "<build><plugins><plugin><groupId>org.springframework.boot</groupId>" +
+        "<artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build>"
+
+    private fun pom(body: String = "") =
+        "<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>1</version>$body</project>"
+
+    private fun writePom(dir: Path, text: String) {
+        Files.createDirectories(dir)
+        Files.writeString(dir.resolve("pom.xml"), text)
+    }
+
     @Test
-    fun `maven uses spring-boot run with the module selected by -pl`() {
+    fun `maven runs spring-boot run, selecting a submodule with -pl and no -am`() {
         val root = rootWith("mvnw", "mvnw.cmd")
+        writePom(root, pom(bootPlugin))
+        writePom(root.resolve("core"), pom(bootPlugin))
         val project = ProjectModel(BuildTool.maven, root.toString(), listOf(BuildModule("r", ".", emptyList()), BuildModule("core", "core", emptyList())))
         val result = RunConfigurations.build(project, spring(app("Top", "."), app("Core", "core")), windows = true)
-        assertEquals(listOf(listOf("spring-boot:run"), listOf("-pl", "core", "-am", "spring-boot:run")), result.map { it.args })
+        assertEquals(listOf(listOf("spring-boot:run"), listOf("-pl", "core", "spring-boot:run")), result.map { it.args })
         assertTrue(result.all { it.kind == RunKind.springBoot && it.command == root.resolve("mvnw.cmd").toString() && it.cwd == root.toString() })
-        val bare = ProjectModel(BuildTool.maven, petshop.toString(), listOf(BuildModule("r", ".", emptyList())))
-        assertEquals("mvn", RunConfigurations.build(bare, spring(app("Top", ".")), windows = false).single().command)
+        val bare = Files.createTempDirectory("brewery-run-bare")
+        writePom(bare, pom(bootPlugin))
+        val noWrapper = ProjectModel(BuildTool.maven, bare.toString(), listOf(BuildModule("r", ".", emptyList())))
+        assertEquals("mvn", RunConfigurations.build(noWrapper, spring(app("Top", ".")), windows = false).single().command)
+    }
+
+    @Test
+    fun `maven emits nothing unless the boot plugin is declared`() {
+        val root = rootWith()
+        writePom(root, pom())
+        writePom(root.resolve("core"), pom())
+        val project = ProjectModel(BuildTool.maven, root.toString(), listOf(BuildModule("r", ".", emptyList()), BuildModule("core", "core", emptyList())))
+        assertEquals(emptyList(), RunConfigurations.build(project, spring(app("Top", "."), app("Core", "core")), windows = false))
+        // No pom at all (stale model) is also nothing.
+        Files.delete(root.resolve("core/pom.xml"))
+        assertEquals(emptyList(), RunConfigurations.build(project, spring(app("Core", "core")), windows = false))
+    }
+
+    @Test
+    fun `maven finds the boot plugin in an ancestor pom or the starter parent`() {
+        val root = rootWith()
+        val parent = "<parent><groupId>g</groupId><artifactId>a</artifactId><version>1</version></parent>"
+        writePom(root, pom("<build><pluginManagement><plugins><plugin><groupId>org.springframework.boot</groupId>" +
+            "<artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></pluginManagement></build>"))
+        writePom(root.resolve("core"), pom(parent))
+        writePom(root.resolve("starter"), pom(
+            "<parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId>" +
+                "<version>3.3.0</version><relativePath/></parent>",
+        ))
+        val project = ProjectModel(
+            BuildTool.maven, root.toString(),
+            listOf(BuildModule("r", ".", emptyList()), BuildModule("core", "core", emptyList()), BuildModule("s", "starter", emptyList())),
+        )
+        val result = RunConfigurations.build(project, spring(app("Core", "core"), app("Starter", "starter")), windows = false)
+        assertEquals(listOf("Core", "Starter"), result.map { it.label })
     }
 
     @Test
@@ -123,27 +169,37 @@ class RunConfigurationsTest {
     }
 
     @Test
-    fun `run configurations over the wire round-trip the fixture shape`() {
+    fun `run configurations over the wire round-trip every fixture entry`() {
         val daemon = BreweryDaemon(
-            modelReader = { ProjectModel(BuildTool.gradle, it.toString(), listOf(BuildModule("r", ":", tasks("bootRun")))) },
             windows = false,
+            modelReader = {
+                ProjectModel(
+                    BuildTool.gradle, it.toString(),
+                    listOf(BuildModule("r", ":", tasks("bootRun")), BuildModule("reports", ":reports", tasks("run"))),
+                )
+            },
         )
         val root = Files.createTempDirectory("brewery-run-wire")
         petshop.toFile().copyRecursively(root.toFile())
         Files.writeString(root.resolve("gradlew"), "")
+        val reports = Files.createDirectories(root.resolve("reports/src/main/java/com/example/reports"))
+        Files.writeString(
+            reports.resolve("ReportsApplication.java"),
+            "package com.example.reports;\n@SpringBootApplication\npublic class ReportsApplication {}\n",
+        )
         val server = wire(daemon)
         server.openProject(OpenProjectParams(root.toString())).get(10, TimeUnit.SECONDS)
         val received = server.runConfigurations(RunConfigurationsParams()).get(20, TimeUnit.SECONDS)
 
-        // The fixture's second entry documents the application fallback; only the first applies to this project.
         val placeholder = "/path/to/spring-petshop"
         val text = File("protocol/fixtures/run-configurations.json").readText()
-            .replace("$placeholder/gradlew", root.resolve("gradlew").toString().replace('\\', '/'))
             .replace(placeholder, root.toString().replace('\\', '/'))
-        val expected = gson.fromJson(text, Array<RunConfiguration>::class.java).toList().first()
+        val expected = gson.fromJson(text, Array<RunConfiguration>::class.java).toList()
         fun RunConfiguration.slashed() = copy(command = command.replace('\\', '/'), cwd = cwd.replace('\\', '/'))
-        assertEquals(listOf(expected), received.map { it.slashed() })
-        assertTrue("\"kind\":\"springBoot\"" in gson.toJson(received.first()))
+        assertEquals(expected.map { it.label }, received.map { it.label })
+        assertEquals(expected, received.map { it.slashed() })
+        val json = gson.toJson(received)
+        assertTrue("\"kind\":\"springBoot\"" in json && "\"kind\":\"application\"" in json, json)
         daemon.close()
     }
 

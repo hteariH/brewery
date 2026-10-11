@@ -8,7 +8,7 @@
   },
   {
     "label": "ReportsApplication",
-    "command": "gradle",
+    "command": "/path/to/spring-petshop/gradlew",
     "args": [":reports:run", "-PmainClass=com.example.reports.ReportsApplication"],
     "cwd": "/path/to/spring-petshop",
     "kind": "application"

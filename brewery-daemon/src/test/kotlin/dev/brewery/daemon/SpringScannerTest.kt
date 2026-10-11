@@ -145,6 +145,18 @@ class SpringScannerTest {
         assertTrue(gradle.beans.single().file.replace('\\', '/').contains("/a/b/src/main/java/"))
     }
 
+    @Test
+    fun `generated and build output directories are not scanned`() {
+        val root = copyPetshop()
+        val java = "package x; @Service class Hidden {}"
+        for (dir in listOf("src/main/java/com/example/petshop/build", "src/main/java/target", "build/generated", "target/classes")) {
+            Files.writeString(Files.createDirectories(root.resolve(dir)).resolve("Hidden.java"), java)
+        }
+        val result = scan(root)
+        assertEquals(5, result.beans.size)
+        assertTrue(result.beans.none { it.name == "hidden" })
+    }
+
     private class Wire(daemon: BreweryDaemon, client: BreweryClient) {
         val server: BreweryServer
         init {

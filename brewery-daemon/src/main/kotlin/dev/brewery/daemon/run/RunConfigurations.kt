@@ -7,6 +7,7 @@ import dev.brewery.daemon.spring.NameEnumAdapter
 import dev.brewery.daemon.spring.SpringApp
 import dev.brewery.daemon.spring.SpringModel
 import com.google.gson.annotations.JsonAdapter
+import org.apache.maven.model.io.xpp3.MavenXpp3Reader
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -29,6 +30,14 @@ data class RunConfiguration(
  * Builds the commands that start each Spring application. Wrapper detection mirrors the Rust side's
  * `brewery_build::task_command`: the wrapper is addressed by absolute path because the terminal's shell does
  * not look in the current directory, and [windows] is injected so the logic never reads `os.name` itself.
+ *
+ * Maven submodules run as `-pl <module> spring-boot:run` without `-am`: `-am` would also run the goal on every
+ * upstream library module, which fails there. The price is that sibling modules the application depends on must
+ * already be installed (`mvn install`) before the run configuration works.
+ *
+ * The Gradle `application` fallback passes `-PmainClass=<fqcn>` and assumes the build script reads that
+ * property (for example `application.mainClass = findProperty("mainClass")`); Gradle's `application` plugin
+ * itself only reads `application.mainClass`.
  */
 object RunConfigurations {
     fun build(project: ProjectModel, spring: SpringModel, windows: Boolean): List<RunConfiguration> {
@@ -40,10 +49,11 @@ object RunConfigurations {
         val module = project.modules.firstOrNull { it.path == app.modulePath }
         return when (project.buildTool) {
             BuildTool.maven -> {
+                if (!declaresBootPlugin(root, app.modulePath)) return null
                 val args = if (isMavenRoot(app.modulePath)) {
                     listOf("spring-boot:run")
                 } else {
-                    listOf("-pl", app.modulePath, "-am", "spring-boot:run")
+                    listOf("-pl", app.modulePath, "spring-boot:run")
                 }
                 RunConfiguration(app.name, wrapperOr(root, if (windows) "mvnw.cmd" else "mvnw", "mvn"), args, project.rootDir, RunKind.springBoot)
             }
@@ -65,6 +75,38 @@ object RunConfigurations {
             BuildTool.none -> null
         }
     }
+
+    /**
+     * True when the module's pom, an ancestor pom in the reactor, or the Spring Boot starter parent declares
+     * `spring-boot-maven-plugin`; without it `spring-boot:run` is not resolvable from the command line.
+     */
+    private fun declaresBootPlugin(root: Path, modulePath: String): Boolean {
+        var dir: Path? = if (isMavenRoot(modulePath)) root else root.resolve(modulePath)
+        var depth = 0
+        while (dir != null && depth++ < MAX_PARENT_DEPTH) {
+            val pom = dir.resolve("pom.xml")
+            val model = try {
+                Files.newBufferedReader(pom).use { MavenXpp3Reader().read(it) }
+            } catch (e: Exception) {
+                // Missing or malformed pom: nothing to prove the plugin is there.
+                return false
+            }
+            val plugins = model.build?.let { it.plugins + (it.pluginManagement?.plugins ?: emptyList()) } ?: emptyList()
+            if (plugins.any { it.artifactId == BOOT_PLUGIN && (it.groupId == null || it.groupId == BOOT_GROUP) }) return true
+            val parent = model.parent ?: return false
+            if (parent.groupId == BOOT_GROUP && parent.artifactId == BOOT_PARENT) return true
+            // Maven's default relativePath; a parent outside the project directory is not followed.
+            val relative = parent.relativePath.takeUnless { it.isNullOrEmpty() } ?: "../pom.xml"
+            val next = dir.resolve(relative).normalize().let { if (Files.isDirectory(it)) it else it.parent }
+            dir = next?.takeIf { it.startsWith(root) && it != dir }
+        }
+        return false
+    }
+
+    private const val BOOT_PLUGIN = "spring-boot-maven-plugin"
+    private const val BOOT_GROUP = "org.springframework.boot"
+    private const val BOOT_PARENT = "spring-boot-starter-parent"
+    private const val MAX_PARENT_DEPTH = 16
 
     private fun BuildModule?.hasTask(name: String) = this?.tasks?.any { it.name == name } == true
 
