@@ -1,0 +1,13 @@
+{
+  "buildTool": "gradle",
+  "rootDir": "/path/to/gradle-multi",
+  "modules": [
+    {
+      "name": "gradle-multi",
+      "path": ":",
+      "tasks": [
+        { "name": "build", "group": "build", "description": "Assembles and tests this project." }
+      ]
+    }
+  ]
+}

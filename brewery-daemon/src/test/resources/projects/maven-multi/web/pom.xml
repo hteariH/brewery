@@ -1,0 +1,9 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>dev.brewery.fixture</groupId>
+    <artifactId>maven-multi</artifactId>
+    <version>1.0</version>
+  </parent>
+  <artifactId>web</artifactId>
+</project>
