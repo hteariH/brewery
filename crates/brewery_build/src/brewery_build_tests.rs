@@ -1,11 +1,16 @@
 use super::*;
-use brewery_daemon_client::BuildTask;
+use brewery_daemon_client::{
+    BuildTask, Daemon, DaemonFactory, RunConfiguration, SpringModel, StartDaemon,
+};
+use futures::FutureExt as _;
+use futures::future::LocalBoxFuture;
 use gpui::{TestAppContext, VisualTestContext};
 use project::Project;
 use serde_json::json;
+use std::any::Any;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use util::path;
 use workspace::{AppState, MultiWorkspace};
 
@@ -152,6 +157,16 @@ fn failing_daemon(started: Rc<RefCell<Vec<PathBuf>>>) -> StartDaemon {
     })
 }
 
+fn add_panel(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<BuildPanel> {
+    workspace.update_in(cx, |workspace, window, cx| {
+        let weak = workspace.weak_handle();
+        let project = workspace.project().clone();
+        let panel = cx.new(|cx| BuildPanel::new(weak, project, window, cx));
+        workspace.add_panel(panel.clone(), window, cx);
+        panel
+    })
+}
+
 async fn workspace_with_panel(
     cx: &mut TestAppContext,
 ) -> (
@@ -172,13 +187,8 @@ async fn workspace_with_panel(
     let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
     let started = Rc::new(RefCell::new(Vec::new()));
     let start_daemon = failing_daemon(started.clone());
-    let panel = workspace.update_in(cx, |workspace, window, cx| {
-        let weak = workspace.weak_handle();
-        let project = workspace.project().clone();
-        let panel = cx.new(|cx| BuildPanel::new(weak, project, start_daemon, window, cx));
-        workspace.add_panel(panel.clone(), window, cx);
-        panel
-    });
+    cx.update(|_, cx| DaemonFactory::set(start_daemon, cx));
+    let panel = add_panel(&workspace, cx);
     (workspace, panel, started, cx)
 }
 
@@ -219,7 +229,7 @@ async fn first_show_connects_for_worktree_root_without_panicking(cx: &mut TestAp
             .error
             .as_ref()
             .expect("the failed start should be shown");
-        assert_eq!(error.kind, ErrorKind::Connection);
+        assert_eq!(error.kind, DaemonErrorKind::Connection);
         assert!(
             error.message.contains("no daemon in tests"),
             "{}",
@@ -246,45 +256,18 @@ fn only_the_second_click_activates() {
 fn reload_refetches_unless_the_daemon_is_unreachable() {
     assert_eq!(reload_action(true, None), ReloadAction::Refetch);
     assert_eq!(
-        reload_action(true, Some(ErrorKind::Import)),
+        reload_action(true, Some(DaemonErrorKind::Import)),
         ReloadAction::Refetch
     );
     assert_eq!(
-        reload_action(true, Some(ErrorKind::Connection)),
+        reload_action(true, Some(DaemonErrorKind::Connection)),
         ReloadAction::Restart
     );
     assert_eq!(reload_action(false, None), ReloadAction::Restart);
     assert_eq!(
-        reload_action(false, Some(ErrorKind::Import)),
+        reload_action(false, Some(DaemonErrorKind::Import)),
         ReloadAction::Restart
     );
-}
-
-#[test]
-fn restart_policy_allows_three_restarts_per_window() {
-    let mut policy = RestartPolicy::default();
-    let start = Instant::now();
-    assert!(policy.allow(start));
-    assert!(policy.allow(start + Duration::from_secs(10)));
-    assert!(policy.allow(start + Duration::from_secs(20)));
-    assert!(!policy.allow(start + Duration::from_secs(30)));
-    // A refused restart is not recorded, so it does not extend the ban.
-    assert!(!policy.allow(start + Duration::from_secs(299)));
-    // The first restart leaves the window after five minutes.
-    assert!(policy.allow(start + Duration::from_secs(300)));
-    assert!(!policy.allow(start + Duration::from_secs(301)));
-}
-
-#[test]
-fn restart_policy_reset_forgets_history() {
-    let mut policy = RestartPolicy::default();
-    let now = Instant::now();
-    for _ in 0..3 {
-        assert!(policy.allow(now));
-    }
-    assert!(!policy.allow(now));
-    policy.reset();
-    assert!(policy.allow(now));
 }
 
 type ExitHandlers = Arc<std::sync::Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
@@ -299,7 +282,19 @@ impl Daemon for FakeDaemon {
         async { Ok(model(BuildTool::Gradle, Path::new("/root"))) }.boxed_local()
     }
 
+    fn spring_model(&self) -> LocalBoxFuture<'_, Result<SpringModel>> {
+        async { Ok(SpringModel::default()) }.boxed_local()
+    }
+
+    fn run_configurations(&self) -> LocalBoxFuture<'_, Result<Vec<RunConfiguration>>> {
+        async { Ok(Vec::new()) }.boxed_local()
+    }
+
     fn on_project_changed(&self, _: Box<dyn Fn() + Send>) -> Box<dyn Any> {
+        Box::new(())
+    }
+
+    fn on_spring_changed(&self, _: Box<dyn Fn() + Send>) -> Box<dyn Any> {
         Box::new(())
     }
 
@@ -333,13 +328,8 @@ async fn a_dead_daemon_is_restarted_a_few_times_then_reported(cx: &mut TestAppCo
     let started = Rc::new(RefCell::new(0));
     let exit_handlers: ExitHandlers = Default::default();
     let start_daemon = dying_daemon(started.clone(), exit_handlers.clone());
-    let panel = workspace.update_in(cx, |workspace, window, cx| {
-        let weak = workspace.weak_handle();
-        let project = workspace.project().clone();
-        let panel = cx.new(|cx| BuildPanel::new(weak, project, start_daemon, window, cx));
-        workspace.add_panel(panel.clone(), window, cx);
-        panel
-    });
+    cx.update(|_, cx| DaemonFactory::set(start_daemon, cx));
+    let panel = add_panel(&workspace, cx);
 
     cx.dispatch_action(ToggleBuildPanel);
     cx.run_until_parked();
@@ -369,9 +359,12 @@ async fn a_dead_daemon_is_restarted_a_few_times_then_reported(cx: &mut TestAppCo
     assert_eq!(*started.borrow(), 4, "the fourth death is not restarted");
     panel.read_with(cx, |panel, _| {
         let error = panel.error.as_ref().expect("the failure should be shown");
-        assert_eq!(error.kind, ErrorKind::Connection);
+        assert_eq!(error.kind, DaemonErrorKind::Connection);
         assert_eq!(error.message, DAEMON_KEEPS_STOPPING);
-        assert!(panel.client.is_none());
+    });
+    panel.read_with(cx, |panel, cx| {
+        let daemon = panel.daemon.as_ref().expect("the panel keeps its daemon");
+        assert!(!daemon.read(cx).is_ready());
     });
     cx.run_until_parked();
     workspace.read_with(cx, |workspace, _| {
@@ -389,4 +382,40 @@ async fn a_dead_daemon_is_restarted_a_few_times_then_reported(cx: &mut TestAppCo
     panel.read_with(cx, |panel, _| assert!(panel.error.is_none()));
     kill(cx);
     assert_eq!(*started.borrow(), 6);
+}
+
+#[gpui::test]
+async fn the_panel_joins_a_daemon_another_panel_started(cx: &mut TestAppContext) {
+    let app_state = init_test(cx);
+    app_state
+        .fs
+        .as_fake()
+        .insert_tree(path!("/root"), json!({ "build.gradle": "" }))
+        .await;
+    let project = Project::test(app_state.fs.clone(), [path!("/root").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let started = Rc::new(RefCell::new(0));
+    let exit_handlers: ExitHandlers = Default::default();
+    cx.update(|_, cx| DaemonFactory::set(dying_daemon(started.clone(), exit_handlers), cx));
+
+    // Stands in for the Services panel, which may be opened first.
+    let other = cx.update(|_, cx| ProjectDaemon::for_project(&project, cx));
+    cx.run_until_parked();
+    assert!(other.read_with(cx, |daemon, _| daemon.is_ready()));
+
+    let panel = add_panel(&workspace, cx);
+    cx.dispatch_action(ToggleBuildPanel);
+    cx.run_until_parked();
+
+    assert_eq!(*started.borrow(), 1, "one daemon serves both");
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(
+            panel.daemon.as_ref().map(Entity::entity_id),
+            Some(other.entity_id())
+        );
+        assert!(panel.model.is_some(), "a ready daemon is used right away");
+        assert!(panel.error.is_none());
+    });
 }

@@ -2433,12 +2433,16 @@ name = "brewery_daemon_client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fs",
+ "futures 0.3.34",
  "gpui",
  "log",
  "lsp",
  "parking_lot",
+ "project",
  "serde",
  "serde_json",
+ "settings",
  "util",
 ]
 

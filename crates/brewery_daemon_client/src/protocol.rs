@@ -73,6 +73,104 @@ pub struct ProjectModel {
     pub modules: Vec<BuildModule>,
 }
 
+/// Empty object, same reasoning as `ProjectModelParams`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpringModelParams {}
+
+/// Empty object, same reasoning as `ProjectModelParams`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunConfigurationsParams {}
+
+/// Empty object, same reasoning as `ProjectModelParams`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpringChangedParams {}
+
+/// What the daemon finds in the Java sources by syntax alone (annotations matched by name).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpringModel {
+    pub applications: Vec<SpringApp>,
+    pub beans: Vec<SpringBean>,
+    pub endpoints: Vec<SpringEndpoint>,
+}
+
+/// A `@SpringBootApplication` class. `file` is absolute, `line` is 1-based.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpringApp {
+    pub name: String,
+    pub main_class: String,
+    pub module_path: String,
+    pub file: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpringBean {
+    pub name: String,
+    /// The declared type as written in the source (not resolved).
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub kind: SpringBeanKind,
+    pub file: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SpringBeanKind {
+    Component,
+    Service,
+    Repository,
+    Controller,
+    RestController,
+    Configuration,
+    /// A `@Bean` method.
+    Bean,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpringEndpoint {
+    pub method: HttpMethod,
+    pub path: String,
+    /// `SimpleClass#method`.
+    pub handler: String,
+    pub file: String,
+    pub line: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Patch,
+    /// `@RequestMapping` without a `method`.
+    Any,
+}
+
+/// A ready-to-run command line for an application found in the sources.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunConfiguration {
+    pub label: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+    pub kind: RunConfigurationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RunConfigurationKind {
+    SpringBoot,
+    Application,
+}
+
 pub enum Initialize {}
 impl Request for Initialize {
     type Params = InitializeParams;
@@ -105,6 +203,27 @@ pub enum ProjectChanged {}
 impl Notification for ProjectChanged {
     type Params = ProjectChangedParams;
     const METHOD: &'static str = "project/changed";
+}
+
+pub enum GetSpringModel {}
+impl Request for GetSpringModel {
+    type Params = SpringModelParams;
+    type Result = SpringModel;
+    const METHOD: &'static str = "spring/model";
+}
+
+pub enum GetRunConfigurations {}
+impl Request for GetRunConfigurations {
+    type Params = RunConfigurationsParams;
+    type Result = Vec<RunConfiguration>;
+    const METHOD: &'static str = "run/configurations";
+}
+
+/// Java sources changed; debounced on the daemon side like `project/changed`.
+pub enum SpringChanged {}
+impl Notification for SpringChanged {
+    type Params = SpringChangedParams;
+    const METHOD: &'static str = "spring/changed";
 }
 
 #[cfg(test)]
@@ -168,6 +287,142 @@ mod tests {
     fn empty_params_serialise_as_objects() {
         assert_eq!(
             serde_json::to_value(ProjectModelParams {}).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    const SPRING_MODEL: &str =
+        include_str!("../../../brewery-daemon/protocol/fixtures/spring-model.json");
+    const RUN_CONFIGURATIONS: &str =
+        include_str!("../../../brewery-daemon/protocol/fixtures/run-configurations.json");
+
+    /// The daemon writes these fixtures with a placeholder root (`/path/to/spring-petshop`) that
+    /// its own tests swap for the real fixture directory; here it is just a string, so the
+    /// fixture is compared as is.
+    fn round_trips<T: serde::de::DeserializeOwned + Serialize>(fixture: &str) -> T {
+        let expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let parsed: T = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), expected);
+        parsed
+    }
+
+    #[test]
+    fn spring_model_fixture_round_trips() {
+        let model: SpringModel = round_trips(SPRING_MODEL);
+        assert_eq!(model.applications.len(), 1);
+        let app = &model.applications[0];
+        assert_eq!(app.name, "PetshopApplication");
+        assert_eq!(app.main_class, "com.example.petshop.PetshopApplication");
+        assert_eq!(app.module_path, ":");
+        assert!(
+            app.file.ends_with("PetshopApplication.java"),
+            "{}",
+            app.file
+        );
+        assert_eq!(app.line, 6);
+
+        let kinds: Vec<(&str, SpringBeanKind)> = model
+            .beans
+            .iter()
+            .map(|bean| (bean.name.as_str(), bean.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("appConfig", SpringBeanKind::Configuration),
+                ("clock", SpringBeanKind::Bean),
+                ("ownerController", SpringBeanKind::RestController),
+                ("ownerRepository", SpringBeanKind::Repository),
+                ("ownerService", SpringBeanKind::Service),
+            ]
+        );
+        assert_eq!(model.beans[1].type_name, "Clock");
+
+        let endpoints: Vec<(HttpMethod, &str, &str)> = model
+            .endpoints
+            .iter()
+            .map(|endpoint| {
+                (
+                    endpoint.method,
+                    endpoint.path.as_str(),
+                    endpoint.handler.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            endpoints,
+            vec![
+                (HttpMethod::Get, "/owners", "OwnerController#list"),
+                (HttpMethod::Get, "/owners/{id}", "OwnerController#get"),
+                (HttpMethod::Post, "/owners", "OwnerController#create"),
+                (HttpMethod::Any, "/owners/legacy", "OwnerController#legacy"),
+            ]
+        );
+        assert_eq!(model.endpoints[0].line, 19);
+    }
+
+    #[test]
+    fn every_bean_kind_and_method_has_its_wire_name() {
+        let kinds = [
+            (SpringBeanKind::Component, "component"),
+            (SpringBeanKind::Service, "service"),
+            (SpringBeanKind::Repository, "repository"),
+            (SpringBeanKind::Controller, "controller"),
+            (SpringBeanKind::RestController, "restController"),
+            (SpringBeanKind::Configuration, "configuration"),
+            (SpringBeanKind::Bean, "bean"),
+        ];
+        for (kind, name) in kinds {
+            assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(name));
+        }
+        let methods = [
+            (HttpMethod::Get, "GET"),
+            (HttpMethod::Post, "POST"),
+            (HttpMethod::Put, "PUT"),
+            (HttpMethod::Delete, "DELETE"),
+            (HttpMethod::Patch, "PATCH"),
+            (HttpMethod::Any, "ANY"),
+        ];
+        for (method, name) in methods {
+            assert_eq!(
+                serde_json::to_value(method).unwrap(),
+                serde_json::json!(name)
+            );
+        }
+    }
+
+    #[test]
+    fn run_configurations_fixture_round_trips() {
+        let configurations: Vec<RunConfiguration> = round_trips(RUN_CONFIGURATIONS);
+        assert_eq!(configurations.len(), 2);
+        let boot = &configurations[0];
+        assert_eq!(boot.label, "PetshopApplication");
+        assert_eq!(boot.command, "/path/to/spring-petshop/gradlew");
+        assert_eq!(boot.args, vec!["bootRun".to_string()]);
+        assert_eq!(boot.cwd, "/path/to/spring-petshop");
+        assert_eq!(boot.kind, RunConfigurationKind::SpringBoot);
+        let plain = &configurations[1];
+        assert_eq!(plain.kind, RunConfigurationKind::Application);
+        assert_eq!(
+            plain.args,
+            vec![
+                ":reports:run".to_string(),
+                "-PmainClass=com.example.reports.ReportsApplication".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn new_methods_use_the_daemon_names() {
+        assert_eq!(GetSpringModel::METHOD, "spring/model");
+        assert_eq!(GetRunConfigurations::METHOD, "run/configurations");
+        assert_eq!(SpringChanged::METHOD, "spring/changed");
+        assert_eq!(
+            serde_json::to_value(SpringModelParams {}).unwrap(),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            serde_json::to_value(RunConfigurationsParams {}).unwrap(),
             serde_json::json!({})
         );
     }

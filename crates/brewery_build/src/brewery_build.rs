@@ -2,20 +2,18 @@
 //! reads from the build files and runs a task in the terminal on double click/Enter.
 
 use anyhow::Result;
-use brewery_daemon_client::{BuildModule, BuildTool, DaemonClient, ProjectModel, is_import_error};
-use futures::future::LocalBoxFuture;
-use futures::{FutureExt as _, StreamExt as _};
+use brewery_daemon_client::{
+    BuildModule, BuildTool, DAEMON_KEEPS_STOPPING, DaemonErrorKind, DaemonState, ProjectDaemon,
+    ProjectDaemonEvent, ProjectModel,
+};
 use gpui::{
-    Action, App, AsyncApp, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, Pixels, Render, ScrollHandle, SharedString, Task, WeakEntity, Window,
+    Action, App, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, Pixels, Render, ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window,
     actions, px,
 };
 use project::{Project, TaskSourceKind};
-use std::any::Any;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::time::{Duration, Instant};
 use task::{TaskContext, TaskTemplate};
 use ui::{ListItem, ListItemSpacing, Tooltip, prelude::*};
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -127,90 +125,6 @@ enum Entry {
     Task(usize, usize),
 }
 
-/// What the panel needs from a running daemon; tests substitute a fake that never starts a JVM.
-pub trait Daemon {
-    fn project_model(&self) -> LocalBoxFuture<'_, Result<ProjectModel>>;
-    /// The handler lives as long as the returned guard.
-    fn on_project_changed(&self, f: Box<dyn Fn() + Send>) -> Box<dyn Any>;
-    /// Calls `f` if the daemon dies on its own.
-    fn on_exit(&self, f: Box<dyn FnOnce() + Send>);
-}
-
-impl Daemon for DaemonClient {
-    fn project_model(&self) -> LocalBoxFuture<'_, Result<ProjectModel>> {
-        DaemonClient::project_model(self).boxed_local()
-    }
-
-    fn on_project_changed(&self, f: Box<dyn Fn() + Send>) -> Box<dyn Any> {
-        Box::new(DaemonClient::on_project_changed(self, f))
-    }
-
-    fn on_exit(&self, f: Box<dyn FnOnce() + Send>) {
-        DaemonClient::on_exit(self, f)
-    }
-}
-
-/// How the panel gets a running daemon for a project root.
-pub type StartDaemon =
-    Rc<dyn Fn(PathBuf, AsyncApp) -> LocalBoxFuture<'static, Result<Rc<dyn Daemon>>>>;
-
-fn start_real_daemon(
-    root: PathBuf,
-    mut cx: AsyncApp,
-) -> LocalBoxFuture<'static, Result<Rc<dyn Daemon>>> {
-    async move {
-        let client: Rc<dyn Daemon> = Rc::new(DaemonClient::start(&root, &mut cx).await?);
-        Ok(client)
-    }
-    .boxed_local()
-}
-
-const MAX_RESTARTS: usize = 3;
-const RESTART_WINDOW: Duration = Duration::from_secs(5 * 60);
-
-/// Allows a dead daemon to be restarted a few times, so that a daemon which dies right
-/// after every start does not loop forever.
-struct RestartPolicy {
-    max: usize,
-    window: Duration,
-    history: VecDeque<Instant>,
-}
-
-impl Default for RestartPolicy {
-    fn default() -> Self {
-        Self {
-            max: MAX_RESTARTS,
-            window: RESTART_WINDOW,
-            history: VecDeque::new(),
-        }
-    }
-}
-
-impl RestartPolicy {
-    /// Records a restart at `now` and returns whether it is allowed.
-    fn allow(&mut self, now: Instant) -> bool {
-        while self
-            .history
-            .front()
-            .is_some_and(|&at| now.saturating_duration_since(at) >= self.window)
-        {
-            self.history.pop_front();
-        }
-        if self.history.len() >= self.max {
-            return false;
-        }
-        self.history.push_back(now);
-        true
-    }
-
-    fn reset(&mut self) {
-        self.history.clear();
-    }
-}
-
-const DAEMON_KEEPS_STOPPING: &str =
-    "The Brewery daemon stopped repeatedly. Open the log and press Reload.";
-
 pub struct BuildPanel {
     workspace: WeakEntity<Workspace>,
     /// Held directly because `Panel` callbacks such as `set_active` run while the
@@ -219,16 +133,10 @@ pub struct BuildPanel {
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
     position: DockPosition,
-    /// Launches the daemon; tests swap it out so that they never start a JVM.
-    start_daemon: StartDaemon,
-    connected_once: bool,
-    /// Dropping the client stops the daemon process.
-    client: Option<Rc<dyn Daemon>>,
-    restart_policy: RestartPolicy,
-    _project_changed: Option<Box<dyn Any>>,
-    _watch_changes: Option<Task<()>>,
-    _watch_exit: Option<Task<()>>,
-    connect_task: Option<Task<()>>,
+    /// Shared with the other Brewery panels of the project; requested on first show because the
+    /// JVM is only worth starting once someone looks at the panel.
+    daemon: Option<Entity<ProjectDaemon>>,
+    _daemon_events: Option<Subscription>,
     fetch_task: Option<Task<()>>,
     model: Option<ProjectModel>,
     error: Option<PanelError>,
@@ -237,34 +145,15 @@ pub struct BuildPanel {
     selected: Option<usize>,
 }
 
-/// Why the panel shows an error. They are kept apart because the fix differs: a broken build is
-/// retried against the running daemon, while a daemon that never started (or died) is restarted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ErrorKind {
-    Connection,
-    Import,
-}
-
 struct PanelError {
-    kind: ErrorKind,
+    kind: DaemonErrorKind,
     message: SharedString,
 }
 
 impl PanelError {
-    fn connection(message: impl Into<SharedString>) -> Self {
-        Self {
-            kind: ErrorKind::Connection,
-            message: message.into(),
-        }
-    }
-
     fn from_fetch(error: &anyhow::Error) -> Self {
         Self {
-            kind: if is_import_error(error) {
-                ErrorKind::Import
-            } else {
-                ErrorKind::Connection
-            },
+            kind: DaemonErrorKind::of(error),
             message: format!("{error:#}").into(),
         }
     }
@@ -277,9 +166,9 @@ enum ReloadAction {
 }
 
 /// A live daemon is reused unless the last failure was about reaching it.
-fn reload_action(connected: bool, last_error: Option<ErrorKind>) -> ReloadAction {
+fn reload_action(connected: bool, last_error: Option<DaemonErrorKind>) -> ReloadAction {
     match (connected, last_error) {
-        (true, None | Some(ErrorKind::Import)) => ReloadAction::Refetch,
+        (true, None | Some(DaemonErrorKind::Import)) => ReloadAction::Refetch,
         _ => ReloadAction::Restart,
     }
 }
@@ -297,14 +186,13 @@ impl BuildPanel {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             let weak = workspace.weak_handle();
             let project = workspace.project().clone();
-            cx.new(|cx| Self::new(weak, project, Rc::new(start_real_daemon), window, cx))
+            cx.new(|cx| Self::new(weak, project, window, cx))
         })
     }
 
     pub fn new(
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
-        start_daemon: StartDaemon,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -314,14 +202,8 @@ impl BuildPanel {
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
             position: DockPosition::Right,
-            start_daemon,
-            connected_once: false,
-            client: None,
-            restart_policy: RestartPolicy::default(),
-            _project_changed: None,
-            _watch_changes: None,
-            _watch_exit: None,
-            connect_task: None,
+            daemon: None,
+            _daemon_events: None,
             fetch_task: None,
             model: None,
             error: None,
@@ -331,101 +213,70 @@ impl BuildPanel {
         }
     }
 
-    fn project_root(&self, cx: &App) -> Option<PathBuf> {
-        let worktree = self.project.read(cx).visible_worktrees(cx).next()?;
-        Some(worktree.read(cx).abs_path().to_path_buf())
-    }
-
     /// Restarts the daemon after a failure (the JDK or the jar may have appeared
     /// since), otherwise asks the running daemon for a fresh model.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let Some(daemon) = self.daemon.clone() else {
+            self.connect(cx);
+            return;
+        };
         let last_error = self.error.as_ref().map(|error| error.kind);
-        match reload_action(self.client.is_some(), last_error) {
+        match reload_action(daemon.read(cx).is_ready(), last_error) {
             ReloadAction::Refetch => self.fetch_model(cx),
-            ReloadAction::Restart => {
-                // Pressing Reload is the user's answer to "stopped repeatedly".
-                self.restart_policy.reset();
-                self.connect(cx);
+            ReloadAction::Restart => daemon.update(cx, |daemon, cx| daemon.reload(cx)),
+        }
+    }
+
+    /// Only touches the project and globals, so it is safe from `set_active`, which runs while
+    /// the workspace is being updated.
+    fn connect(&mut self, cx: &mut Context<Self>) {
+        let daemon = ProjectDaemon::for_project(&self.project, cx);
+        self._daemon_events = Some(cx.subscribe(&daemon, Self::on_daemon_event));
+        let state = daemon.read(cx).state().clone();
+        self.daemon = Some(daemon);
+        // The daemon may already be running for another panel, so catch up with its state.
+        match state {
+            DaemonState::Connecting => self.show_connecting(cx),
+            DaemonState::Ready => self.fetch_model(cx),
+            DaemonState::Failed { error, kind } => self.show_failure(error, kind, cx),
+        }
+    }
+
+    fn on_daemon_event(
+        &mut self,
+        daemon: Entity<ProjectDaemon>,
+        event: &ProjectDaemonEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ProjectDaemonEvent::Connecting => self.show_connecting(cx),
+            ProjectDaemonEvent::Ready | ProjectDaemonEvent::ProjectChanged => self.fetch_model(cx),
+            ProjectDaemonEvent::SpringChanged => {}
+            ProjectDaemonEvent::Failed { gave_up } => {
+                if let DaemonState::Failed { error, kind } = daemon.read(cx).state().clone() {
+                    self.show_failure(error, kind, cx);
+                }
+                if *gave_up {
+                    self.notify_daemon_gave_up(cx);
+                }
             }
         }
     }
 
-    fn disconnect(&mut self) {
+    fn show_connecting(&mut self, cx: &mut Context<Self>) {
         self.fetch_task = None;
-        self.connect_task = None;
-        self._watch_changes = None;
-        self._watch_exit = None;
-        self._project_changed = None;
-        self.client = None;
-    }
-
-    fn connect(&mut self, cx: &mut Context<Self>) {
-        self.connected_once = true;
-        self.disconnect();
-        let Some(root) = self.project_root(cx) else {
-            self.error = Some(PanelError::connection(
-                "Open a folder to see its Gradle or Maven project.",
-            ));
-            cx.notify();
-            return;
-        };
         self.error = None;
         self.busy = Some("Starting brewery-daemon…".into());
         cx.notify();
-        let start = (self.start_daemon)(root, cx.to_async());
-        self.connect_task = Some(cx.spawn(async move |this, cx| {
-            let result = start.await;
-            this.update(cx, |this, cx| match result {
-                Ok(client) => this.attach(client, cx),
-                Err(error) => {
-                    this.busy = None;
-                    this.error = Some(PanelError::connection(format!("{error:#}")));
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
     }
 
-    fn attach(&mut self, client: Rc<dyn Daemon>, cx: &mut Context<Self>) {
-        // The daemon notifies from its I/O thread; a channel brings that back to
-        // the panel's foreground task.
-        let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
-        self._project_changed = Some(client.on_project_changed(Box::new(move || {
-            tx.unbounded_send(()).ok();
-        })));
-        self._watch_changes = Some(cx.spawn(async move |this, cx| {
-            while rx.next().await.is_some() {
-                if this.update(cx, |this, cx| this.fetch_model(cx)).is_err() {
-                    break;
-                }
-            }
-        }));
-        // Same hop for the exit notification, which comes from the watchdog thread.
-        let (exit_tx, mut exit_rx) = futures::channel::mpsc::unbounded::<()>();
-        client.on_exit(Box::new(move || {
-            exit_tx.unbounded_send(()).ok();
-        }));
-        self._watch_exit = Some(cx.spawn(async move |this, cx| {
-            if exit_rx.next().await.is_some() {
-                this.update(cx, |this, cx| this.on_daemon_exit(cx)).ok();
-            }
-        }));
-        self.client = Some(client);
-        self.fetch_model(cx);
-    }
-
-    /// Only reached when the process died by itself: a deliberate disconnect drops the
-    /// watchdog first.
-    fn on_daemon_exit(&mut self, cx: &mut Context<Self>) {
-        if self.restart_policy.allow(Instant::now()) {
-            self.connect(cx);
-            return;
-        }
-        self.disconnect();
+    fn show_failure(&mut self, error: SharedString, kind: DaemonErrorKind, cx: &mut Context<Self>) {
+        self.fetch_task = None;
         self.busy = None;
-        self.error = Some(PanelError::connection(DAEMON_KEEPS_STOPPING));
-        self.notify_daemon_gave_up(cx);
+        self.error = Some(PanelError {
+            kind,
+            message: error,
+        });
         cx.notify();
     }
 
@@ -452,15 +303,21 @@ impl BuildPanel {
         });
     }
 
+    /// While the daemon is not ready this waits: its next event says what to show.
     fn fetch_model(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+        let Some(daemon) = self.daemon.clone() else {
             self.connect(cx);
             return;
         };
+        let daemon = daemon.read(cx);
+        if !daemon.is_ready() {
+            return;
+        }
+        let model = daemon.project_model(cx);
         self.busy = Some("Importing the project…".into());
         cx.notify();
         self.fetch_task = Some(cx.spawn(async move |this, cx| {
-            let result = client.project_model().await;
+            let result = model.await;
             this.update(cx, |this, cx| {
                 this.busy = None;
                 match result {
@@ -837,7 +694,7 @@ impl Panel for BuildPanel {
 
     fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
         // The JVM is only worth starting once someone looks at the panel.
-        if active && !self.connected_once {
+        if active && self.daemon.is_none() {
             self.connect(cx);
         }
     }

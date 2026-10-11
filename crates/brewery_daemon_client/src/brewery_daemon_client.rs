@@ -6,17 +6,27 @@
 //! daemon speaks its own `initialize` (see `protocol`).
 
 mod jdk;
+mod project_daemon;
 pub mod protocol;
 
 pub use jdk::{JdkCandidate, find_daemon_jar, find_java, parse_release_version, pick_jdk};
-pub use protocol::{BuildModule, BuildTask, BuildTool, PROTOCOL_VERSION, ProjectModel};
+pub use project_daemon::{
+    DAEMON_KEEPS_STOPPING, Daemon, DaemonErrorKind, DaemonFactory, DaemonState, ProjectDaemon,
+    ProjectDaemonEvent, StartDaemon,
+};
+pub use protocol::{
+    BuildModule, BuildTask, BuildTool, HttpMethod, PROTOCOL_VERSION, ProjectModel,
+    RunConfiguration, RunConfigurationKind, SpringApp, SpringBean, SpringBeanKind, SpringEndpoint,
+    SpringModel,
+};
 
 use anyhow::{Context as _, Error, Result, bail};
 use gpui::{AppContext as _, AsyncApp, BackgroundExecutor, Task};
 use parking_lot::Mutex;
 use protocol::{
-    GetProjectModel, Initialize, InitializeParams, OpenProject, OpenProjectParams, ProjectChanged,
-    ProjectModelParams,
+    GetProjectModel, GetRunConfigurations, GetSpringModel, Initialize, InitializeParams,
+    OpenProject, OpenProjectParams, ProjectChanged, ProjectModelParams, RunConfigurationsParams,
+    SpringChanged, SpringModelParams,
 };
 use std::ffi::OsString;
 use std::path::Path;
@@ -134,11 +144,36 @@ impl DaemonClient {
             .context("brewery-daemon could not read the project model")
     }
 
+    /// Scanning reads every Java source of the project, so it gets the import timeout too.
+    pub async fn spring_model(&self) -> Result<SpringModel> {
+        self.server
+            .request::<GetSpringModel>(SpringModelParams {}, IMPORT_TIMEOUT)
+            .await
+            .into_response()
+            .context("brewery-daemon could not read the Spring model")
+    }
+
+    /// Built from the project and Spring models, so it may wait for an import as well.
+    pub async fn run_configurations(&self) -> Result<Vec<RunConfiguration>> {
+        self.server
+            .request::<GetRunConfigurations>(RunConfigurationsParams {}, IMPORT_TIMEOUT)
+            .await
+            .into_response()
+            .context("brewery-daemon could not list the run configurations")
+    }
+
     /// Calls `f` whenever the daemon reports that build files changed. The handler is
     /// removed when the returned subscription is dropped.
     pub fn on_project_changed(&self, f: impl Fn() + Send + 'static) -> lsp::Subscription {
         self.server
             .on_notification::<ProjectChanged, _>(move |_, _| f())
+    }
+
+    /// Calls `f` whenever the daemon reports that Java sources changed. The handler is
+    /// removed when the returned subscription is dropped.
+    pub fn on_spring_changed(&self, f: impl Fn() + Send + 'static) -> lsp::Subscription {
+        self.server
+            .on_notification::<SpringChanged, _>(move |_, _| f())
     }
 
     /// Calls `f` once if the daemon process terminates by itself. Nothing is reported once
