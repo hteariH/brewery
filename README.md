@@ -64,7 +64,12 @@ it has limits:
 - Maven parent poms outside the project are not followed when looking for the
   Spring Boot plugin.
 
-Completion for `application.yml` and `application.properties` comes later (M3b).
+In `application*.properties` and `application*.yml`/`.yaml` files, Brewery
+completes Spring Boot configuration keys and boolean and hint values, shows
+descriptions on hover, and warns about unknown and deprecated keys. It uses the
+`spring-configuration-metadata.json` files of the project's dependencies: Gradle
+projects are read through the Tooling API, and Maven projects through
+`dependency:build-classpath`. The Brewery daemon needs a JDK 21 or newer.
 
 ## Licence
 
