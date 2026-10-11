@@ -52,6 +52,18 @@ with Gradle `bootRun` or Maven `spring-boot:run`.
 Maven multi-module apps need their sibling modules installed first, so run
 `mvn install` at the root before starting one of them.
 
+The scan reads the source text only, with no classpath or symbol resolution, so
+it has limits:
+
+- Records and enums are not scanned.
+- Spring Data repositories that are not annotated with `@Repository` are not found.
+- A mapping path written as a constant shows as the class-level prefix only.
+- Controllers with the same simple name are grouped together in the tree.
+- A custom Gradle `projectDir` is not supported; modules are looked up under the
+  default layout.
+- Maven parent poms outside the project are not followed when looking for the
+  Spring Boot plugin.
+
 Completion for `application.yml` and `application.properties` comes later (M3b).
 
 ## Licence
