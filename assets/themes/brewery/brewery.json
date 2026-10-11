@@ -7,7 +7,7 @@
       "name": "Brewery Dark",
       "appearance": "dark",
       "style": {
-        "border": "#1e1f22ff",
+        "border": "#393b40ff",
         "border.variant": "#393b40ff",
         "border.focused": "#3574f0ff",
         "border.selected": "#3574f0ff",

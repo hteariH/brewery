@@ -48,7 +48,7 @@ DARK = {
         "editor.document_highlight.write_background": c("40332b"),
         "terminal.background": c("1e1f22"),
         "terminal.foreground": c("bcbec4"),
-        "border": c("1e1f22"),
+        "border": c("393b40"),
         "border.variant": c("393b40"),
         "border.focused": c("3574f0"),
         "border.selected": c("3574f0"),

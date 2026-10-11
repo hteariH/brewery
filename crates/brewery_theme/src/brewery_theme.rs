@@ -102,6 +102,22 @@ mod tests {
     }
 
     #[test]
+    fn test_border_is_visible_against_editor_terminal_and_panel() {
+        let family: serde_json::Value = serde_json::from_str(THEME_JSON).expect("valid JSON");
+        for theme in family["themes"].as_array().expect("themes is an array") {
+            let style = &theme["style"];
+            let name = theme["name"].as_str().unwrap_or("?");
+            let border = style["border"].as_str().expect("border is a string");
+            for surface in ["editor.background", "terminal.background", "panel.background"] {
+                assert_ne!(
+                    border, style[surface],
+                    "{name}: border must differ from {surface} so docked panels stay separated"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_icon_theme_covers_every_zed_icon_key() {
         let family = theme::deserialize_icon_theme(ICON_THEME_JSON.as_bytes())
             .expect("icon_theme.json is valid");
