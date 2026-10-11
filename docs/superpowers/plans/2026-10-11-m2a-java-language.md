@@ -44,3 +44,24 @@ and inside `"lsp": {` before the commented examples:
 
 ### Task 2: On-screen check (controller)
 - [ ] Clean trusted profile, open the demo Spring project; wait for the extension to install and jdtls to start; check Java highlighting, outline (Structure), hover/diagnostics on a broken line, and that `build.gradle.kts` and `application.yml` highlight.
+
+### Task 3: Retry extension downloads (found on screen: jdtls download reset mid-transfer)
+
+The Java extension downloads jdtls (~51 MB) through the extension host's `download_file`; one connection reset ("An existing connection was forcibly closed by the remote host", os error 10054) leaves Java without a language server, and Zed does not retry.
+
+**Files:** `crates/extension_host/src/wasm_host/wit/since_v0_8_0.rs` (`download_file`, ~line 1076); if other `since_v0_*` versions share a helper, prefer changing the helper once.
+
+- [ ] Wrap the request + write/extract part of `download_file` in a retry loop: up to 3 attempts, backoff 1 s then 3 s (`self.host.executor` timer or `smol::Timer`), retrying only on transport errors and 5xx statuses (not 4xx, not capability errors). Before each retry remove any partial destination (`fs.remove_file`/`remove_dir` with `ignore_if_not_exists`). Log each retry at `warn` with the URL and attempt number. Marker `// brewery: retry flaky downloads (jdtls is ~50 MB)`.
+- [ ] Test: in the extension_host test module (find how existing wasm host tests build a host with a `FakeHttpClient`), a fake client that fails the first request with an IO error and succeeds the second must lead to a successful download; a 404 must fail without retry. If building the wasm host in a test is impractical, extract the retry policy into a small pure function (`fn should_retry(attempt: usize, error: &DownloadError) -> Option<Duration>`) next to `download_file` and unit-test that, and report the gap.
+- [ ] `cargo test -p extension_host`, `cargo clippy -p extension_host -- -D warnings`. Commit `fix: retry extension file downloads`.
+
+### Task 4: Visible border between the editor and docked panels (user report)
+
+In Brewery Dark the `border` colour equals the editor and terminal background (`#1e1f22`), so the line between the editor and the bottom terminal panel disappears.
+
+**Files:** `script/brewery/gen_themes.py`, regenerated `assets/themes/brewery/brewery.json`, `crates/brewery_theme/src/brewery_theme.rs` (test).
+
+- [ ] Test first (brewery_theme): for both themes, `border` must differ from `editor.background`, `terminal.background` and `panel.background` (compare the hex strings).
+- [ ] Dark: `border` → `#393b40ff` (IntelliJ separator grey); keep `border.variant` `#393b40ff`. Light: `border` stays `#ebecf0ff` (already distinct from `#ffffff`/`#f7f8fa`) — the test proves it.
+- [ ] Regenerate with `python script/brewery/gen_themes.py`; `cargo test -p brewery_theme`. Commit `fix: visible panel borders in Brewery Dark`.
+- [ ] Controller checks the editor/terminal separator on screen.
