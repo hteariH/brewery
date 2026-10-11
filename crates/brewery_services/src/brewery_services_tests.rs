@@ -123,10 +123,17 @@ fn run_template_comes_from_the_matching_configuration() {
     assert_eq!(template.cwd.as_deref(), Some("/path/to/spring-petshop"));
 
     let other = SpringApp {
-        name: "Elsewhere".to_string(),
+        main_class: "com.elsewhere.PetshopApplication".to_string(),
         ..app.clone()
     };
-    assert!(run_configuration_for(&other, &configurations).is_none());
+    assert!(
+        run_configuration_for(&other, &configurations).is_none(),
+        "the same simple name in another package is a different application"
+    );
+
+    let reports = &configurations[1];
+    assert_eq!(reports.kind, RunConfigurationKind::Application);
+    assert_eq!(run_template(reports).label, "ReportsApplication");
 }
 
 type Handlers = Arc<Mutex<Vec<Box<dyn Fn() + Send>>>>;
@@ -337,7 +344,11 @@ async fn changes_while_hidden_are_fetched_when_shown(cx: &mut TestAppContext) {
         handler();
     }
     cx.run_until_parked();
-    assert_eq!(*fixture.spring_requests.borrow(), 1, "hidden panel must not fetch");
+    assert_eq!(
+        *fixture.spring_requests.borrow(),
+        1,
+        "hidden panel must not fetch"
+    );
 
     cx.dispatch_action(ToggleServicesPanel);
     cx.run_until_parked();

@@ -24,6 +24,8 @@ data class RunConfiguration(
     val args: List<String>,
     val cwd: String,
     @field:JsonAdapter(RunKindAdapter::class) val kind: RunKind,
+    /** Fully-qualified class of the application, so clients pair configurations with apps unambiguously. */
+    val mainClass: String,
 )
 
 /**
@@ -55,19 +57,19 @@ object RunConfigurations {
                 } else {
                     listOf("-pl", app.modulePath, "spring-boot:run")
                 }
-                RunConfiguration(app.name, wrapperOr(root, if (windows) "mvnw.cmd" else "mvnw", "mvn"), args, project.rootDir, RunKind.springBoot)
+                RunConfiguration(app.name, wrapperOr(root, if (windows) "mvnw.cmd" else "mvnw", "mvn"), args, project.rootDir, RunKind.springBoot, app.mainClass)
             }
             BuildTool.gradle -> {
                 val command = wrapperOr(root, if (windows) "gradlew.bat" else "gradlew", "gradle")
                 val prefix = gradlePrefix(app.modulePath)
                 when {
                     module.hasTask("bootRun") ->
-                        RunConfiguration(app.name, command, listOf("${prefix}bootRun"), project.rootDir, RunKind.springBoot)
+                        RunConfiguration(app.name, command, listOf("${prefix}bootRun"), project.rootDir, RunKind.springBoot, app.mainClass)
                     // Without the Boot plugin only the `application` plugin's run task can start it; the main
                     // class is passed as a property because the build script rarely sets it for a Boot app.
                     module.hasTask("run") ->
                         RunConfiguration(
-                            app.name, command, listOf("${prefix}run", "-PmainClass=${app.mainClass}"), project.rootDir, RunKind.application,
+                            app.name, command, listOf("${prefix}run", "-PmainClass=${app.mainClass}"), project.rootDir, RunKind.application, app.mainClass,
                         )
                     else -> null
                 }

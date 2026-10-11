@@ -9,6 +9,10 @@ mod jdk;
 mod project_daemon;
 pub mod protocol;
 
+/// Notification id of the toast that says the daemon keeps stopping. One shared type so the
+/// Build and Services panels replace each other's toast instead of stacking two.
+pub struct DaemonStoppedNotification;
+
 pub use jdk::{JdkCandidate, find_daemon_jar, find_java, parse_release_version, pick_jdk};
 pub use project_daemon::{
     DAEMON_KEEPS_STOPPING, Daemon, DaemonErrorKind, DaemonFactory, DaemonState, ProjectDaemon,

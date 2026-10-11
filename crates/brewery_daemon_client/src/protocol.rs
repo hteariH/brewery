@@ -162,6 +162,7 @@ pub struct RunConfiguration {
     pub args: Vec<String>,
     pub cwd: String,
     pub kind: RunConfigurationKind,
+    pub main_class: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

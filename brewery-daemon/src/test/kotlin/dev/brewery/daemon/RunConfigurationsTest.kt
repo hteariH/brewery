@@ -44,7 +44,7 @@ class RunConfigurationsTest {
         val project = ProjectModel(BuildTool.gradle, root.toString(), listOf(BuildModule("r", ":", tasks("bootRun", "build"))))
         val result = RunConfigurations.build(project, spring(app("PetshopApplication", ":")), windows = false)
         assertEquals(
-            listOf(RunConfiguration("PetshopApplication", root.resolve("gradlew").toString(), listOf("bootRun"), root.toString(), RunKind.springBoot)),
+            listOf(RunConfiguration("PetshopApplication", root.resolve("gradlew").toString(), listOf("bootRun"), root.toString(), RunKind.springBoot, "com.example.PetshopApplication")),
             result,
         )
     }

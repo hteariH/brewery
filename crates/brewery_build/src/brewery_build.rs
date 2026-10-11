@@ -3,8 +3,8 @@
 
 use anyhow::Result;
 use brewery_daemon_client::{
-    BuildModule, BuildTool, DAEMON_KEEPS_STOPPING, DaemonErrorKind, DaemonState, ProjectDaemon,
-    ProjectDaemonEvent, ProjectModel,
+    BuildModule, BuildTool, DAEMON_KEEPS_STOPPING, DaemonErrorKind, DaemonState,
+    DaemonStoppedNotification, ProjectDaemon, ProjectDaemonEvent, ProjectModel,
 };
 use gpui::{
     Action, App, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
@@ -283,14 +283,13 @@ impl BuildPanel {
     /// The panel may be hidden when the daemon gives up, so say it in a toast too. Deferred because
     /// this runs inside a panel update that may itself be nested in a workspace update.
     fn notify_daemon_gave_up(&self, cx: &mut Context<Self>) {
-        struct DaemonStopped;
         let workspace = self.workspace.clone();
         cx.defer(move |cx| {
             workspace
                 .update(cx, |workspace, cx| {
                     workspace.show_toast(
                         Toast::new(
-                            NotificationId::unique::<DaemonStopped>(),
+                            NotificationId::unique::<DaemonStoppedNotification>(),
                             DAEMON_KEEPS_STOPPING,
                         )
                         .on_click("Open Log", |window, cx| {

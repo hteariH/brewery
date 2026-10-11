@@ -4,13 +4,15 @@
     "command": "/path/to/spring-petshop/gradlew",
     "args": ["bootRun"],
     "cwd": "/path/to/spring-petshop",
-    "kind": "springBoot"
+    "kind": "springBoot",
+    "mainClass": "com.example.petshop.PetshopApplication"
   },
   {
     "label": "ReportsApplication",
     "command": "/path/to/spring-petshop/gradlew",
     "args": [":reports:run", "-PmainClass=com.example.reports.ReportsApplication"],
     "cwd": "/path/to/spring-petshop",
-    "kind": "application"
+    "kind": "application",
+    "mainClass": "com.example.reports.ReportsApplication"
   }
 ]

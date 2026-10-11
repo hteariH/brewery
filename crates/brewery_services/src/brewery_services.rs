@@ -4,9 +4,9 @@
 
 use anyhow::Result;
 use brewery_daemon_client::{
-    DAEMON_KEEPS_STOPPING, DaemonErrorKind, DaemonState, HttpMethod, ProjectDaemon,
-    ProjectDaemonEvent, RunConfiguration, SpringApp, SpringBean, SpringBeanKind, SpringEndpoint,
-    SpringModel,
+    DAEMON_KEEPS_STOPPING, DaemonErrorKind, DaemonState, DaemonStoppedNotification, HttpMethod,
+    ProjectDaemon, ProjectDaemonEvent, RunConfiguration, RunConfigurationKind, SpringApp,
+    SpringBean, SpringBeanKind, SpringEndpoint, SpringModel,
 };
 use editor::Editor;
 use gpui::{
@@ -121,22 +121,26 @@ pub fn kind_label(kind: SpringBeanKind) -> &'static str {
     }
 }
 
-/// The daemon builds one configuration per application it can start, labelled with the
-/// application's simple class name.
+/// The daemon builds one configuration per application it can start; the main class pairs them
+/// (simple names can collide across packages).
 pub fn run_configuration_for<'a>(
     app: &SpringApp,
     configurations: &'a [RunConfiguration],
 ) -> Option<&'a RunConfiguration> {
     configurations
         .iter()
-        .find(|configuration| configuration.label == app.name)
+        .find(|configuration| configuration.main_class == app.main_class)
 }
 
-/// The label ends in "(Spring Boot)" so that the task stands out in the task picker and in
-/// the Run widget's Rerun, which repeats the last scheduled task.
+/// A Spring Boot label ends in "(Spring Boot)" so that the task stands out in the task picker and
+/// in the Run widget's Rerun, which repeats the last scheduled task.
 pub fn run_template(configuration: &RunConfiguration) -> TaskTemplate {
+    let label = match configuration.kind {
+        RunConfigurationKind::SpringBoot => format!("{} (Spring Boot)", configuration.label),
+        RunConfigurationKind::Application => configuration.label.clone(),
+    };
     TaskTemplate {
-        label: format!("{} (Spring Boot)", configuration.label),
+        label,
         command: configuration.command.clone(),
         args: configuration.args.clone(),
         cwd: Some(configuration.cwd.clone()),
@@ -338,14 +342,13 @@ impl ServicesPanel {
     /// The panel may be hidden when the daemon gives up, so say it in a toast too. Deferred because
     /// this runs inside a panel update that may itself be nested in a workspace update.
     fn notify_daemon_gave_up(&self, cx: &mut Context<Self>) {
-        struct DaemonStopped;
         let workspace = self.workspace.clone();
         cx.defer(move |cx| {
             workspace
                 .update(cx, |workspace, cx| {
                     workspace.show_toast(
                         Toast::new(
-                            NotificationId::unique::<DaemonStopped>(),
+                            NotificationId::unique::<DaemonStoppedNotification>(),
                             DAEMON_KEEPS_STOPPING,
                         )
                         .on_click("Open Log", |window, cx| {
