@@ -3,6 +3,7 @@ use brewery_daemon_client::BuildTask;
 use gpui::{TestAppContext, VisualTestContext};
 use project::Project;
 use serde_json::json;
+use std::cell::RefCell;
 use std::sync::Arc;
 use util::path;
 use workspace::{AppState, MultiWorkspace};
@@ -141,8 +142,23 @@ fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {
     })
 }
 
-#[gpui::test]
-async fn toggle_action_opens_panel_in_right_dock(cx: &mut TestAppContext) {
+/// Stands in for the daemon: records the root it was asked for and fails, which is
+/// what a machine without a JDK or daemon jar would do.
+fn failing_daemon(started: Rc<RefCell<Vec<PathBuf>>>) -> StartDaemon {
+    Rc::new(move |root, _cx| {
+        started.borrow_mut().push(root);
+        async { Err(anyhow::anyhow!("no daemon in tests")) }.boxed_local()
+    })
+}
+
+async fn workspace_with_panel(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Workspace>,
+    Entity<BuildPanel>,
+    Rc<RefCell<Vec<PathBuf>>>,
+    &mut VisualTestContext,
+) {
     let app_state = init_test(cx);
     app_state
         .fs
@@ -153,15 +169,21 @@ async fn toggle_action_opens_panel_in_right_dock(cx: &mut TestAppContext) {
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
-    let cx: &mut VisualTestContext = cx;
-
+    let started = Rc::new(RefCell::new(Vec::new()));
+    let start_daemon = failing_daemon(started.clone());
     let panel = workspace.update_in(cx, |workspace, window, cx| {
         let weak = workspace.weak_handle();
-        // No daemon: showing the panel must not launch a JVM from a unit test.
-        let panel = cx.new(|cx| BuildPanel::new(weak, false, window, cx));
+        let project = workspace.project().clone();
+        let panel = cx.new(|cx| BuildPanel::new(weak, project, start_daemon, window, cx));
         workspace.add_panel(panel.clone(), window, cx);
         panel
     });
+    (workspace, panel, started, cx)
+}
+
+#[gpui::test]
+async fn toggle_action_opens_panel_in_right_dock(cx: &mut TestAppContext) {
+    let (workspace, panel, _, cx) = workspace_with_panel(cx).await;
     assert_eq!(BuildPanel::persistent_name(), "Build Tool Panel");
     cx.update(|window, cx| {
         assert_eq!(panel.read(cx).position(window, cx), DockPosition::Right);
@@ -179,4 +201,30 @@ async fn toggle_action_opens_panel_in_right_dock(cx: &mut TestAppContext) {
         let visible = dock.visible_panel().expect("a panel should be visible");
         assert_eq!(visible.panel_id(), panel.entity_id());
     });
+}
+
+// Regression: `set_active` runs inside `Workspace::toggle_panel_focus`, i.e. while
+// the workspace is being updated, so connecting there must not read the workspace.
+#[gpui::test]
+async fn first_show_connects_for_worktree_root_without_panicking(cx: &mut TestAppContext) {
+    let (_, panel, started, cx) = workspace_with_panel(cx).await;
+
+    cx.dispatch_action(ToggleBuildPanel);
+    cx.run_until_parked();
+
+    assert_eq!(*started.borrow(), vec![PathBuf::from(path!("/root"))]);
+    panel.read_with(cx, |panel, _| {
+        let error = panel
+            .error
+            .as_ref()
+            .expect("the failed start should be shown");
+        assert!(error.contains("no daemon in tests"), "{error}");
+        assert!(panel.busy.is_none());
+    });
+
+    // Hiding and showing again must not start a second daemon.
+    cx.dispatch_action(ToggleBuildPanel);
+    cx.dispatch_action(ToggleBuildPanel);
+    cx.run_until_parked();
+    assert_eq!(started.borrow().len(), 1);
 }

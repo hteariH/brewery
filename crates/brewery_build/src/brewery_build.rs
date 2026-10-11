@@ -3,14 +3,17 @@
 
 use anyhow::Result;
 use brewery_daemon_client::{BuildModule, BuildTool, DaemonClient, ProjectModel};
-use futures::StreamExt as _;
+use futures::future::LocalBoxFuture;
+use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
-    Action, App, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, Pixels, Render, ScrollHandle, SharedString, Task, WeakEntity, Window, actions, px,
+    Action, App, AsyncApp, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, Pixels, Render, ScrollHandle, SharedString, Task, WeakEntity, Window,
+    actions, px,
 };
-use project::TaskSourceKind;
+use project::{Project, TaskSourceKind};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use task::{TaskContext, TaskTemplate};
 use ui::{ListItem, ListItemSpacing, Tooltip, prelude::*};
@@ -122,13 +125,27 @@ enum Entry {
     Task(usize, usize),
 }
 
+/// How the panel gets a running daemon for a project root.
+pub type StartDaemon =
+    Rc<dyn Fn(PathBuf, AsyncApp) -> LocalBoxFuture<'static, Result<DaemonClient>>>;
+
+fn start_real_daemon(
+    root: PathBuf,
+    mut cx: AsyncApp,
+) -> LocalBoxFuture<'static, Result<DaemonClient>> {
+    async move { DaemonClient::start(&root, &mut cx).await }.boxed_local()
+}
+
 pub struct BuildPanel {
     workspace: WeakEntity<Workspace>,
+    /// Held directly because `Panel` callbacks such as `set_active` run while the
+    /// workspace is being updated, when reading the workspace entity panics.
+    project: Entity<Project>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
     position: DockPosition,
-    /// Tests turn this off so that showing the panel does not launch a JVM.
-    connect_on_show: bool,
+    /// Launches the daemon; tests swap it out so that they never start a JVM.
+    start_daemon: StartDaemon,
     connected_once: bool,
     /// Dropping the client stops the daemon process.
     client: Option<Arc<DaemonClient>>,
@@ -150,22 +167,25 @@ impl BuildPanel {
     ) -> Result<Entity<Self>> {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             let weak = workspace.weak_handle();
-            cx.new(|cx| Self::new(weak, true, window, cx))
+            let project = workspace.project().clone();
+            cx.new(|cx| Self::new(weak, project, Rc::new(start_real_daemon), window, cx))
         })
     }
 
     pub fn new(
         workspace: WeakEntity<Workspace>,
-        connect_on_show: bool,
+        project: Entity<Project>,
+        start_daemon: StartDaemon,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             workspace,
+            project,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
             position: DockPosition::Right,
-            connect_on_show,
+            start_daemon,
             connected_once: false,
             client: None,
             _project_changed: None,
@@ -181,9 +201,7 @@ impl BuildPanel {
     }
 
     fn project_root(&self, cx: &App) -> Option<PathBuf> {
-        let workspace = self.workspace.upgrade()?;
-        let project = workspace.read(cx).project().read(cx);
-        let worktree = project.visible_worktrees(cx).next()?;
+        let worktree = self.project.read(cx).visible_worktrees(cx).next()?;
         Some(worktree.read(cx).abs_path().to_path_buf())
     }
 
@@ -216,8 +234,9 @@ impl BuildPanel {
         self.error = None;
         self.busy = Some("Starting brewery-daemon…".into());
         cx.notify();
+        let start = (self.start_daemon)(root, cx.to_async());
         self.connect_task = Some(cx.spawn(async move |this, cx| {
-            let result = DaemonClient::start(&root, cx).await;
+            let result = start.await;
             this.update(cx, |this, cx| match result {
                 Ok(client) => this.attach(Arc::new(client), cx),
                 Err(error) => {
@@ -629,7 +648,7 @@ impl Panel for BuildPanel {
 
     fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
         // The JVM is only worth starting once someone looks at the panel.
-        if active && self.connect_on_show && !self.connected_once {
+        if active && !self.connected_once {
             self.connect(cx);
         }
     }
