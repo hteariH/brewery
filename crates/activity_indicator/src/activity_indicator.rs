@@ -4,7 +4,7 @@ use extension_host::{ExtensionOperation, ExtensionStore};
 use futures::StreamExt;
 use gpui::{
     App, Context, Entity, EventEmitter, InteractiveElement as _, ParentElement as _, Render,
-    SharedString, Styled, Task, Window, actions,
+    SharedString, Styled, Task, WeakEntity, Window, actions,
 };
 use language::{
     BinaryStatus, LanguageServerId, LanguageServerName, LanguageServerStatusUpdate, ServerHealth,
@@ -15,9 +15,11 @@ use project::{
 };
 use smallvec::SmallVec;
 use std::{
+    cell::RefCell,
     cmp::Reverse,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write,
+    rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -241,50 +243,64 @@ impl ActivityIndicator {
         });
 
         // brewery: a server that keeps failing (e.g. an extension whose download 404s)
-        // re-reports the same error; remember what was shown so repeated clicks on the
-        // status item do not pile up identical log tabs.
-        let mut shown_statuses = HashSet::default();
-        cx.subscribe_in(&this, window, move |_, _, event, window, cx| match event {
-            Event::ShowStatus {
-                server_name,
-                status,
-            } => {
-                if !should_open_status_tab(&mut shown_statuses, server_name, status) {
-                    return;
-                }
-                let create_buffer =
-                    project.update(cx, |project, cx| project.create_buffer(None, false, cx));
-                let status = status.clone();
-                let server_name = server_name.clone();
-                cx.spawn_in(window, async move |workspace, cx| {
-                    let buffer = create_buffer.await?;
-                    buffer.update(cx, |buffer, cx| {
-                        buffer.edit(
-                            [(0..0, format!("Language server {server_name}:\n\n{status}"))],
-                            None,
-                            cx,
-                        );
-                        buffer.set_capability(language::Capability::ReadOnly, cx);
-                    });
-                    workspace.update_in(cx, |workspace, window, cx| {
-                        workspace.add_item_to_active_pane(
-                            Box::new(cx.new(|cx| {
+        // re-reports the same error; remember the tab opened for it so repeated clicks on
+        // the status item focus that tab instead of piling up identical ones. A closed
+        // tab is no longer in any pane, so the next click opens a fresh one.
+        let status_tabs: Rc<
+            RefCell<HashMap<(LanguageServerName, SharedString), WeakEntity<Editor>>>,
+        > = Rc::default();
+        cx.subscribe_in(
+            &this,
+            window,
+            move |workspace, _, event, window, cx| match event {
+                Event::ShowStatus {
+                    server_name,
+                    status,
+                } => {
+                    let key = (server_name.clone(), status.clone());
+                    let existing = status_tabs.borrow().get(&key).and_then(WeakEntity::upgrade);
+                    if let Some(editor) = existing
+                        && workspace.activate_item(&editor, true, true, window, cx)
+                    {
+                        return;
+                    }
+                    let status_tabs = status_tabs.clone();
+                    let create_buffer =
+                        project.update(cx, |project, cx| project.create_buffer(None, false, cx));
+                    let status = status.clone();
+                    let server_name = server_name.clone();
+                    cx.spawn_in(window, async move |workspace, cx| {
+                        let buffer = create_buffer.await?;
+                        buffer.update(cx, |buffer, cx| {
+                            buffer.edit(
+                                [(0..0, format!("Language server {server_name}:\n\n{status}"))],
+                                None,
+                                cx,
+                            );
+                            buffer.set_capability(language::Capability::ReadOnly, cx);
+                        });
+                        workspace.update_in(cx, |workspace, window, cx| {
+                            let editor = cx.new(|cx| {
                                 let mut editor = Editor::for_buffer(buffer, None, window, cx);
                                 editor.set_read_only(true);
                                 editor
-                            })),
-                            None,
-                            true,
-                            window,
-                            cx,
-                        );
-                    })?;
+                            });
+                            status_tabs.borrow_mut().insert(key, editor.downgrade());
+                            workspace.add_item_to_active_pane(
+                                Box::new(editor),
+                                None,
+                                true,
+                                window,
+                                cx,
+                            );
+                        })?;
 
-                    anyhow::Ok(())
-                })
-                .detach();
-            }
-        })
+                        anyhow::Ok(())
+                    })
+                    .detach();
+                }
+            },
+        )
         .detach();
         this
     }
@@ -733,15 +749,6 @@ impl ActivityIndicator {
             })),
         })
     }
-}
-
-// brewery: true the first time a given server/message pair is shown.
-fn should_open_status_tab(
-    shown: &mut HashSet<(LanguageServerName, SharedString)>,
-    server_name: &LanguageServerName,
-    status: &SharedString,
-) -> bool {
-    shown.insert((server_name.clone(), status.clone()))
 }
 
 impl EventEmitter<Event> for ActivityIndicator {}
