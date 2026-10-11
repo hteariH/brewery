@@ -90,6 +90,9 @@ class BreweryDaemon(
             watcher = newWatcher
             root = dir
             cached = null
+            // A notification armed for the previous project would tell the client to refresh the wrong one.
+            pendingNotification?.cancel(false)
+            pendingNotification = null
         }
         return CompletableFuture.completedFuture(null)
     }
@@ -108,6 +111,11 @@ class BreweryDaemon(
         val future = CompletableFuture<ProjectModel>()
         try {
             importer.execute {
+                // Checked at run time: imports queue behind a running one, and by now the project may be replaced.
+                if (synchronized(lock) { root != dir }) {
+                    future.cancel(false)
+                    return@execute
+                }
                 try {
                     future.complete(modelReader?.invoke(dir) ?: readModel(dir))
                 } catch (e: Throwable) {
@@ -157,12 +165,19 @@ class BreweryDaemon(
             if (root != dir) return
             // Dropped immediately so a request arriving inside the debounce window already re-imports.
             cached = null
-            if (pendingNotification != null) return
+            // Trailing edge: every event restarts the timer, so the client hears about a burst once, after
+            // the last write, and its re-import sees the finished files rather than a half-saved set.
+            pendingNotification?.cancel(false)
             try {
-                pendingNotification = notifier.schedule({
-                    synchronized(lock) { pendingNotification = null }
-                    client?.projectChanged(ProjectChanged())
+                lateinit var task: ScheduledFuture<*>
+                task = notifier.schedule({
+                    // A newer event may have replaced this task just as it started running.
+                    val current = synchronized(lock) {
+                        (pendingNotification === task).also { if (it) pendingNotification = null }
+                    }
+                    if (current) client?.projectChanged(ProjectChanged())
                 }, debounceMillis, TimeUnit.MILLISECONDS)
+                pendingNotification = task
             } catch (_: RejectedExecutionException) {
                 // Closed while an event was in flight.
             }

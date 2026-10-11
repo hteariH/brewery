@@ -70,6 +70,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+          cache: gradle
       - name: Test and package
         working-directory: brewery-daemon
         shell: bash
@@ -79,6 +80,36 @@ jobs:
           name: brewery-daemon-${{ matrix.os }}
           path: brewery-daemon/build/libs/brewery-daemon-all.jar
           retention-days: 14
+
+  daemon-integration:
+    name: Daemon client integration (ubuntu-24.04)
+    needs: daemon
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/download-artifact@v4
+        with:
+          name: brewery-daemon-ubuntu-24.04
+          path: daemon-jar
+      - name: Install Linux dependencies
+        run: script/linux
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: brewery-daemon-integration
+      # The crate's end-to-end test skips itself without this variable, so it is what makes the test real.
+      - name: Test daemon client against the built jar
+        env:
+          BREWERY_DAEMON_JAR: ${{ github.workspace }}/daemon-jar/brewery-daemon-all.jar
+        run: cargo test --locked -p brewery_daemon_client
 
   build:
     name: Build (${{ matrix.os }})

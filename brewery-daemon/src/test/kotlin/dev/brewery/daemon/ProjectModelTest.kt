@@ -222,6 +222,71 @@ class ProjectModelTest {
     }
 
     @Test
+    fun `notification waits for the last event of a burst`() {
+        val dir = Files.createTempDirectory("brewery-trailing")
+        val count = AtomicInteger()
+        val daemon = slowDaemon(CountDownLatch(0), debounce = 400)
+        daemon.connect(object : BreweryClient {
+            override fun projectChanged(params: ProjectChanged) {
+                count.incrementAndGet()
+            }
+        })
+        daemon.openProject(OpenProjectParams(dir.toString())).get(10, TimeUnit.SECONDS)
+        val normalized = dir.toAbsolutePath().normalize()
+        repeat(3) {
+            daemon.onBuildFileChanged(normalized)
+            Thread.sleep(250)
+        }
+        // 750 ms after the first event, but only 250 ms after the last: a leading-edge timer would have fired.
+        assertEquals(0, count.get())
+        Thread.sleep(700)
+        assertEquals(1, count.get())
+        daemon.close()
+    }
+
+    @Test
+    fun `openProject cancels a pending notification for the old root`() {
+        val first = Files.createTempDirectory("brewery-old")
+        val second = Files.createTempDirectory("brewery-new")
+        val count = AtomicInteger()
+        val daemon = slowDaemon(CountDownLatch(0), debounce = 200)
+        daemon.connect(object : BreweryClient {
+            override fun projectChanged(params: ProjectChanged) {
+                count.incrementAndGet()
+            }
+        })
+        daemon.openProject(OpenProjectParams(first.toString())).get(10, TimeUnit.SECONDS)
+        daemon.onBuildFileChanged(first.toAbsolutePath().normalize())
+        daemon.openProject(OpenProjectParams(second.toString())).get(10, TimeUnit.SECONDS)
+        Thread.sleep(700)
+        assertEquals(0, count.get())
+        daemon.close()
+    }
+
+    @Test
+    fun `queued import for a replaced root is skipped`() {
+        val started = AtomicInteger()
+        val release = CountDownLatch(1)
+        val first = Files.createTempDirectory("brewery-stale")
+        val daemon = BreweryDaemon(10) { d ->
+            started.incrementAndGet()
+            release.await(10, TimeUnit.SECONDS)
+            ProjectModel(BuildTool.none, d.toString(), emptyList())
+        }
+        daemon.openProject(OpenProjectParams(first.toString())).get(10, TimeUnit.SECONDS)
+        val running = daemon.projectModel(ProjectModelParams())
+        daemon.onBuildFileChanged(first.toAbsolutePath().normalize())
+        val queued = daemon.projectModel(ProjectModelParams())
+        daemon.openProject(OpenProjectParams(Files.createTempDirectory("brewery-other").toString()))
+            .get(10, TimeUnit.SECONDS)
+        release.countDown()
+        running.get(10, TimeUnit.SECONDS)
+        assertFailsWith<ExecutionException> { queued.get(10, TimeUnit.SECONDS) }
+        assertEquals(1, started.get())
+        daemon.close()
+    }
+
+    @Test
     fun `gradle input files count as build files`() {
         for (name in listOf("gradle.properties", "libs.versions.toml", "gradle-wrapper.properties")) {
             assertTrue(isBuildFileName(name), name)
