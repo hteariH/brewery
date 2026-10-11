@@ -42,6 +42,18 @@ and time out. Release builds download it in seconds. For Java work, build with
 `cargo build --profile release-fast -p cli -p zed`, or retry with
 "editor: restart language server".
 
+## Spring support
+
+The Services tool window (bottom of the left stripe) lists the Spring Boot
+applications in your project, their HTTP endpoints and the beans found in the
+sources. Click an item to jump to its code. Click ▶ on an application to run it
+with Gradle `bootRun` or Maven `spring-boot:run`.
+
+Maven multi-module apps need their sibling modules installed first, so run
+`mvn install` at the root before starting one of them.
+
+Completion for `application.yml` and `application.properties` comes later (M3b).
+
 ## Licence
 
 The editor is GPL-3.0-or-later, like Zed. See `LICENSE-GPL`.
