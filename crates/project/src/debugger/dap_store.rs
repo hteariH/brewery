@@ -124,6 +124,8 @@ impl DapStore {
             registry.add_locator(Arc::new(locators::go::GoLocator {}));
             registry.add_locator(Arc::new(locators::node::NodeLocator));
             registry.add_locator(Arc::new(locators::python::PythonLocator));
+            // brewery: debug Java main classes from the gutter without a debug.json.
+            registry.add_locator(Arc::new(locators::brewery_java::JavaLocator));
         });
         client.add_entity_request_handler(Self::handle_run_debug_locator);
         client.add_entity_request_handler(Self::handle_get_debug_adapter_binary);

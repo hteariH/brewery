@@ -1104,6 +1104,11 @@ impl RunningState {
             } = scenario;
             Self::relativize_paths(None, &mut config, &task_context);
             Self::substitute_variables_in_config(&mut config, &task_context);
+            // brewery: a Java mainClass is only complete once the package variable is known.
+            project::debugger::locators::brewery_java::finalize_substituted_config(
+                &adapter,
+                &mut config,
+            );
 
             if Self::contains_substring(&config, PROCESS_ID_PLACEHOLDER.as_str()) || label.as_ref().contains(PROCESS_ID_PLACEHOLDER.as_str()) {
                 let (tx, rx) = futures::channel::oneshot::channel::<Option<i32>>();
