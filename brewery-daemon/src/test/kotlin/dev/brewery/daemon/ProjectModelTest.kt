@@ -119,4 +119,28 @@ class ProjectModelTest {
         assertEquals("two", daemon.projectModel(ProjectModelParams()).get(10, TimeUnit.SECONDS).modules[0].name)
         daemon.close()
     }
+
+    @Test
+    @Tag("slow")
+    fun `gradle script error message carries the cause chain`() {
+        val daemon = BreweryDaemon()
+        daemon.openProject(OpenProjectParams(fixture("gradle-broken").toString())).get(10, TimeUnit.SECONDS)
+        val e = assertFailsWith<ExecutionException> { daemon.projectModel(ProjectModelParams()).get(5, TimeUnit.MINUTES) }
+        val error = (e.cause as ResponseErrorException).responseError
+        assertEquals(ErrorCodes.BUILD_IMPORT_FAILED, error.code)
+        assertTrue("build.gradle.kts" in error.message, error.message)
+        daemon.close()
+    }
+
+    @Test
+    fun `openProject on a missing directory fails with BUILD_IMPORT_FAILED`() {
+        val daemon = BreweryDaemon()
+        val e = assertFailsWith<ExecutionException> {
+            daemon.openProject(OpenProjectParams("C:/definitely/not/here")).get(10, TimeUnit.SECONDS)
+        }
+        val error = (e.cause as ResponseErrorException).responseError
+        assertEquals(ErrorCodes.BUILD_IMPORT_FAILED, error.code)
+        assertTrue(error.message.startsWith("Project directory does not exist"), error.message)
+        daemon.close()
+    }
 }

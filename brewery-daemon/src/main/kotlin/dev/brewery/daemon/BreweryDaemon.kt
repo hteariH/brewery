@@ -53,11 +53,21 @@ class BreweryDaemon : BreweryServer, AutoCloseable {
         } catch (e: Exception) {
             return failed(ErrorCodes.BUILD_IMPORT_FAILED, "Invalid project path: ${params.rootDir}")
         }
+        if (!Files.isDirectory(dir)) {
+            return failed(ErrorCodes.BUILD_IMPORT_FAILED, "Project directory does not exist: $dir")
+        }
+        // Built before any state changes, so a failure here cannot leave a half-switched project.
+        val newWatcher = try {
+            BuildFileWatcher(dir) { onBuildFileChanged(dir) }
+        } catch (e: Exception) {
+            System.err.println("brewery: build-file watching disabled for $dir: $e")
+            null
+        }
         synchronized(lock) {
             watcher?.close()
+            watcher = newWatcher
             root = dir
             cached = null
-            watcher = BuildFileWatcher(dir) { onBuildFileChanged(dir) }
         }
         return CompletableFuture.completedFuture(null)
     }
@@ -84,11 +94,24 @@ class BreweryDaemon : BreweryServer, AutoCloseable {
                 BuildTool.none -> return ProjectModel(BuildTool.none, dir.toString(), emptyList())
             }
             return reader.read(dir)
-        } catch (e: Exception) {
-            throw ResponseErrorException(
-                ResponseError(ErrorCodes.BUILD_IMPORT_FAILED, e.message ?: e.javaClass.simpleName, null),
-            )
+        } catch (e: ResponseErrorException) {
+            throw e
+        } catch (e: Throwable) {
+            throw ResponseErrorException(ResponseError(ErrorCodes.BUILD_IMPORT_FAILED, describe(e), null))
         }
+    }
+
+    // Tooling API wraps the real script error (file, line) in its cause chain, so the top message alone is useless.
+    private fun describe(error: Throwable): String {
+        val parts = mutableListOf<String>()
+        var current: Throwable? = error
+        var depth = 0
+        while (current != null && depth++ < 20) {
+            val text = current.message?.trim().takeUnless { it.isNullOrEmpty() } ?: current.javaClass.simpleName
+            if (text !in parts) parts += text
+            current = current.cause
+        }
+        return parts.joinToString("\n").take(MAX_MESSAGE)
     }
 
     private fun onBuildFileChanged(dir: Path) {
@@ -97,6 +120,10 @@ class BreweryDaemon : BreweryServer, AutoCloseable {
             cached = null
         }
         client?.projectChanged(ProjectChanged())
+    }
+
+    private companion object {
+        const val MAX_MESSAGE = 2000
     }
 
     private fun <T> failed(code: Int, message: String): CompletableFuture<T> =
@@ -113,6 +140,16 @@ private class BuildFileWatcher(root: Path, private val onChange: () -> Unit) : A
     private val thread = Thread(::run, "brewery-build-watcher").apply { isDaemon = true }
 
     init {
+        try {
+            register(root)
+        } catch (e: Exception) {
+            service.close()
+            throw e
+        }
+        thread.start()
+    }
+
+    private fun register(root: Path) {
         // Module layouts are shallow; a bounded walk avoids registering whole dependency trees.
         Files.walkFileTree(
             root,
@@ -135,7 +172,6 @@ private class BuildFileWatcher(root: Path, private val onChange: () -> Unit) : A
                 override fun visitFileFailed(file: Path, exc: IOException) = FileVisitResult.CONTINUE
             },
         )
-        thread.start()
     }
 
     private fun run() {
@@ -143,10 +179,17 @@ private class BuildFileWatcher(root: Path, private val onChange: () -> Unit) : A
             while (true) {
                 val key = service.take()
                 val relevant = key.pollEvents().any {
-                    (it.context() as? Path)?.fileName?.toString()?.let(::isBuildFileName) == true
+                    it.kind() == StandardWatchEventKinds.OVERFLOW ||
+                        (it.context() as? Path)?.fileName?.toString()?.let(::isBuildFileName) == true
                 }
                 key.reset()
-                if (relevant) onChange()
+                if (relevant) {
+                    try {
+                        onChange()
+                    } catch (e: Exception) {
+                        System.err.println("brewery: project/changed failed: $e")
+                    }
+                }
             }
         } catch (_: InterruptedException) {
         } catch (_: ClosedWatchServiceException) {
