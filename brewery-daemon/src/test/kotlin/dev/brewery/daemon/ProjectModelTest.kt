@@ -3,6 +3,7 @@ package dev.brewery.daemon
 import dev.brewery.daemon.project.GradleModelReader
 import dev.brewery.daemon.project.MavenModelReader
 import dev.brewery.daemon.project.detectBuildTool
+import dev.brewery.daemon.project.isBuildFileName
 import org.eclipse.lsp4j.jsonrpc.Launcher
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.json.MessageJsonHandler
@@ -15,6 +16,7 @@ import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
@@ -150,5 +152,79 @@ class ProjectModelTest {
         assertEquals(ErrorCodes.BUILD_IMPORT_FAILED, error.code)
         assertTrue(error.message.startsWith("Project directory does not exist"), error.message)
         daemon.close()
+    }
+
+    private fun slowDaemon(release: CountDownLatch, debounce: Long = 500) =
+        BreweryDaemon(debounce) { dir ->
+            release.await(10, TimeUnit.SECONDS)
+            ProjectModel(BuildTool.none, dir.toString(), emptyList())
+        }
+
+    @Test
+    fun `cancelling one projectModel future does not cancel another caller`() {
+        val release = CountDownLatch(1)
+        val daemon = slowDaemon(release)
+        daemon.openProject(OpenProjectParams(Files.createTempDirectory("brewery-cancel").toString())).get(10, TimeUnit.SECONDS)
+        val first = daemon.projectModel(ProjectModelParams())
+        val second = daemon.projectModel(ProjectModelParams())
+        first.cancel(true)
+        release.countDown()
+        assertEquals(BuildTool.none, second.get(10, TimeUnit.SECONDS).buildTool)
+        daemon.close()
+    }
+
+    @Test
+    fun `invalidation during an import queues the next one instead of running in parallel`() {
+        val running = AtomicInteger()
+        val maxRunning = AtomicInteger()
+        val started = AtomicInteger()
+        val release = CountDownLatch(1)
+        val dir = Files.createTempDirectory("brewery-serial")
+        val daemon = BreweryDaemon(10) { d ->
+            started.incrementAndGet()
+            maxRunning.accumulateAndGet(running.incrementAndGet()) { a, b -> maxOf(a, b) }
+            release.await(10, TimeUnit.SECONDS)
+            running.decrementAndGet()
+            ProjectModel(BuildTool.none, d.toString(), emptyList())
+        }
+        daemon.openProject(OpenProjectParams(dir.toString())).get(10, TimeUnit.SECONDS)
+        val first = daemon.projectModel(ProjectModelParams())
+        daemon.onBuildFileChanged(dir.toAbsolutePath().normalize())
+        val second = daemon.projectModel(ProjectModelParams())
+        release.countDown()
+        first.get(10, TimeUnit.SECONDS)
+        second.get(10, TimeUnit.SECONDS)
+        assertEquals(2, started.get())
+        assertEquals(1, maxRunning.get())
+        daemon.close()
+    }
+
+    @Test
+    fun `rapid change events coalesce into one projectChanged`() {
+        val dir = Files.createTempDirectory("brewery-debounce")
+        val count = AtomicInteger()
+        val daemon = slowDaemon(CountDownLatch(0), debounce = 200)
+        daemon.connect(object : BreweryClient {
+            override fun projectChanged(params: ProjectChanged) {
+                count.incrementAndGet()
+            }
+        })
+        daemon.openProject(OpenProjectParams(dir.toString())).get(10, TimeUnit.SECONDS)
+        val normalized = dir.toAbsolutePath().normalize()
+        daemon.onBuildFileChanged(normalized)
+        daemon.onBuildFileChanged(normalized)
+        Thread.sleep(800)
+        assertEquals(1, count.get())
+        daemon.onBuildFileChanged(normalized)
+        Thread.sleep(800)
+        assertEquals(2, count.get())
+        daemon.close()
+    }
+
+    @Test
+    fun `gradle input files count as build files`() {
+        for (name in listOf("gradle.properties", "libs.versions.toml", "gradle-wrapper.properties")) {
+            assertTrue(isBuildFileName(name), name)
+        }
     }
 }

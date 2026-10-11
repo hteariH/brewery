@@ -19,4 +19,9 @@ fun detectBuildTool(root: Path): BuildTool = when {
     else -> BuildTool.none
 }
 
-fun isBuildFileName(name: String): Boolean = name in GRADLE_BUILD_FILES || name == MAVEN_BUILD_FILE
+// Inputs that change the imported model without touching a build script: properties, the version catalog
+// and the wrapper pin.
+private val GRADLE_INPUT_FILES = setOf("gradle.properties", "libs.versions.toml", "gradle-wrapper.properties")
+
+fun isBuildFileName(name: String): Boolean =
+    name in GRADLE_BUILD_FILES || name in GRADLE_INPUT_FILES || name == MAVEN_BUILD_FILE

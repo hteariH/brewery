@@ -17,14 +17,32 @@ import java.nio.file.StandardWatchEventKinds
 import java.nio.file.WatchService
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
-class BreweryDaemon : BreweryServer, AutoCloseable {
+/**
+ * [debounceMillis] coalesces bursts of build-file events (an IDE save touches several files) into one
+ * notification. [modelReader] exists so tests can substitute a controllable import.
+ */
+class BreweryDaemon(
+    private val debounceMillis: Long = DEFAULT_DEBOUNCE_MILLIS,
+    private val modelReader: ((Path) -> ProjectModel)? = null,
+) : BreweryServer, AutoCloseable {
     private var client: BreweryClient? = null
     private val lock = Any()
     private var root: Path? = null
     private var cached: CompletableFuture<ProjectModel>? = null
     private var watcher: BuildFileWatcher? = null
+    private var pendingNotification: ScheduledFuture<*>? = null
+
+    // One import at a time: an invalidation during a running import just queues the next one behind it
+    // instead of racing a parallel Gradle/Maven run against the same project.
+    private val importer = Executors.newSingleThreadExecutor(daemonThreads("brewery-import"))
+    private val notifier = Executors.newSingleThreadScheduledExecutor(daemonThreads("brewery-notify"))
 
     fun connect(client: BreweryClient) {
         this.client = client
@@ -44,7 +62,11 @@ class BreweryDaemon : BreweryServer, AutoCloseable {
         synchronized(lock) {
             watcher?.close()
             watcher = null
+            pendingNotification?.cancel(false)
+            pendingNotification = null
         }
+        notifier.shutdownNow()
+        importer.shutdownNow()
     }
 
     override fun openProject(params: OpenProjectParams): CompletableFuture<Any?> {
@@ -75,15 +97,31 @@ class BreweryDaemon : BreweryServer, AutoCloseable {
     override fun projectModel(params: ProjectModelParams): CompletableFuture<ProjectModel> {
         synchronized(lock) {
             val dir = root ?: return failed(ErrorCodes.NOT_OPENED, "No project is open")
-            cached?.let { return it }
-            val future = CompletableFuture.supplyAsync { readModel(dir) }
-            cached = future
-            // A failed import must not stick: the next request retries.
-            future.whenComplete { _, error ->
-                if (error != null) synchronized(lock) { if (cached === future) cached = null }
-            }
-            return future
+            val shared = cached ?: startImport(dir).also { cached = it }
+            // Each caller gets its own dependent future: lsp4j cancels the future it was handed when the
+            // client cancels a request, and that must not cancel the import other callers share.
+            return shared.thenApply { it }
         }
+    }
+
+    private fun startImport(dir: Path): CompletableFuture<ProjectModel> {
+        val future = CompletableFuture<ProjectModel>()
+        try {
+            importer.execute {
+                try {
+                    future.complete(modelReader?.invoke(dir) ?: readModel(dir))
+                } catch (e: Throwable) {
+                    future.completeExceptionally(e)
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            future.completeExceptionally(e)
+        }
+        // A failed import must not stick: the next request retries.
+        future.whenComplete { _, error ->
+            if (error != null) synchronized(lock) { if (cached === future) cached = null }
+        }
+        return future
     }
 
     private fun readModel(dir: Path): ProjectModel {
@@ -114,16 +152,28 @@ class BreweryDaemon : BreweryServer, AutoCloseable {
         return parts.joinToString("\n").take(MAX_MESSAGE)
     }
 
-    private fun onBuildFileChanged(dir: Path) {
+    internal fun onBuildFileChanged(dir: Path) {
         synchronized(lock) {
             if (root != dir) return
+            // Dropped immediately so a request arriving inside the debounce window already re-imports.
             cached = null
+            if (pendingNotification != null) return
+            try {
+                pendingNotification = notifier.schedule({
+                    synchronized(lock) { pendingNotification = null }
+                    client?.projectChanged(ProjectChanged())
+                }, debounceMillis, TimeUnit.MILLISECONDS)
+            } catch (_: RejectedExecutionException) {
+                // Closed while an event was in flight.
+            }
         }
-        client?.projectChanged(ProjectChanged())
     }
 
     private companion object {
         const val MAX_MESSAGE = 2000
+        const val DEFAULT_DEBOUNCE_MILLIS = 500L
+
+        fun daemonThreads(name: String) = ThreadFactory { Thread(it, name).apply { isDaemon = true } }
     }
 
     private fun <T> failed(code: Int, message: String): CompletableFuture<T> =
