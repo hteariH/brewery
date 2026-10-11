@@ -36,6 +36,12 @@ cannot ask for passwords):
 
     cargo build -p cli -p zed
 
+In debug builds, extensions run unoptimised, so large extension downloads (for
+example jdtls, ~50 MB, fetched by the Java extension) can crawl for minutes
+and time out. Release builds download it in seconds. For Java work, build with
+`cargo build --profile release-fast -p cli -p zed`, or retry with
+"editor: restart language server".
+
 ## Licence
 
 The editor is GPL-3.0-or-later, like Zed. See `LICENSE-GPL`.
