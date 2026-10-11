@@ -158,3 +158,72 @@ async fn test_tab_keys_switch_tabs_with_jetbrains_keymap(cx: &mut TestAppContext
         assert_eq!(modal.active_tab(), SearchTab::Files)
     });
 }
+
+#[gpui::test]
+async fn test_click_on_tab_row_padding_keeps_popup_open(cx: &mut TestAppContext) {
+    let app_state = init_test(cx);
+    app_state
+        .fs
+        .as_fake()
+        .insert_tree(path!("/root"), json!({ "a.txt": "" }))
+        .await;
+    let project = Project::test(app_state.fs.clone(), [path!("/root").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    cx.dispatch_action(SearchEverywhere);
+    cx.run_until_parked();
+    assert!(active_modal(&workspace, cx).is_some());
+
+    // The wrapper's corner is the row's padding, outside every button; its
+    // bottom edge is the gap above the picker.
+    let row = cx
+        .debug_bounds(super::TAB_ROW_SELECTOR)
+        .expect("tab row should be rendered");
+    cx.simulate_click(row.origin + gpui::point(px(1.), px(1.)), Default::default());
+    cx.run_until_parked();
+    assert!(
+        active_modal(&workspace, cx).is_some(),
+        "clicking the tab row padding must not dismiss the popup"
+    );
+
+    // The gap between the tab row and the picker is covered too.
+    let gap = row.origin + gpui::point(px(1.), row.size.height - px(1.));
+    cx.simulate_click(gap, Default::default());
+    cx.run_until_parked();
+    assert!(
+        active_modal(&workspace, cx).is_some(),
+        "clicking the gap under the tab row must not dismiss the popup"
+    );
+}
+
+#[gpui::test]
+async fn test_escape_closes_popup_while_files_are_loading(cx: &mut TestAppContext) {
+    let app_state = init_test(cx);
+    app_state
+        .fs
+        .as_fake()
+        .insert_tree(path!("/root"), json!({ "a.txt": "" }))
+        .await;
+    let project = Project::test(app_state.fs.clone(), [path!("/root").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    cx.dispatch_action(SearchEverywhere);
+    cx.run_until_parked();
+    // Simulate the window before the file finder has arrived: no hosted picker,
+    // focus on the popup root.
+    let modal = active_modal(&workspace, cx).expect("popup should be open");
+    cx.update(|window, cx| {
+        modal.update(cx, |modal, cx| {
+            modal.child = None;
+            window.focus(&modal.focus_handle, cx);
+        });
+    });
+
+    cx.dispatch_action(menu::Cancel);
+    cx.run_until_parked();
+    assert!(active_modal(&workspace, cx).is_none());
+}

@@ -10,13 +10,16 @@ use command_palette::CommandPalette;
 use file_finder::FileFinder;
 use gpui::{
     AnyView, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, ManagedView,
-    Render, Subscription, Task, WeakEntity, Window, actions,
+    MouseButton, Render, Subscription, Task, WeakEntity, Window, actions,
 };
 use picker::Picker;
 use project_symbols::ProjectSymbolsDelegate;
 use ui::{ButtonLike, prelude::*};
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
+
+#[cfg(test)]
+const TAB_ROW_SELECTOR: &str = "search-everywhere-tab-row";
 
 #[cfg(test)]
 mod brewery_search_everywhere_tests;
@@ -283,24 +286,33 @@ impl SearchEverywhereModal {
     }
 
     fn render_tab_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .gap_1()
-            .p_1()
-            .elevation_3(cx)
-            .children(SearchTab::ALL.into_iter().map(|tab| {
-                ButtonLike::new(tab.label())
-                    .toggle_state(tab == self.tab)
-                    .child(Label::new(tab.label()).size(LabelSize::Small).color(
-                        if tab == self.tab {
-                            Color::Default
-                        } else {
-                            Color::Muted
-                        },
-                    ))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_tab(tab, window, cx);
-                    }))
-            }))
+        // The wrapper owns the gap above the picker so a press there is also
+        // swallowed: it would otherwise focus the popup root, blur the hosted
+        // modal picker and dismiss it.
+        div()
+            .pb_1()
+            .debug_selector(|| TAB_ROW_SELECTOR.to_string())
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .child(
+                h_flex()
+                    .gap_1()
+                    .p_1()
+                    .elevation_3(cx)
+                    .children(SearchTab::ALL.into_iter().map(|tab| {
+                        ButtonLike::new(tab.label())
+                            .toggle_state(tab == self.tab)
+                            .child(Label::new(tab.label()).size(LabelSize::Small).color(
+                                if tab == self.tab {
+                                    Color::Default
+                                } else {
+                                    Color::Muted
+                                },
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_tab(tab, window, cx);
+                            }))
+                    })),
+            )
     }
 }
 
@@ -309,7 +321,11 @@ impl Render for SearchEverywhereModal {
         v_flex()
             .key_context("SearchEverywhere")
             .track_focus(&self.focus_handle)
-            .gap_1()
+            .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| {
+                // The hosted picker handles Esc itself once it exists; before the
+                // file finder has loaded nothing else would close the popup.
+                cx.emit(DismissEvent);
+            }))
             .on_action(cx.listener(|this, _: &NextSearchTab, window, cx| {
                 this.select_tab(this.tab.next(), window, cx);
             }))
