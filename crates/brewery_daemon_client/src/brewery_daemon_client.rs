@@ -11,7 +11,7 @@ pub mod protocol;
 pub use jdk::{JdkCandidate, find_daemon_jar, find_java, parse_release_version, pick_jdk};
 pub use protocol::{BuildModule, BuildTask, BuildTool, PROTOCOL_VERSION, ProjectModel};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Error, Result, bail};
 use gpui::{AppContext as _, AsyncApp};
 use parking_lot::Mutex;
 use protocol::{
@@ -29,6 +29,18 @@ const MIN_JAVA_MAJOR: u32 = 21;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// The first Gradle import may download a distribution, so this is generous.
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Whether a daemon call failed because the build files could not be imported, as opposed to the
+/// daemon being unreachable. The first is fixed by editing the build; the second needs a restart.
+pub fn is_import_error(error: &Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<lsp::ResponseError>()
+            .is_some_and(|response| {
+                i64::from(response.code) == i64::from(protocol::BUILD_IMPORT_FAILED)
+            })
+    })
+}
 
 /// Dropping the client also stops the daemon: `lsp::LanguageServer` shuts its process
 /// down on drop. `shutdown` is for callers that want to wait for that to finish.
@@ -133,6 +145,25 @@ impl DaemonClient {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn import_errors_are_told_apart_from_connection_errors() {
+        let import = Error::new(lsp::ResponseError::new(
+            lsp::ResponseErrorCode::Other(protocol::BUILD_IMPORT_FAILED.into()),
+            "broken build.gradle",
+        ))
+        .context("brewery-daemon could not read the project model");
+        assert!(is_import_error(&import));
+
+        let not_opened = Error::new(lsp::ResponseError::new(
+            lsp::ResponseErrorCode::Other(protocol::NOT_OPENED.into()),
+            "no project",
+        ));
+        assert!(!is_import_error(&not_opened));
+        assert!(!is_import_error(&anyhow::anyhow!(
+            "Server reset the connection"
+        )));
+    }
 
     #[gpui::test]
     async fn daemon_reads_maven_model(cx: &mut TestAppContext) {

@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// JSON-RPC error codes of the daemon (`ErrorCodes` in `Protocol.kt`).
+/// The build files could not be imported (script error, missing JDK, ...).
+pub const BUILD_IMPORT_FAILED: i32 = -32001;
+/// `project/model` was requested before `project/open`.
+pub const NOT_OPENED: i32 = -32002;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
@@ -111,6 +117,12 @@ mod tests {
         include_str!("../../../brewery-daemon/protocol/fixtures/initialize.result.json");
     const GRADLE_MODEL: &str =
         include_str!("../../../brewery-daemon/protocol/fixtures/project-model.gradle.json");
+
+    #[test]
+    fn error_codes_match_the_daemon() {
+        assert_eq!(BUILD_IMPORT_FAILED, -32001);
+        assert_eq!(NOT_OPENED, -32002);
+    }
 
     #[test]
     fn initialize_params_match_fixture() {

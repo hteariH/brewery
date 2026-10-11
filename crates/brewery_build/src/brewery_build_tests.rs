@@ -218,7 +218,12 @@ async fn first_show_connects_for_worktree_root_without_panicking(cx: &mut TestAp
             .error
             .as_ref()
             .expect("the failed start should be shown");
-        assert!(error.contains("no daemon in tests"), "{error}");
+        assert_eq!(error.kind, ErrorKind::Connection);
+        assert!(
+            error.message.contains("no daemon in tests"),
+            "{}",
+            error.message
+        );
         assert!(panel.busy.is_none());
     });
 
@@ -227,4 +232,29 @@ async fn first_show_connects_for_worktree_root_without_panicking(cx: &mut TestAp
     cx.dispatch_action(ToggleBuildPanel);
     cx.run_until_parked();
     assert_eq!(started.borrow().len(), 1);
+}
+
+#[test]
+fn only_the_second_click_activates() {
+    assert!(!is_activating_click(1));
+    assert!(is_activating_click(2));
+    assert!(!is_activating_click(3));
+}
+
+#[test]
+fn reload_refetches_unless_the_daemon_is_unreachable() {
+    assert_eq!(reload_action(true, None), ReloadAction::Refetch);
+    assert_eq!(
+        reload_action(true, Some(ErrorKind::Import)),
+        ReloadAction::Refetch
+    );
+    assert_eq!(
+        reload_action(true, Some(ErrorKind::Connection)),
+        ReloadAction::Restart
+    );
+    assert_eq!(reload_action(false, None), ReloadAction::Restart);
+    assert_eq!(
+        reload_action(false, Some(ErrorKind::Import)),
+        ReloadAction::Restart
+    );
 }

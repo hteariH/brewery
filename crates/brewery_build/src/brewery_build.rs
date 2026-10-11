@@ -2,7 +2,7 @@
 //! reads from the build files and runs a task in the terminal on double click/Enter.
 
 use anyhow::Result;
-use brewery_daemon_client::{BuildModule, BuildTool, DaemonClient, ProjectModel};
+use brewery_daemon_client::{BuildModule, BuildTool, DaemonClient, ProjectModel, is_import_error};
 use futures::future::LocalBoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
@@ -154,10 +154,62 @@ pub struct BuildPanel {
     connect_task: Option<Task<()>>,
     fetch_task: Option<Task<()>>,
     model: Option<ProjectModel>,
-    error: Option<SharedString>,
+    error: Option<PanelError>,
     busy: Option<SharedString>,
     collapsed: HashSet<String>,
     selected: Option<usize>,
+}
+
+/// Why the panel shows an error. They are kept apart because the fix differs: a broken build is
+/// retried against the running daemon, while a daemon that never started (or died) is restarted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ErrorKind {
+    Connection,
+    Import,
+}
+
+struct PanelError {
+    kind: ErrorKind,
+    message: SharedString,
+}
+
+impl PanelError {
+    fn connection(message: impl Into<SharedString>) -> Self {
+        Self {
+            kind: ErrorKind::Connection,
+            message: message.into(),
+        }
+    }
+
+    fn from_fetch(error: &anyhow::Error) -> Self {
+        Self {
+            kind: if is_import_error(error) {
+                ErrorKind::Import
+            } else {
+                ErrorKind::Connection
+            },
+            message: format!("{error:#}").into(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReloadAction {
+    Refetch,
+    Restart,
+}
+
+/// A live daemon is reused unless the last failure was about reaching it.
+fn reload_action(connected: bool, last_error: Option<ErrorKind>) -> ReloadAction {
+    match (connected, last_error) {
+        (true, None | Some(ErrorKind::Import)) => ReloadAction::Refetch,
+        _ => ReloadAction::Restart,
+    }
+}
+
+/// Exactly the second click of a double click: further clicks of a triple click must not run the task again.
+fn is_activating_click(click_count: usize) -> bool {
+    click_count == 2
 }
 
 impl BuildPanel {
@@ -208,10 +260,10 @@ impl BuildPanel {
     /// Restarts the daemon after a failure (the JDK or the jar may have appeared
     /// since), otherwise asks the running daemon for a fresh model.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        if self.client.is_some() && self.error.is_none() {
-            self.fetch_model(cx);
-        } else {
-            self.connect(cx);
+        let last_error = self.error.as_ref().map(|error| error.kind);
+        match reload_action(self.client.is_some(), last_error) {
+            ReloadAction::Refetch => self.fetch_model(cx),
+            ReloadAction::Restart => self.connect(cx),
         }
     }
 
@@ -227,7 +279,9 @@ impl BuildPanel {
         self.connected_once = true;
         self.disconnect();
         let Some(root) = self.project_root(cx) else {
-            self.error = Some("Open a folder to see its Gradle or Maven project.".into());
+            self.error = Some(PanelError::connection(
+                "Open a folder to see its Gradle or Maven project.",
+            ));
             cx.notify();
             return;
         };
@@ -241,7 +295,7 @@ impl BuildPanel {
                 Ok(client) => this.attach(Arc::new(client), cx),
                 Err(error) => {
                     this.busy = None;
-                    this.error = Some(format!("{error:#}").into());
+                    this.error = Some(PanelError::connection(format!("{error:#}")));
                     cx.notify();
                 }
             })
@@ -283,7 +337,7 @@ impl BuildPanel {
                         this.model = Some(model);
                         this.error = None;
                     }
-                    Err(error) => this.error = Some(format!("{error:#}").into()),
+                    Err(error) => this.error = Some(PanelError::from_fetch(&error)),
                 }
                 this.selected = None;
                 cx.notify();
@@ -440,7 +494,7 @@ impl BuildPanel {
     ) {
         self.selected = Some(ix);
         window.focus(&self.focus_handle, cx);
-        if event.click_count() >= 2 {
+        if is_activating_click(event.click_count()) {
             self.activate_entry(ix, window, cx);
         }
         cx.notify();
@@ -561,7 +615,7 @@ impl BuildPanel {
 
 impl Render for BuildPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = if let Some(error) = self.error.clone() {
+        let body = if let Some(error) = self.error.as_ref().map(|error| error.message.clone()) {
             self.render_error(error, cx).into_any_element()
         } else if let Some(model) = &self.model {
             let rows = self.render_entries(model, cx);
