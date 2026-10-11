@@ -22,6 +22,10 @@ use ui::{
 };
 use util::ResultExt as _;
 
+// brewery: IntelliJ-style tool-window stripes (child module so it can read Dock's fields)
+mod brewery_stripes;
+pub use brewery_stripes::ToolWindowStripe;
+
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
 
 pub enum PanelEvent {

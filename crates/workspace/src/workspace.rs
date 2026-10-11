@@ -50,7 +50,8 @@ use client::{
     proto::{self, ErrorCode, PanelId, PeerId},
 };
 use collections::{HashMap, HashSet, TypeIdHashMap, hash_map};
-use dock::{Dock, DockPosition, PanelButtons, PanelHandle, RESIZE_HANDLE_SIZE};
+// brewery: tool-window stripes replace the status-bar PanelButtons
+use dock::{Dock, DockPosition, PanelHandle, RESIZE_HANDLE_SIZE, ToolWindowStripe};
 use fs::Fs;
 use futures::{
     Future, FutureExt, StreamExt,
@@ -1588,6 +1589,8 @@ pub struct Workspace {
     left_dock: Entity<Dock>,
     bottom_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
+    brewery_left_stripe: Entity<ToolWindowStripe>, // brewery:
+    brewery_right_stripe: Entity<ToolWindowStripe>, // brewery:
     panes: Vec<Entity<Pane>>,
     panes_by_item: HashMap<EntityId, WeakEntity<Pane>>,
     active_pane: Entity<Pane>,
@@ -1971,20 +1974,17 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
-        let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
-        let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
-        let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
+        // brewery: IntelliJ-style tool-window stripes instead of status-bar panel buttons
+        let brewery_left_stripe =
+            cx.new(|cx| ToolWindowStripe::new(left_dock.clone(), Some(bottom_dock.clone()), cx));
+        let brewery_right_stripe = cx.new(|cx| ToolWindowStripe::new(right_dock.clone(), None, cx)); // brewery:
         let multi_workspace = window
             .root::<MultiWorkspace>()
             .flatten()
             .map(|mw| mw.downgrade());
         let status_bar = cx.new(|cx| {
-            let mut status_bar =
-                StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx);
-            status_bar.add_left_item(left_dock_buttons, window, cx);
-            status_bar.add_right_item(right_dock_buttons, window, cx);
-            status_bar.add_right_item(bottom_dock_buttons, window, cx);
-            status_bar
+            // brewery: panel buttons live in the tool-window stripes, not the status bar
+            StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx)
         });
 
         let session_id = app_state.session.read(cx).id().to_owned();
@@ -2109,6 +2109,8 @@ impl Workspace {
             left_dock,
             bottom_dock,
             right_dock,
+            brewery_left_stripe,  // brewery:
+            brewery_right_stripe, // brewery:
             _panels_task: None,
             project: project.clone(),
             follower_states: Default::default(),
@@ -9674,7 +9676,8 @@ impl Render for Workspace {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .child(
+                    .child(self.brewery_with_stripes({
+                        // brewery: stripes flank the workspace area
                         div()
                             .id("workspace")
                             .bg(colors.background)
@@ -10058,8 +10061,8 @@ impl Render for Workspace {
                                     }
                                 })
                             }))
-                            .children(self.render_notifications(window, cx)),
-                    )
+                            .children(self.render_notifications(window, cx)) // brewery: block body, no trailing comma
+                    })) // brewery:
                     .when(self.status_bar_visible(cx), |parent| {
                         parent.child(self.status_bar.clone())
                     })
@@ -15872,7 +15875,12 @@ mod tests {
             assert_eq!(center_column_count, 2);
 
             let dock = workspace.right_dock().read(cx);
-            assert_eq!(workspace.dock_size(&dock, window, cx).unwrap(), px(640.));
+            // brewery: the tool-window stripes narrow the rendered workspace area, so a third of
+            // it is no longer a round number
+            brewery_assert_px_close(
+                workspace.dock_size(&dock, window, cx).unwrap(),
+                workspace.bounds.size.width / 3.,
+            );
 
             workspace.bounds.size.width = px(2400.);
 
@@ -16414,11 +16422,7 @@ mod tests {
                 .dock_size(&left_dock, window, cx)
                 .expect("left dock should still have an active panel after horizontal split");
 
-            assert_eq!(
-                left_width,
-                workspace.bounds.size.width / 3.,
-                "flexible left panel width should match the average center column width"
-            );
+            brewery_assert_px_close(left_width, workspace.bounds.size.width / 3.); // brewery: stripes
         });
 
         // Step 3: Split the active center pane vertically (top/bottom). Vertical splits do
@@ -16436,11 +16440,7 @@ mod tests {
                 .dock_size(&left_dock, window, cx)
                 .expect("left dock should still have an active panel after vertical split");
 
-            assert_eq!(
-                left_width,
-                workspace.bounds.size.width / 3.,
-                "flexible left panel width should still match the average center column width"
-            );
+            brewery_assert_px_close(left_width, workspace.bounds.size.width / 3.); // brewery: stripes
         });
 
         // Step 4: Open a fixed-width panel in the right dock. The right dock's default
@@ -16462,11 +16462,7 @@ mod tests {
                 .expect("left dock should still have an active panel");
 
             let available_width = workspace.bounds.size.width - right_width;
-            assert_eq!(
-                left_width,
-                available_width / 3.,
-                "flexible left panel should keep matching one average center column"
-            );
+            brewery_assert_px_close(left_width, available_width / 3.); // brewery: stripes
         });
 
         // Step 5: Toggle the right dock's panel to flexible. Now both docks use
@@ -16527,6 +16523,16 @@ mod tests {
                 "flexible right panel should share workspace width via flex ratios"
             );
         });
+    }
+
+    // brewery: dock-size assertions tolerate f32 rounding now that the tool-window stripes make
+    // the rendered workspace width a non-round number
+    #[track_caller]
+    fn brewery_assert_px_close(actual: Pixels, expected: Pixels) {
+        assert!(
+            (actual - expected).abs() < px(0.01),
+            "expected {expected:?}, got {actual:?}"
+        );
     }
 
     struct TestModal(FocusHandle);
