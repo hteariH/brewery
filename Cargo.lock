@@ -2415,6 +2415,7 @@ dependencies = [
  "paths",
  "rust-embed",
  "serde_json",
+ "settings_json",
  "theme",
  "theme_settings",
 ]

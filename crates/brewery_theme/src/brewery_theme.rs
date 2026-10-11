@@ -65,6 +65,19 @@ mod tests {
     const THEME_JSON: &str = include_str!("../../../assets/themes/brewery/brewery.json");
 
     #[test]
+    fn test_default_settings_name_the_bundled_themes() {
+        // assets/settings/default.json cannot reference these consts, so tie them here.
+        let defaults = settings_json::parse_json_with_comments::<serde_json::Value>(include_str!(
+            "../../../assets/settings/default.json"
+        ))
+        .expect("default.json parses");
+        assert_eq!(defaults["theme"]["dark"], DARK_THEME);
+        assert_eq!(defaults["theme"]["light"], LIGHT_THEME);
+        assert_eq!(defaults["icon_theme"]["dark"], DARK_ICON_THEME);
+        assert_eq!(defaults["icon_theme"]["light"], LIGHT_ICON_THEME);
+    }
+
+    #[test]
     fn test_brewery_theme_family_parses() {
         let family: theme_settings::ThemeFamilyContent =
             serde_json::from_str(THEME_JSON).expect("brewery.json is a valid theme family");
