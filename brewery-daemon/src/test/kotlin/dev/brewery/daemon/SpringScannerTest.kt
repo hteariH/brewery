@@ -231,4 +231,18 @@ class SpringScannerTest {
         assertEquals(1, projectChanged.count, "a java edit must not look like a build-file edit")
         daemon.close()
     }
+
+    @Test
+    fun `a failed import is retried by the next spring model request`() {
+        val attempts = java.util.concurrent.atomic.AtomicInteger()
+        val daemon = BreweryDaemon(modelReader = {
+            if (attempts.incrementAndGet() == 1) error("boom")
+            model(it)
+        })
+        daemon.openProject(OpenProjectParams(petshop.toString())).get(10, TimeUnit.SECONDS)
+        assertFailsWith<ExecutionException> { daemon.springModel(SpringModelParams()).get(10, TimeUnit.SECONDS) }
+        assertEquals(5, daemon.springModel(SpringModelParams()).get(20, TimeUnit.SECONDS).beans.size)
+        assertEquals(2, attempts.get())
+        daemon.close()
+    }
 }

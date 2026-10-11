@@ -119,7 +119,7 @@ class BreweryDaemon(
     override fun projectModel(params: ProjectModelParams): CompletableFuture<ProjectModel> {
         synchronized(lock) {
             val dir = root ?: return failed(ErrorCodes.NOT_OPENED, "No project is open")
-            val shared = cached ?: startImport(dir).also { cached = it }
+            val shared = liveImport(dir)
             // Each caller gets its own dependent future: lsp4j cancels the future it was handed when the
             // client cancels a request, and that must not cancel the import other callers share.
             return shared.thenApply { it }
@@ -129,7 +129,8 @@ class BreweryDaemon(
     override fun springModel(params: SpringModelParams): CompletableFuture<SpringModel> {
         synchronized(lock) {
             val dir = root ?: return failed(ErrorCodes.NOT_OPENED, "No project is open")
-            val shared = cachedSpring ?: startScan(dir).also { cachedSpring = it }
+            val shared = cachedSpring?.takeUnless { it.isCompletedExceptionally }
+                ?: startScan(dir).also { cachedSpring = it }
             return shared.thenApply { it }
         }
     }
@@ -140,9 +141,14 @@ class BreweryDaemon(
         return project.thenCombine(spring) { p, s -> RunConfigurations.build(p, s, windows) }
     }
 
+    // Caller holds [lock]. A future that already failed may still be cached when its completion handler ran
+    // inline before the assignment, so a failed one is never reused.
+    private fun liveImport(dir: Path): CompletableFuture<ProjectModel> =
+        cached?.takeUnless { it.isCompletedExceptionally } ?: startImport(dir).also { cached = it }
+
     // Caller holds [lock].
     private fun startScan(dir: Path): CompletableFuture<SpringModel> {
-        val model = cached ?: startImport(dir).also { cached = it }
+        val model = liveImport(dir)
         val future = CompletableFuture<SpringModel>()
         model.whenComplete { project, error ->
             if (error != null) {
