@@ -52,6 +52,8 @@ pub struct WasmHost {
     node_runtime: NodeRuntime,
     pub(crate) proxy: Arc<ExtensionHostProxy>,
     fs: Arc<dyn Fs>,
+    // brewery: retry flaky downloads (jdtls is ~50 MB)
+    pub(crate) executor: BackgroundExecutor,
     pub work_dir: PathBuf,
     /// The capabilities granted to extensions running on the host.
     pub(crate) granted_capabilities: Vec<ExtensionCapability>,
@@ -629,6 +631,7 @@ impl WasmHost {
         Arc::new(Self {
             engine: wasm_engine(cx.background_executor()),
             fs,
+            executor: cx.background_executor().clone(),
             work_dir,
             http_client,
             node_runtime,

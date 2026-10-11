@@ -1,7 +1,7 @@
 use crate::wasm_host::wit::since_v0_6_0::slash_command::SlashCommandOutputSection;
 use crate::wasm_host::wit::{CompletionKind, CompletionLabelDetails, InsertTextFormat, SymbolKind};
 use crate::wasm_host::{
-    WasmState,
+    WasmHost, WasmState,
     wit::{IntoWasmtimeResult, ToWasmtimeResult},
 };
 use ::http_client::{AsyncBody, HttpRequestExt};
@@ -1093,54 +1093,22 @@ impl ExtensionImports for WasmState {
                 .writeable_path_from_extension(&self.manifest.id, &path)
                 .await?;
 
-            let mut response = self
-                .host
-                .http_client
-                .get(&url, Default::default(), true)
-                .await
-                .context("downloading release")?;
-
-            anyhow::ensure!(
-                response.status().is_success(),
-                "download failed with status {}",
-                response.status()
-            );
-            let mut body = BufReader::new(response.body_mut());
-
-            match file_type {
-                DownloadedFileType::Uncompressed => {
-                    futures::pin_mut!(body);
-                    self.host
-                        .fs
-                        .create_file_with(&destination_path, body)
-                        .await?;
-                }
-                DownloadedFileType::Gzip => {
-                    let body = GzipDecoder::new(body);
-                    futures::pin_mut!(body);
-                    self.host
-                        .fs
-                        .create_file_with(&destination_path, body)
-                        .await?;
-                }
-                DownloadedFileType::GzipTar => {
-                    let mut tar_gz_bytes = Vec::new();
-                    body.read_to_end(&mut tar_gz_bytes).await?;
-                    let decompressed_bytes =
-                        GzipDecoder::new(BufReader::new(tar_gz_bytes.as_slice()));
-                    futures::pin_mut!(decompressed_bytes);
-                    self.host
-                        .fs
-                        .extract_tar_file(&destination_path, Archive::new(decompressed_bytes))
-                        .await?;
-                }
-                DownloadedFileType::Zip => {
-                    futures::pin_mut!(body);
-                    extract_zip(&destination_path, body)
-                        .await
-                        .with_context(|| format!("unzipping {path:?} archive"))?;
-                }
-            }
+            // brewery: retry flaky downloads (jdtls is ~50 MB)
+            let host = self.host.clone();
+            run_with_retry(
+                &url,
+                || download_attempt(&host, &url, &destination_path, &path, file_type),
+                || async {
+                    let options = fs::RemoveOptions {
+                        recursive: true,
+                        ignore_if_not_exists: true,
+                    };
+                    host.fs.remove_dir(&destination_path, options).await.ok();
+                    host.fs.remove_file(&destination_path, options).await.ok();
+                },
+                |delay| host.executor.timer(delay),
+            )
+            .await?;
 
             Ok(())
         })
@@ -1159,5 +1127,222 @@ impl ExtensionImports for WasmState {
             .await
             .with_context(|| format!("setting permissions for path {path:?}"))
             .to_wasmtime_result()
+    }
+}
+
+// brewery: retry flaky downloads (jdtls is ~50 MB)
+const DOWNLOAD_MAX_ATTEMPTS: usize = 3;
+
+#[derive(Debug)]
+enum DownloadError {
+    /// Connection-level failure, including one that interrupts the body.
+    Transport(anyhow::Error),
+    /// The server answered with a non-success status.
+    Status(u16),
+}
+
+impl DownloadError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Transport(error) => error,
+            Self::Status(status) => anyhow::anyhow!("download failed with status {status}"),
+        }
+    }
+}
+
+/// How long to wait before retrying after `attempt` (1-based) failed with `error`.
+/// `None` means give up.
+fn should_retry(attempt: usize, error: &DownloadError) -> Option<std::time::Duration> {
+    if attempt >= DOWNLOAD_MAX_ATTEMPTS {
+        return None;
+    }
+    let retryable = match error {
+        DownloadError::Transport(_) => true,
+        DownloadError::Status(status) => *status >= 500,
+    };
+    retryable.then(|| match attempt {
+        1 => std::time::Duration::from_secs(1),
+        _ => std::time::Duration::from_secs(3),
+    })
+}
+
+async fn run_with_retry<A, AFut, C, CFut, S, SFut>(
+    url: &str,
+    mut attempt_download: A,
+    mut cleanup: C,
+    mut sleep: S,
+) -> Result<()>
+where
+    A: FnMut() -> AFut,
+    AFut: std::future::Future<Output = Result<(), DownloadError>>,
+    C: FnMut() -> CFut,
+    CFut: std::future::Future<Output = ()>,
+    S: FnMut(std::time::Duration) -> SFut,
+    SFut: std::future::Future<Output = ()>,
+{
+    let mut attempt = 1;
+    loop {
+        match attempt_download().await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let Some(delay) = should_retry(attempt, &error) else {
+                    return Err(error.into_anyhow());
+                };
+                log::warn!(
+                    "download of {url} failed on attempt {attempt}/{DOWNLOAD_MAX_ATTEMPTS}, retrying in {delay:?}: {:#}",
+                    error.into_anyhow()
+                );
+                cleanup().await;
+                sleep(delay).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
+async fn download_attempt(
+    host: &WasmHost,
+    url: &str,
+    destination_path: &Path,
+    path: &Path,
+    file_type: DownloadedFileType,
+) -> Result<(), DownloadError> {
+    let mut response = host
+        .http_client
+        .get(url, Default::default(), true)
+        .await
+        .map_err(|error| DownloadError::Transport(error.context("downloading release")))?;
+
+    if !response.status().is_success() {
+        return Err(DownloadError::Status(response.status().as_u16()));
+    }
+    let mut body = BufReader::new(response.body_mut());
+
+    match file_type {
+        DownloadedFileType::Uncompressed => {
+            futures::pin_mut!(body);
+            host.fs
+                .create_file_with(destination_path, body)
+                .await
+                .map_err(DownloadError::Transport)?;
+        }
+        DownloadedFileType::Gzip => {
+            let body = GzipDecoder::new(body);
+            futures::pin_mut!(body);
+            host.fs
+                .create_file_with(destination_path, body)
+                .await
+                .map_err(DownloadError::Transport)?;
+        }
+        DownloadedFileType::GzipTar => {
+            let mut tar_gz_bytes = Vec::new();
+            body.read_to_end(&mut tar_gz_bytes)
+                .await
+                .map_err(|error| DownloadError::Transport(error.into()))?;
+            let decompressed_bytes = GzipDecoder::new(BufReader::new(tar_gz_bytes.as_slice()));
+            futures::pin_mut!(decompressed_bytes);
+            host.fs
+                .extract_tar_file(destination_path, Archive::new(decompressed_bytes))
+                .await
+                .map_err(DownloadError::Transport)?;
+        }
+        DownloadedFileType::Zip => {
+            futures::pin_mut!(body);
+            extract_zip(destination_path, body)
+                .await
+                .with_context(|| format!("unzipping {path:?} archive"))
+                .map_err(DownloadError::Transport)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod download_retry_tests {
+    use super::*;
+    use std::{
+        cell::{Cell, RefCell},
+        time::Duration,
+    };
+
+    fn io_error() -> DownloadError {
+        DownloadError::Transport(anyhow::anyhow!("connection reset"))
+    }
+
+    #[test]
+    fn policy_retries_transport_and_5xx_only() {
+        assert_eq!(should_retry(1, &io_error()), Some(Duration::from_secs(1)));
+        assert_eq!(should_retry(2, &io_error()), Some(Duration::from_secs(3)));
+        assert_eq!(should_retry(3, &io_error()), None);
+        assert_eq!(
+            should_retry(1, &DownloadError::Status(503)),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(should_retry(1, &DownloadError::Status(404)), None);
+        assert_eq!(should_retry(1, &DownloadError::Status(403)), None);
+    }
+
+    #[test]
+    fn transport_failure_then_success_succeeds_after_cleanup() {
+        let calls = Cell::new(0);
+        let cleanups = Cell::new(0);
+        let sleeps = RefCell::new(Vec::new());
+        let result = futures::executor::block_on(run_with_retry(
+            "https://example.com/jdtls.tar.gz",
+            || {
+                calls.set(calls.get() + 1);
+                let outcome = if calls.get() == 1 {
+                    Err(io_error())
+                } else {
+                    Ok(())
+                };
+                async move { outcome }
+            },
+            || {
+                cleanups.set(cleanups.get() + 1);
+                async {}
+            },
+            |delay| {
+                sleeps.borrow_mut().push(delay);
+                async {}
+            },
+        ));
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cleanups.get(), 1);
+        assert_eq!(*sleeps.borrow(), vec![Duration::from_secs(1)]);
+    }
+
+    #[test]
+    fn not_found_fails_without_retry() {
+        let calls = Cell::new(0);
+        let result = futures::executor::block_on(run_with_retry(
+            "https://example.com/missing",
+            || {
+                calls.set(calls.get() + 1);
+                async { Err(DownloadError::Status(404)) }
+            },
+            || async {},
+            |_| async {},
+        ));
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn gives_up_after_three_attempts() {
+        let calls = Cell::new(0);
+        let result = futures::executor::block_on(run_with_retry(
+            "https://example.com/flaky",
+            || {
+                calls.set(calls.get() + 1);
+                async { Err(io_error()) }
+            },
+            || async {},
+            |_| async {},
+        ));
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 3);
     }
 }
