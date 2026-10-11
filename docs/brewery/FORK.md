@@ -14,7 +14,7 @@
 
     git checkout main
     script/brewery/merge-upstream
-    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder
+    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_build -p extension_host
     cargo test -p workspace --lib
     script/brewery/list-hooks   # every hook still present?
 
@@ -22,6 +22,17 @@ Shift Shift (Search Everywhere) is bound only in the JetBrains base keymap.
 
 The script resolves Zed workflow changes (kept deleted) and `README.md` (ours).
 Everything else it leaves to you and lists.
+
+## Daemon (`brewery-daemon/`)
+
+Kotlin/JVM, Apache 2.0. Needs JDK 21 (`JAVA_HOME`).
+
+    cd brewery-daemon
+    ./gradlew test        # unit tests
+    ./gradlew shadowJar   # build/libs/brewery-daemon-all.jar
+
+Set `BREWERY_DAEMON_JAR` to that jar to run the `brewery_daemon_client`
+integration test (it skips when unset, as in CI's Rust job).
 
 ## Regenerating look assets
 

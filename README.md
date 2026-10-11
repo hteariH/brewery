@@ -22,6 +22,14 @@ Follow Zed's build guides — [Windows](docs/src/development/windows.md),
 
     cargo run -p zed
 
+Brewery's Gradle/Maven tool window and build model come from a Kotlin daemon.
+Build it before running the app (needs JDK 21):
+
+    cd brewery-daemon && ./gradlew shadowJar
+
+The Java extension is installed automatically on first start. Its language
+server (jdtls) needs JDK 21 or newer on the machine, or it is downloaded.
+
 Development builds also need the CLI helper next to the app binary, or the
 app prints `could not find zed-cli` on start (harmless, but git over SSH
 cannot ask for passwords):
