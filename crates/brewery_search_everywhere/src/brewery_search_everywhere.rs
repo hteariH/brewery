@@ -18,7 +18,7 @@ use ui::{ButtonLike, prelude::*};
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
-#[cfg(test)]
+/// Test selector of the tab row; a no-op outside test builds.
 const TAB_ROW_SELECTOR: &str = "search-everywhere-tab-row";
 
 #[cfg(test)]

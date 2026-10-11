@@ -12497,7 +12497,7 @@ mod tests {
     };
     use project::{DisableAiSettings, Project, ProjectEntryId, WorktreeId};
     use serde_json::json;
-    use settings::{Settings as _, SettingsStore};
+    use settings::SettingsStore;
     use util::path;
     use util::rel_path::rel_path;
 
