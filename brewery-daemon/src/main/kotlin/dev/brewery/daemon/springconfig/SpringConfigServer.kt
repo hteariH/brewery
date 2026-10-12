@@ -1,5 +1,6 @@
 package dev.brewery.daemon.springconfig
 
+import com.google.gson.JsonPrimitive
 import org.eclipse.lsp4j.CompletionItem
 import org.eclipse.lsp4j.CompletionItemKind
 import org.eclipse.lsp4j.CompletionItemTag
@@ -131,7 +132,8 @@ class SpringConfigServer(
                     setSave(SaveOptions(false))
                 },
             )
-            completionProvider = CompletionOptions(false, listOf(".", ":", "="))
+            // Documentation is sent on resolve: with it inline a full key list is several hundred kilobytes.
+            completionProvider = CompletionOptions(true, listOf(".", ":", "="))
             setHoverProvider(true)
         }
         return CompletableFuture.completedFuture(InitializeResult(capabilities, ServerInfo(SERVER_NAME, "0.1.0")))
@@ -280,14 +282,27 @@ class SpringConfigServer(
         }
 
         override fun completion(params: CompletionParams): CompletableFuture<Either<List<CompletionItem>, CompletionList>> {
-            val items = run {
-                val meta = metadata?.takeUnless { it.isEmpty } ?: return@run emptyList()
+            val list = run {
+                val meta = metadata?.takeUnless { it.isEmpty } ?: return@run null
                 val uri = params.textDocument.uri
-                val kind = fileKind(uri) ?: return@run emptyList()
-                val text = documents[uri] ?: return@run emptyList()
+                val kind = fileKind(uri) ?: return@run null
+                val text = documents[uri] ?: return@run null
                 complete(text, kind, params.position, meta)
+            } ?: CompletionList(false, emptyList())
+            return CompletableFuture.completedFuture(Either.forRight(list))
+        }
+
+        override fun resolveCompletionItem(item: CompletionItem): CompletableFuture<CompletionItem> {
+            val name = when (val data = item.data) {
+                is JsonPrimitive -> data.asString
+                is String -> data
+                else -> null
             }
-            return CompletableFuture.completedFuture(Either.forLeft(items))
+            val property = name?.let { metadata?.find(it) }
+            if (property != null && item.documentation == null) {
+                item.documentation = Either.forRight(MarkupContent(MarkupKind.MARKDOWN, describe(property, withName = false)))
+            }
+            return CompletableFuture.completedFuture(item)
         }
 
         override fun hover(params: HoverParams): CompletableFuture<Hover?> {
@@ -303,18 +318,49 @@ class SpringConfigServer(
 
 private fun range(line: Int, start: Int, end: Int) = Range(Position(line, start), Position(line, end))
 
-private fun complete(text: String, kind: FileKind, pos: Position, meta: SpringMetadata): List<CompletionItem> {
+private fun complete(text: String, kind: FileKind, pos: Position, meta: SpringMetadata): CompletionList? {
     val context = when (kind) {
         FileKind.PROPERTIES -> PropertiesDocument(text).contextAt(pos.line, pos.character)
         FileKind.YAML -> YamlDocument(text).contextAt(pos.line, pos.character)
-    } ?: return emptyList()
+    } ?: return null
     return when (context) {
-        is ConfigContext.Value -> valueItems(context, pos.line, meta)
+        is ConfigContext.Value -> CompletionList(false, valueItems(context, pos.line, meta))
         is ConfigContext.Key -> when (kind) {
-            FileKind.PROPERTIES -> meta.properties.map { propertyItem(it.name, it, it.name, range(pos.line, context.startCol, context.endCol)) }
-            FileKind.YAML -> yamlKeyItems(context, pos.line, meta)
+            // Every key is a candidate here, so only those matching what is typed are sent, and the client asks
+            // again as typing goes on.
+            FileKind.PROPERTIES -> CompletionList(true, propertiesKeyItems(text, context, pos, meta))
+            FileKind.YAML -> CompletionList(false, yamlKeyItems(context, pos.line, meta))
         }
     }
+}
+
+private fun propertiesKeyItems(text: String, context: ConfigContext.Key, pos: Position, meta: SpringMetadata): List<CompletionItem> {
+    val line = text.split(Regex("\r\n|\n|\r")).getOrNull(pos.line).orEmpty()
+    val from = context.startCol.coerceIn(0, line.length)
+    val to = pos.character.coerceIn(from, line.length)
+    val typed = canonicalKey(line.substring(from, to))
+    val edit = range(pos.line, context.startCol, context.endCol)
+    val properties = meta.properties.asSequence()
+        .filter { canonicalKey(it.name).startsWith(typed) }
+        .map { propertyItem(it.name, it, it.name, edit) }
+    val mapKeys = mapKeyHints(meta).asSequence()
+        .filter { (key, _) -> canonicalKey(key).startsWith(typed) }
+        .map { (key, value) -> hintKeyItem(key, key, value, edit) }
+    return (properties + mapKeys).toList()
+}
+
+/** Suggested keys of map properties (a `<map>.keys` hint, e.g. `logging.level.root`) as full keys. */
+private fun mapKeyHints(meta: SpringMetadata): List<Pair<String, HintValue>> =
+    meta.properties.filter { it.isMap }.flatMap { map ->
+        meta.hint("${map.name}.keys")?.values.orEmpty().map { "${map.name}.${it.value}" to it }
+    }
+
+private fun hintKeyItem(label: String, insert: String, value: HintValue, edit: Range) = CompletionItem(label).apply {
+    kind = CompletionItemKind.Property
+    textEdit = Either.forLeft(TextEdit(edit, insert))
+    filterText = label
+    sortText = label
+    value.description?.let { documentation = Either.forLeft(it) }
 }
 
 private fun valueItems(context: ConfigContext.Value, line: Int, meta: SpringMetadata): List<CompletionItem> {
@@ -325,7 +371,9 @@ private fun valueItems(context: ConfigContext.Value, line: Int, meta: SpringMeta
         filterText = value
         if (doc != null) documentation = Either.forLeft(doc)
     }
-    val hint = meta.hint(context.key)
+    // A value of a map entry takes the map's `<map>.values` hint, e.g. the levels below `logging.level`.
+    val hint = meta.hint(context.key)?.takeIf { it.values.isNotEmpty() }
+        ?: meta.ancestors(context.key).firstOrNull { it.isMap }?.let { meta.hint("${it.name}.values") }
     if (hint != null && hint.values.isNotEmpty()) return hint.values.map { item(it.value, it.description) }
     val type = meta.find(context.key)?.type
     return if (type == "java.lang.Boolean" || type == "boolean") listOf(item("true", null), item("false", null)) else emptyList()
@@ -339,7 +387,8 @@ private fun propertyItem(label: String, property: ConfigProperty?, insert: Strin
         filterText = label
         sortText = label
         if (property != null) {
-            documentation = Either.forRight(MarkupContent(MarkupKind.MARKDOWN, describe(property, withName = false)))
+            // completionItem/resolve looks the property up again by name to add the documentation.
+            data = property.name
             if (property.deprecation != null) {
                 @Suppress("DEPRECATION")
                 deprecated = true
@@ -365,7 +414,7 @@ private fun yamlKeyItems(context: ConfigContext.Key, line: Int, meta: SpringMeta
         next[key] = name to leaf
     }
     val edit = range(line, context.startCol, context.endCol)
-    return next.values.map { (name, leaf) ->
+    val keys = next.values.map { (name, leaf) ->
         // A scalar is written on the same line; a map or a group continues in a nested block below.
         val insert = when {
             context.hasColon -> name
@@ -374,6 +423,12 @@ private fun yamlKeyItems(context: ConfigContext.Key, line: Int, meta: SpringMeta
         }
         propertyItem(name, leaf, insert, edit)
     }
+    // Directly below a map property, its `<map>.keys` hint names likely entries.
+    val map = context.parentPath.takeIf { it.isNotEmpty() }?.let { meta.find(it.joinToString(".")) }?.takeIf { it.isMap }
+    val hinted = map?.let { meta.hint("${it.name}.keys") }?.values.orEmpty().map {
+        hintKeyItem(it.value, if (context.hasColon) it.value else "${it.value}: ", it, edit)
+    }
+    return keys + hinted
 }
 
 private fun describe(p: ConfigProperty, withName: Boolean): String = buildString {
@@ -416,7 +471,9 @@ private fun diagnose(text: String, kind: FileKind, meta: SpringMetadata): List<D
         val property = meta.find(key)
         if (property != null) {
             property.deprecation?.let {
-                result += Diagnostic(where, deprecationText(property.name, it), DiagnosticSeverity.Warning, SERVER_NAME).apply {
+                // Level "error" means the property is no longer bound at all.
+                val severity = if (it.level == "error") DiagnosticSeverity.Error else DiagnosticSeverity.Warning
+                result += Diagnostic(where, deprecationText(property.name, it), severity, SERVER_NAME).apply {
                     tags = listOf(DiagnosticTag.Deprecated)
                 }
             }

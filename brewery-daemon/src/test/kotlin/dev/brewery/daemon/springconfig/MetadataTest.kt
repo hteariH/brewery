@@ -178,6 +178,21 @@ class MetadataTest {
     }
 
     @Test
+    fun `honours the legacy top-level deprecated flag`() {
+        val jar = makeJar(
+            tmp(), "legacy.jar",
+            mapOf(
+                "META-INF/spring-configuration-metadata.json" to
+                    """{"properties":[{"name":"legacy.key","type":"java.lang.String","deprecated":true},
+                        {"name":"current.key","type":"java.lang.String","deprecated":false}]}""",
+            ),
+        )
+        val meta = SpringMetadata.fromClasspath(listOf(jar))
+        assertEquals("warning", meta.find("legacy.key")?.deprecation?.level)
+        assertNull(meta.find("current.key")?.deprecation)
+    }
+
+    @Test
     fun `map types are recognised by their simple name`() {
         fun map(type: String) = ConfigProperty("x", type, null, null, null).isMap
         assertTrue(map("java.util.Map<java.lang.String,java.lang.String>"))

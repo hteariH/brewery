@@ -187,7 +187,9 @@ class SpringMetadata private constructor(
                     type = o.text("type"),
                     description = o.text("description"),
                     defaultValue = o.get("defaultValue")?.takeUnless { it.isJsonNull }?.let(::render),
-                    deprecation = o.get("deprecation")?.let(::deprecation),
+                    // Old metadata only had a top-level `"deprecated": true`.
+                    deprecation = o.get("deprecation")?.let(::deprecation)
+                        ?: Deprecation("warning", null, null).takeIf { o.get("deprecated")?.let(::isTrue) == true },
                 )
             }
             for (el in root.array("hints")) {
@@ -207,6 +209,8 @@ class SpringMetadata private constructor(
             val o = el.objectOrNull() ?: return null
             return Deprecation(o.text("level") ?: "warning", o.text("replacement"), o.text("reason"))
         }
+
+        private fun isTrue(el: JsonElement): Boolean = el.isJsonPrimitive && el.asString == "true"
 
         private fun render(el: JsonElement): String = if (el.isJsonPrimitive) el.asString else el.toString()
 

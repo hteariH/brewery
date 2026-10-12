@@ -2,6 +2,7 @@ package dev.brewery.daemon.springconfig
 
 import org.eclipse.lsp4j.ClientCapabilities
 import org.eclipse.lsp4j.CompletionItem
+import org.eclipse.lsp4j.CompletionList
 import org.eclipse.lsp4j.CompletionParams
 import org.eclipse.lsp4j.Diagnostic
 import org.eclipse.lsp4j.DiagnosticSeverity
@@ -114,9 +115,14 @@ class SpringConfigServerTest {
         return u
     }
 
+    private fun completeList(server: LanguageServer, uri: String, line: Int, col: Int): CompletionList {
+        val result = server.textDocumentService.completion(CompletionParams(TextDocumentIdentifier(uri), Position(line, col)))
+            .get(10, TimeUnit.SECONDS)
+        return if (result.isLeft) CompletionList(false, result.left) else result.right
+    }
+
     private fun complete(server: LanguageServer, uri: String, line: Int, col: Int): List<CompletionItem> =
-        server.textDocumentService.completion(CompletionParams(TextDocumentIdentifier(uri), Position(line, col)))
-            .get(10, TimeUnit.SECONDS).left.orEmpty()
+        completeList(server, uri, line, col).items.orEmpty()
 
     /** Metadata loads in the background, so poll a request until it stops being empty. */
     private fun completeEventually(server: LanguageServer, uri: String, line: Int, col: Int): List<CompletionItem> {
@@ -143,6 +149,7 @@ class SpringConfigServerTest {
         val result = server.initialize(InitializeParams()).get()
         assertEquals("brewery-spring-config", result.serverInfo.name)
         assertEquals(setOf(".", ":", "="), result.capabilities.completionProvider.triggerCharacters.toSet())
+        assertTrue(result.capabilities.completionProvider.resolveProvider)
         assertTrue(result.capabilities.hoverProvider.left)
         val sync = result.capabilities.textDocumentSync.right
         assertEquals(TextDocumentSyncKind.Full, sync.change)
@@ -157,9 +164,54 @@ class SpringConfigServerTest {
         val items = completeEventually(server, u, 0, 0)
         val port = assertNotNull(items.firstOrNull { it.label == "server.port" })
         assertEquals("Integer", port.detail)
-        assertTrue(port.documentation.right.value.contains("Server HTTP port."))
-        assertTrue(port.documentation.right.value.contains("Default: `8080`"))
+        // Documentation is fetched per item through completionItem/resolve.
+        assertNull(port.documentation)
+        val resolved = server.textDocumentService.resolveCompletionItem(port).get(10, TimeUnit.SECONDS)
+        assertTrue(resolved.documentation.right.value.contains("Server HTTP port."))
+        assertTrue(resolved.documentation.right.value.contains("Default: `8080`"))
         assertTrue(items.first { it.label == "old.setting" }.tags.isNotEmpty())
+    }
+
+    @Test
+    fun `properties key completion is filtered by the typed prefix`() {
+        val server = start()
+        val u = open(server, "application.properties", "serv\nSERVER.P\nserver.servlet.contextP\nspring.jpa.\n")
+        completeEventually(server, u, 0, 4)
+        val list = completeList(server, u, 0, 4)
+        assertTrue(list.isIncomplete)
+        assertEquals(listOf("server.port", "server.servlet.context-path"), list.items.map { it.label }.sorted())
+        assertEquals(listOf("server.port"), complete(server, u, 1, 8).map { it.label })
+        assertEquals(listOf("server.servlet.context-path"), complete(server, u, 2, 23).map { it.label })
+        assertEquals(
+            listOf("spring.jpa.properties", "spring.jpa.show-sql"),
+            complete(server, u, 3, 11).map { it.label }.sorted(),
+        )
+        // Only what is left of the caret counts.
+        assertTrue(complete(server, u, 0, 2).any { it.label == "server.port" })
+    }
+
+    @Test
+    fun `map key and value hints complete below a map property`() {
+        val logging = makeJar(
+            root, "logging.jar",
+            mapOf(
+                "META-INF/spring-configuration-metadata.json" to """
+                {"properties": [{"name": "logging.level", "type": "java.util.Map<java.lang.String,java.lang.String>"}],
+                 "hints": [
+                   {"name": "logging.level.keys", "values": [{"value": "root", "description": "Root logger."}]},
+                   {"name": "logging.level.values", "values": [{"value": "info"}, {"value": "debug"}]}
+                 ]}
+                """,
+            ),
+        )
+        val server = start(metadata = SpringMetadata.fromClasspath(listOf(jar, logging)))
+        val props = open(server, "application.properties", "logging.level.com.example=\nlogging.level.\n")
+        assertEquals(listOf("info", "debug"), completeEventually(server, props, 0, 26).map { it.label })
+        assertTrue(complete(server, props, 1, 14).any { it.label == "logging.level.root" })
+
+        val yaml = open(server, "application.yml", "logging:\n  level:\n    com.example: \n    \n")
+        assertEquals(listOf("info", "debug"), complete(server, yaml, 2, 17).map { it.label })
+        assertEquals("root: ", complete(server, yaml, 3, 4).edit("root").newText)
     }
 
     @Test
@@ -211,7 +263,8 @@ class SpringConfigServerTest {
         assertEquals(0, unknown.range.start.character)
         assertEquals(9, unknown.range.end.character)
         val deprecated = diags.first { it.range.start.line == 2 }
-        assertEquals(DiagnosticSeverity.Warning, deprecated.severity)
+        // The metadata marks old.setting with level "error": it no longer binds at all.
+        assertEquals(DiagnosticSeverity.Error, deprecated.severity)
         assertTrue(deprecated.message.left.contains("new.setting"), deprecated.message.left)
     }
 
