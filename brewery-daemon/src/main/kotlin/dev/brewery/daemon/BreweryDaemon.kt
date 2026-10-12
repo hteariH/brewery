@@ -7,6 +7,8 @@ import dev.brewery.daemon.db.DbConnectionsSaveParams
 import dev.brewery.daemon.db.DbConnectionsTestParams
 import dev.brewery.daemon.db.DbDriversAddJarParams
 import dev.brewery.daemon.db.DbDriversParams
+import dev.brewery.daemon.db.DbIntrospectParams
+import dev.brewery.daemon.db.DbNode
 import dev.brewery.daemon.db.DbException
 import dev.brewery.daemon.db.DbService
 import dev.brewery.daemon.db.DbTestResult
@@ -181,6 +183,9 @@ class BreweryDaemon(
 
     override fun dbConnectionsTest(params: DbConnectionsTestParams): CompletableFuture<DbTestResult> =
         dbCall { it.test(params.connection, params.password) }
+
+    override fun dbIntrospect(params: DbIntrospectParams): CompletableFuture<List<DbNode>> =
+        dbCall { it.introspect(params.connectionId, params.path ?: emptyList(), params.includeSystem == true) }
 
     private fun <T> dbCall(block: (DbService) -> T): CompletableFuture<T> {
         val service = synchronized(lock) {

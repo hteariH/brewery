@@ -40,3 +40,6 @@ data class DbConnectionsSaveParams(val connection: ConnectionInfo, val password:
 data class DbConnectionsDeleteParams(val id: String)
 data class DbConnectionsTestParams(val connection: ConnectionInfo, val password: String?)
 data class DbDriversAddJarParams(val driverId: String, val name: String, val className: String, val jarPaths: List<String>)
+
+/** [includeSystem] (optional, default false) also lists `pg_catalog`, `information_schema`, `sqlite_*` and the like. */
+data class DbIntrospectParams(val connectionId: String, val path: List<String>?, val includeSystem: Boolean? = null)

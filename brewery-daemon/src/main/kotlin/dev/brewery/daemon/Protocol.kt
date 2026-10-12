@@ -13,6 +13,8 @@ import dev.brewery.daemon.db.DbConnectionsSaveParams
 import dev.brewery.daemon.db.DbConnectionsTestParams
 import dev.brewery.daemon.db.DbDriversAddJarParams
 import dev.brewery.daemon.db.DbDriversParams
+import dev.brewery.daemon.db.DbIntrospectParams
+import dev.brewery.daemon.db.DbNode
 import dev.brewery.daemon.db.DbTestResult
 import dev.brewery.daemon.db.DriverInfo
 import dev.brewery.daemon.run.RunConfiguration
@@ -76,6 +78,7 @@ interface BreweryServer {
     @JsonRequest("db/connections/save") fun dbConnectionsSave(params: DbConnectionsSaveParams): CompletableFuture<ConnectionInfo>
     @JsonRequest("db/connections/delete") fun dbConnectionsDelete(params: DbConnectionsDeleteParams): CompletableFuture<Any?>
     @JsonRequest("db/connections/test") fun dbConnectionsTest(params: DbConnectionsTestParams): CompletableFuture<DbTestResult>
+    @JsonRequest("db/introspect") fun dbIntrospect(params: DbIntrospectParams): CompletableFuture<List<DbNode>>
 }
 
 interface BreweryClient {

@@ -11,7 +11,12 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
 /** Connection management of one project: `db.json`, the OS secret store and the driver registry. */
-class DbService(root: Path, private val secrets: SecretStore) : AutoCloseable {
+class DbService(
+    root: Path,
+    private val secrets: SecretStore,
+    clock: () -> Long = System::currentTimeMillis,
+    idleTimeoutMs: Long = SessionManager.DEFAULT_IDLE_TIMEOUT_MS,
+) : AutoCloseable {
     private val projectKey: String = try {
         root.toRealPath().toString()
     } catch (_: Exception) {
@@ -19,6 +24,8 @@ class DbService(root: Path, private val secrets: SecretStore) : AutoCloseable {
     }
     private val store = ConnectionStore(root)
     val registry = DriverRegistry(store)
+    /** One thread and one connection per saved connection id; Task 3 runs execute/fetch/cancel through it. */
+    val sessions = SessionManager({ store.connection(it) != null }, ::openSaved, clock, idleTimeoutMs)
     private val testThreads = Executors.newCachedThreadPool { r -> Thread(r, "brewery-db-test").apply { isDaemon = true } }
 
     private fun account(id: String) = "$projectKey#$id"
@@ -35,6 +42,8 @@ class DbService(root: Path, private val secrets: SecretStore) : AutoCloseable {
             throw DbException(DbErrorCodes.NOT_FOUND, "Unknown driver: ${connection.driverId}")
         }
         val saved = store.saveConnection(connection)
+        // URL, user or options may have changed: the next use opens a fresh session.
+        sessions.close(saved.id)
         var warning: String? = null
         try {
             when {
@@ -54,6 +63,7 @@ class DbService(root: Path, private val secrets: SecretStore) : AutoCloseable {
 
     fun delete(id: String) {
         if (!store.deleteConnection(id)) throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
+        sessions.close(id)
         try {
             secrets.remove(account(id))
         } catch (_: SecretStoreUnavailable) {
@@ -113,7 +123,18 @@ class DbService(root: Path, private val secrets: SecretStore) : AutoCloseable {
             ?: throw SQLException("The ${driverId} driver does not accept this URL", "08001")
     }
 
+    /** Lazily lists the children of [path] in the schema tree of connection [connectionId]. */
+    fun introspect(connectionId: String, path: List<String>, includeSystem: Boolean = false): List<DbNode> =
+        sessions.run(connectionId) { c ->
+            try {
+                Introspector(c, includeSystem).children(path)
+            } catch (e: SQLException) {
+                throw queryFailure(e)
+            }
+        }
+
     override fun close() {
+        sessions.close()
         testThreads.shutdownNow()
         registry.close()
     }

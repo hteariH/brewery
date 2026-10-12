@@ -29,6 +29,9 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
+    // Skipped automatically when Docker is unavailable; CI ubuntu runners have it.
+    testImplementation("org.testcontainers:testcontainers-postgresql:2.0.5")
+    testImplementation("org.testcontainers:testcontainers-mariadb:2.0.5")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

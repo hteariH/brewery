@@ -1,0 +1,9 @@
+[
+  { "name": "public", "kind": "schema", "path": ["public"], "hasChildren": true },
+  { "name": "owners", "kind": "table", "path": ["public", "owners"], "hasChildren": true },
+  { "name": "columns", "kind": "folder", "path": ["public", "owners", "columns"], "hasChildren": true },
+  { "name": "id", "kind": "column", "path": ["public", "owners", "columns", "id"], "hasChildren": false, "detail": "integer NOT NULL PK" },
+  { "name": "owners_email_key", "kind": "index", "path": ["public", "owners", "indexes", "owners_email_key"], "hasChildren": false, "detail": "UNIQUE (email)" },
+  { "name": "pets_owner_fk", "kind": "foreignKey", "path": ["public", "pets", "foreignKeys", "pets_owner_fk"], "hasChildren": false, "detail": "(owner_id) -> owners(id)" },
+  { "name": "owners_id_seq", "kind": "sequence", "path": ["public", "owners_id_seq"], "hasChildren": false, "detail": "integer" }
+]

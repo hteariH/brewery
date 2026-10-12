@@ -114,6 +114,24 @@ class DbProtocolTest {
     }
 
     @Test
+    fun `introspect over the wire`() {
+        open()
+        val file = Files.createTempFile("brewery", ".db")
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$file").use {
+            it.createStatement().executeUpdate("CREATE TABLE t (id INTEGER NOT NULL PRIMARY KEY, v TEXT)")
+        }
+        val saved = await(server.dbConnectionsSave(DbConnectionsSaveParams(ConnectionInfo("", "L", "sqlite", "jdbc:sqlite:$file", null, false, emptyMap()), null)))
+        assertEquals(listOf(DbNode("t", "table", listOf("t"), true)), await(server.dbIntrospect(DbIntrospectParams(saved.id, emptyList()))))
+        val columns = await(server.dbIntrospect(DbIntrospectParams(saved.id, listOf("t", "columns"))))
+        assertEquals(listOf("INTEGER NOT NULL PK", "TEXT NULL"), columns.map { it.detail })
+        // A missing path means the root.
+        assertEquals(1, await(server.dbIntrospect(DbIntrospectParams(saved.id, null))).size)
+        assertEquals(-32013, errorCode(server.dbIntrospect(DbIntrospectParams("missing", emptyList()))))
+        val bad = await(server.dbConnectionsSave(DbConnectionsSaveParams(saved.copy(id = "", url = "jdbc:sqlite:/no/such/dir/x.db"), null)))
+        assertEquals(-32010, errorCode(server.dbIntrospect(DbIntrospectParams(bad.id, emptyList()))))
+    }
+
+    @Test
     fun `error code constants match the plan`() {
         assertEquals(-32010, DbErrorCodes.CONNECTION_FAILED)
         assertEquals(-32011, DbErrorCodes.AUTH_FAILED)
@@ -133,5 +151,10 @@ class DbProtocolTest {
         assertTrue(test.ok)
         val drivers = gson.fromJson(fixture("db-drivers.result.json"), Array<DriverInfo>::class.java)
         assertEquals(4, drivers.size)
+        val nodes = gson.fromJson(fixture("db-introspect.result.json"), Array<DbNode>::class.java)
+        assertEquals(listOf("schema", "table", "folder", "column", "index", "foreignKey", "sequence"), nodes.map { it.kind })
+        assertEquals(null, nodes[0].detail)
+        assertEquals("integer NOT NULL PK", nodes[3].detail)
+        assertEquals(listOf("public", "owners", "columns", "id"), nodes[3].path)
     }
 }
