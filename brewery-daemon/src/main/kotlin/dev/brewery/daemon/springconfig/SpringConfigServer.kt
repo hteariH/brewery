@@ -62,7 +62,7 @@ private fun fileKind(uri: String): FileKind? {
  * the server answers with nothing, so it never produces misleading "unknown property" warnings.
  */
 class SpringConfigServer(
-    private val loadMetadata: (Path) -> SpringMetadata = { root -> SpringMetadata.fromJars(resolveClasspath(root)) },
+    private val loadMetadata: (Path) -> SpringMetadata = { root -> SpringMetadata.fromClasspath(resolveClasspath(root)) },
     private val debounceMs: Long = 300,
     private val onExit: () -> Unit = {},
 ) : LanguageServer, LanguageClientAware {
@@ -298,7 +298,7 @@ private fun diagnose(text: String, kind: FileKind, meta: SpringMetadata): List<D
             continue
         }
         val canonical = canonicalKey(key)
-        if (meta.isMapKey(key) || OPEN_PREFIXES.any { canonical.startsWith(it) }) continue
+        if (!meta.isUnknown(key) || OPEN_PREFIXES.any { canonical.startsWith(it) }) continue
         result += Diagnostic(where, "Unknown Spring Boot property '$key'", DiagnosticSeverity.Warning, SERVER_NAME)
     }
     return result

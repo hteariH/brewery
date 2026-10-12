@@ -64,22 +64,56 @@ class ClasspathResolverTest {
     }
 
     @Test
+    fun `project metadata roots are the existing resource and output directories of each module`() {
+        val module = Files.createTempDirectory("module")
+        for (dir in listOf("src/main/resources", "build/classes/java/main", "build/resources/main", "target/classes")) {
+            Files.createDirectories(module.resolve(dir).resolve("META-INF"))
+        }
+        val bare = Files.createTempDirectory("bare")
+        Files.createDirectories(bare.resolve("build/resources/main/META-INF"))
+        assertEquals(
+            listOf(
+                module.resolve("src/main/resources"), module.resolve("build/classes/java/main"),
+                module.resolve("build/resources/main"), module.resolve("target/classes"),
+                bare.resolve("build/resources/main"),
+            ).map { it.toFile() },
+            projectMetadataRoots(listOf(module, bare)),
+        )
+    }
+
+    @Test
+    fun `maven lists the module outputs before the jars`() {
+        val root = Files.createTempDirectory("mvn-modules")
+        Files.writeString(root.resolve("pom.xml"), "<project><modules><module>lib</module></modules></project>")
+        Files.createDirectories(root.resolve("lib"))
+        Files.writeString(root.resolve("lib/pom.xml"), "<project/>")
+        val classes = writeMetadataDir(root.resolve("lib/target/classes").toFile(), "{}")
+        val a = File("/repo/a.jar").path
+        val jars = MavenClasspathResolver(FakeRunner(a)).resolve(root)
+        assertEquals(listOf(classes, File(a)), jars)
+    }
+
+    @Test
     @Tag("slow")
     fun `gradle resolves implementation dependencies from a flat dir`() {
         val root = Files.createTempDirectory("gradle-cp")
         val libs = Files.createDirectories(root.resolve("libs"))
         makeJar(libs.toFile(), "starter-1.0.jar", mapOf("META-INF/spring-configuration-metadata.json" to MAIN_METADATA))
-        Files.writeString(root.resolve("settings.gradle.kts"), "rootProject.name = \"cp\"\n")
+        Files.writeString(root.resolve("settings.gradle.kts"), "rootProject.name = \"cp\"\ninclude(\"lib\")\n")
+        Files.createDirectories(root.resolve("lib"))
+        Files.writeString(root.resolve("lib/build.gradle.kts"), "plugins { java }\n")
+        val libResources = writeMetadataDir(root.resolve("lib/src/main/resources").toFile(), "{}")
         Files.writeString(
             root.resolve("build.gradle.kts"),
             """
             plugins { java }
             repositories { flatDir { dirs("libs") } }
-            dependencies { implementation(":starter:1.0") }
+            dependencies { implementation(":starter:1.0"); implementation(project(":lib")) }
             """.trimIndent(),
         )
         val jars = GradleClasspathResolver().resolve(root)
-        assertEquals(listOf("starter-1.0.jar"), jars.map { it.name })
-        assertTrue(SpringMetadata.fromJars(jars).find("server.port") != null)
+        // The sibling module's metadata directory comes first, then the jars.
+        assertEquals(listOf(libResources.canonicalFile, File(libs.toFile(), "starter-1.0.jar").canonicalFile), jars.map { it.canonicalFile })
+        assertTrue(SpringMetadata.fromClasspath(jars).find("server.port") != null)
     }
 }

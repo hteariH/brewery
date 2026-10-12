@@ -54,7 +54,7 @@ class SpringConfigServerTest {
     private val closers = ArrayList<() -> Unit>()
 
     private fun start(
-        metadata: SpringMetadata = SpringMetadata.fromJars(listOf(jar)),
+        metadata: SpringMetadata = SpringMetadata.fromClasspath(listOf(jar)),
         gate: CompletableFuture<Unit>? = null,
     ): LanguageServer {
         val server = SpringConfigServer(loadMetadata = { gate?.get(); metadata }, debounceMs = 50)
@@ -225,5 +225,35 @@ class SpringConfigServerTest {
         val v = open(bare, "application-dev.properties", "bogus.key=1\n")
         assertNull(client.diagnostics.poll(600, TimeUnit.MILLISECONDS)?.takeIf { it.uri == v && it.diagnostics.isNotEmpty() })
         assertEquals(emptyList<CompletionItem>(), complete(bare, v, 0, 0))
+    }
+
+    @Test
+    fun `no false unknown warnings for project metadata, object lists, Properties maps and groups`() {
+        val project = writeMetadataDir(
+            File(root, "src/main/resources"),
+            """{"properties":[{"name":"app.custom","type":"java.lang.String"}]}""",
+        )
+        val shapes = makeJar(root, "shapes.jar", mapOf("META-INF/spring-configuration-metadata.json" to SHAPES_METADATA))
+        val server = start(metadata = SpringMetadata.fromClasspath(listOf(project, jar, shapes)))
+        val yaml = open(
+            server, "application.yml",
+            listOf(
+                "app:", "  custom: x", "server:", "spring:", "  cloud:", "    gateway:", "      routes:",
+                "        - id: one", "          uri: http://a", "  datasource:", "    hikari:",
+                "      data-source-properties:", "        cachePrepStmts: true", "      maximum-pool-sise: 3", "",
+            ).joinToString("\n"),
+        )
+        assertEquals(
+            listOf("Unknown Spring Boot property 'spring.datasource.hikari.maximum-pool-sise'"),
+            nextDiagnostics(yaml).map { it.message.left },
+        )
+        val props = open(
+            server, "application.properties",
+            listOf(
+                "app.custom=x", "spring.cloud.gateway.routes[0].id=one",
+                "spring.datasource.hikari.data-source-properties.cachePrepStmts=true", "server=", "server.prot=1", "",
+            ).joinToString("\n"),
+        )
+        assertEquals(listOf("Unknown Spring Boot property 'server.prot'"), nextDiagnostics(props).map { it.message.left })
     }
 }

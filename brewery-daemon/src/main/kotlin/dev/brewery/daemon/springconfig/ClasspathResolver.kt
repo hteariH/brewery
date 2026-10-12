@@ -1,8 +1,10 @@
 package dev.brewery.daemon.springconfig
 
 import dev.brewery.daemon.BuildTool
+import dev.brewery.daemon.project.MavenModelReader
 import dev.brewery.daemon.project.detectBuildTool
 import org.gradle.tooling.GradleConnector
+import org.gradle.tooling.model.idea.IdeaModuleDependency
 import org.gradle.tooling.model.idea.IdeaProject
 import org.gradle.tooling.model.idea.IdeaSingleEntryLibraryDependency
 import java.io.File
@@ -11,7 +13,10 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 fun interface ClasspathResolver {
-    /** Dependency jars of the project at [root]; empty when they cannot be determined. */
+    /**
+     * Classpath entries carrying configuration metadata for the project at [root]: the modules' own resource and
+     * output directories first (see [projectMetadataRoots]), then the dependency jars; empty when unknown.
+     */
     fun resolve(root: Path): List<File>
 }
 
@@ -19,8 +24,21 @@ fun interface ClasspathResolver {
 fun resolveClasspath(root: Path): List<File> = when (detectBuildTool(root)) {
     BuildTool.gradle -> GradleClasspathResolver().resolve(root)
     BuildTool.maven -> MavenClasspathResolver().resolve(root)
-    else -> emptyList()
+    else -> projectMetadataRoots(listOf(root))
 }
+
+// Where a module keeps its own metadata: the hand-written additional file in the sources, and both files as the
+// annotation processor and resource processing leave them in Gradle's and Maven's build outputs.
+private val MODULE_METADATA_DIRS = listOf("src/main/resources", "build/classes/java/main", "build/resources/main", "target/classes")
+
+/** The existing directories of [modules] that may hold `META-INF/` metadata, in module order. */
+fun projectMetadataRoots(modules: List<Path>): List<File> =
+    modules.asSequence()
+        .flatMap { module -> MODULE_METADATA_DIRS.asSequence().map { module.resolve(it) } }
+        .filter { Files.isDirectory(it) }
+        .map { it.toFile() }
+        .distinct()
+        .toList()
 
 class GradleClasspathResolver(private val fallbackGradleVersion: String = "9.8.1") : ClasspathResolver {
     override fun resolve(root: Path): List<File> {
@@ -35,12 +53,22 @@ class GradleClasspathResolver(private val fallbackGradleVersion: String = "9.8.1
                 .setStandardOutput(OutputStream.nullOutputStream())
                 .setStandardError(OutputStream.nullOutputStream())
                 .get()
-            return project.modules.asSequence()
+            val modules = project.modules.toList()
+            val dirByName = modules.associate { it.name to it.gradleProject.projectDirectory.toPath() }
+            // Every module of the build is in the model; module dependencies are followed explicitly as well so a
+            // sibling's outputs are covered even when a model ever lists only part of the build.
+            val moduleDirs = modules.flatMap { module ->
+                listOf(module.gradleProject.projectDirectory.toPath()) + module.dependencies
+                    .filterIsInstance<IdeaModuleDependency>()
+                    .mapNotNull { dirByName[it.targetModuleName] }
+            }.distinct()
+            val jars = modules.asSequence()
                 .flatMap { it.dependencies.asSequence() }
                 .filterIsInstance<IdeaSingleEntryLibraryDependency>()
                 .mapNotNull { it.file }
                 .distinct()
                 .toList()
+            return projectMetadataRoots(moduleDirs) + jars
         } finally {
             connection.close()
         }
@@ -78,10 +106,16 @@ class MavenClasspathResolver(private val runner: CommandRunner = CommandRunner.S
                 return emptyList()
             }
             if (exit != 0) return emptyList()
-            return parseClasspath(Files.readString(output))
+            return projectMetadataRoots(mavenModules(root)) + parseClasspath(Files.readString(output))
         } finally {
             Files.deleteIfExists(output)
         }
+    }
+
+    private fun mavenModules(root: Path): List<Path> = try {
+        MavenModelReader().read(root).modules.map { root.resolve(it.path).normalize() }
+    } catch (_: Exception) {
+        listOf(root)
     }
 
     private fun mavenExecutable(root: Path): String {
