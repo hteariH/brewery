@@ -16,10 +16,15 @@ data class PropertyEntry(
 
 /** What is being typed at a cursor position in a properties file. */
 sealed interface ConfigContext {
-    /** A key (or, in YAML, a key segment) being typed; [startCol]..[endCol] is the token to replace. */
-    data class Key(val parentPath: List<String>, val startCol: Int, val endCol: Int) : ConfigContext
+    /**
+     * A key (or, in YAML, a key segment) being typed; [startCol]..[endCol] is the token to replace. [hasColon] is
+     * set when a YAML key already has its `:` after the token, so a completion must not add another.
+     */
+    data class Key(val parentPath: List<String>, val startCol: Int, val endCol: Int, val hasColon: Boolean = false) :
+        ConfigContext
 
-    data class Value(val key: String, val startCol: Int, val endCol: Int) : ConfigContext
+    /** A value being typed; [needsSpace] is set when YAML has no space after the `:` yet, as a value requires. */
+    data class Value(val key: String, val startCol: Int, val endCol: Int, val needsSpace: Boolean = false) : ConfigContext
 }
 
 /**

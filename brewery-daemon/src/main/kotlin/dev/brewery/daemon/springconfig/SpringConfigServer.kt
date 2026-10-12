@@ -205,7 +205,8 @@ private fun valueItems(context: ConfigContext.Value, line: Int, meta: SpringMeta
     val edit = range(line, context.startCol, context.endCol)
     fun item(value: String, doc: String?) = CompletionItem(value).apply {
         kind = CompletionItemKind.Value
-        textEdit = Either.forLeft(TextEdit(edit, value))
+        textEdit = Either.forLeft(TextEdit(edit, if (context.needsSpace) " $value" else value))
+        filterText = value
         if (doc != null) documentation = Either.forLeft(doc)
     }
     val hint = meta.hint(context.key)
@@ -248,7 +249,15 @@ private fun yamlKeyItems(context: ConfigContext.Key, line: Int, meta: SpringMeta
         next[key] = name to leaf
     }
     val edit = range(line, context.startCol, context.endCol)
-    return next.values.map { (name, leaf) -> propertyItem(name, leaf, if (leaf != null) "$name: " else "$name:", edit) }
+    return next.values.map { (name, leaf) ->
+        // A scalar is written on the same line; a map or a group continues in a nested block below.
+        val insert = when {
+            context.hasColon -> name
+            leaf != null && !leaf.isMap -> "$name: "
+            else -> "$name:"
+        }
+        propertyItem(name, leaf, insert, edit)
+    }
 }
 
 private fun describe(p: ConfigProperty, withName: Boolean): String = buildString {

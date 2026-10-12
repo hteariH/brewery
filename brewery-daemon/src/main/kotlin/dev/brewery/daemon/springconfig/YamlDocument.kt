@@ -147,12 +147,13 @@ class YamlDocument(text: String) {
         if (entry != null && col > entry.colon) {
             val valueStart = entry.colon + 1 + raw.substring(entry.colon + 1).takeWhile { it == ' ' }.length
             val start = if (col >= valueStart) valueStart else col
-            return ConfigContext.Value(entry.key, start, maxOf(col, valueStart + entry.value.length))
+            return ConfigContext.Value(entry.key, start, maxOf(col, valueStart + entry.value.length), valueStart == entry.colon + 1)
         }
         // A cursor left of the content (in the indentation) types a key at that column.
         val start = if (col >= content) content else col
         var end = if (entry != null) entry.keyEnd else col
         if (entry == null) while (end < raw.length && raw[end] != ' ' && raw[end] != ':') end++
-        return ConfigContext.Key(parentPath(line, start), start, maxOf(end, col))
+        val hasColon = entry != null || raw.getOrNull(maxOf(end, col)) == ':'
+        return ConfigContext.Key(parentPath(line, start), start, maxOf(end, col), hasColon)
     }
 }

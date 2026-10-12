@@ -256,4 +256,36 @@ class SpringConfigServerTest {
         )
         assertEquals(listOf("Unknown Spring Boot property 'server.prot'"), nextDiagnostics(props).map { it.message.left })
     }
+
+    private fun List<CompletionItem>.edit(label: String) = first { it.label == label }.textEdit.left
+
+    @Test
+    fun `yaml key completion inserts a colon only where none is there yet`() {
+        val server = start()
+        val u = open(server, "application.yml", "spring:\n  jpa:\n    \n    sh: x\n")
+        val fresh = completeEventually(server, u, 2, 4)
+        assertEquals("show-sql: ", fresh.edit("show-sql").newText)
+        // A map leaf and a group take the colon alone: what follows is a nested block.
+        assertEquals("properties:", fresh.edit("properties").newText)
+        assertEquals("server:", complete(server, u, 2, 0).edit("server").newText)
+
+        val existing = complete(server, u, 3, 6).edit("show-sql")
+        assertEquals("show-sql", existing.newText)
+        assertEquals(4, existing.range.start.character)
+        assertEquals(6, existing.range.end.character)
+    }
+
+    @Test
+    fun `yaml value completion right after the colon adds the space`() {
+        val server = start()
+        val u = open(server, "application.yml", "spring:\n  jpa:\n    show-sql:\n  main:\n    banner-mode: \n")
+        val tight = completeEventually(server, u, 2, 13).first { it.label == "true" }
+        assertEquals(" true", tight.textEdit.left.newText)
+        assertEquals(13, tight.textEdit.left.range.start.character)
+        assertEquals("true", tight.filterText ?: tight.label)
+        assertEquals("console", complete(server, u, 4, 17).edit("console").newText)
+
+        val props = open(server, "application.properties", "spring.jpa.show-sql=\n")
+        assertEquals("true", complete(server, props, 0, 20).edit("true").newText)
+    }
 }
