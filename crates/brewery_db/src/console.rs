@@ -19,7 +19,7 @@ use project::Project;
 use std::any::TypeId;
 use ui::{Tooltip, prelude::*};
 use workspace::Workspace;
-use workspace::item::Item;
+use workspace::item::{Item, ItemEvent};
 use workspace::searchable::SearchableItemHandle;
 
 pub const NOTHING_TO_RUN: &str = "Nothing to run";
@@ -124,6 +124,16 @@ impl QueryConsole {
 
     pub fn connection(&self) -> &ConnectionInfo {
         &self.connection
+    }
+
+    /// The data source was saved again; a new name shows in the tab and the toolbar.
+    pub fn connection_saved(&mut self, saved: &ConnectionInfo, cx: &mut Context<Self>) {
+        if saved.id != self.connection.id || saved.name == self.connection.name {
+            return;
+        }
+        self.connection.name = saved.name.clone();
+        cx.emit(ConsoleEvent::TitleChanged);
+        cx.notify();
     }
 
     pub fn editor(&self) -> &Entity<Editor> {
@@ -484,10 +494,22 @@ impl Focusable for QueryConsole {
     }
 }
 
-impl EventEmitter<()> for QueryConsole {}
+/// Events of a console tab.
+pub enum ConsoleEvent {
+    /// The data source was renamed; the tab title follows.
+    TitleChanged,
+}
+
+impl EventEmitter<ConsoleEvent> for QueryConsole {}
 
 impl Item for QueryConsole {
-    type Event = ();
+    type Event = ConsoleEvent;
+
+    fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
+        match event {
+            ConsoleEvent::TitleChanged => f(ItemEvent::UpdateTab),
+        }
+    }
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
         format!("{} console", self.connection.name).into()

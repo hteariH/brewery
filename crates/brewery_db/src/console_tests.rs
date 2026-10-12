@@ -5,7 +5,10 @@ use crate::test_support::*;
 use crate::tree::RowKey;
 use brewery_daemon_client::{DB_NOT_FOUND, DB_QUERY_FAILED};
 use editor::SelectionEffects;
-use gpui::{ScrollStrategy, TestAppContext, VisualTestContext};
+use gpui::{
+    Modifiers, ScrollDelta, ScrollStrategy, ScrollWheelEvent, TestAppContext, TouchPhase,
+    VisualTestContext, point, px, size,
+};
 use language::{Language, LanguageConfig};
 use serde_json::{Value, json};
 use settings::{BaseKeymap, DEFAULT_KEYMAP_PATH, KeymapFile, SPECIFIC_OVERRIDES_KEYMAP_PATH};
@@ -456,6 +459,11 @@ async fn keystrokes_run_cancel_and_copy(cx: &mut TestAppContext) {
         cx.read_from_clipboard().and_then(|item| item.text()),
         Some("name 3".to_string())
     );
+
+    // Run also works with the focus in the result grid.
+    cx.simulate_keystrokes(run);
+    cx.run_until_parked();
+    assert_eq!(console.executed().len(), 2, "{run} from the grid runs too");
 }
 
 #[gpui::test]
@@ -538,4 +546,67 @@ async fn a_cancel_the_driver_ignores_frees_the_console_after_a_while(cx: &mut Te
         .grid(cx)
         .read_with(cx, |grid, _| grid.cursor_id().map(str::to_string));
     assert_eq!(cursor.as_deref(), Some("k2"));
+}
+
+fn wheel(position: gpui::Point<gpui::Pixels>, x: f32, y: f32) -> ScrollWheelEvent {
+    ScrollWheelEvent {
+        position,
+        delta: ScrollDelta::Pixels(point(px(x), px(y))),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::Moved,
+    }
+}
+
+#[gpui::test]
+async fn the_wheel_scrolls_the_grid_along_one_axis_only(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    // Narrow enough that the two columns do not fit next to the Database panel.
+    cx.simulate_resize(size(px(380.), px(900.)));
+    console.type_sql("select * from owners", cx);
+    console.run(cx);
+    let grid = console.grid(cx);
+    let offsets = |cx: &mut VisualTestContext| {
+        grid.read_with(cx, |grid, _| {
+            (grid.horizontal_offset().x, grid.vertical_offset().y)
+        })
+    };
+    let center = grid.read_with(cx, |grid, _| grid.bounds().center());
+    let content_width = grid.read_with(cx, |grid, _| grid.content_width());
+    let view_width = grid.read_with(cx, |grid, _| grid.bounds().size.width);
+    assert!(
+        content_width > view_width,
+        "the grid should be wider than its view"
+    );
+    assert_eq!(offsets(cx), (px(0.), px(0.)));
+
+    // A vertical wheel moves the rows, not the columns.
+    cx.simulate_event(wheel(center, 0., -100.));
+    cx.run_until_parked();
+    let (x, y) = offsets(cx);
+    assert_eq!(x, px(0.), "a vertical wheel must not scroll sideways");
+    assert!(y < px(0.), "the rows should have scrolled");
+
+    // A horizontal swipe moves the columns, not the rows.
+    cx.simulate_event(wheel(center, -40., 0.));
+    cx.run_until_parked();
+    let (x2, y2) = offsets(cx);
+    assert!(x2 < px(0.), "the columns should have scrolled");
+    assert_eq!(y2, y, "a horizontal swipe must not scroll the rows");
+}
+
+#[gpui::test]
+async fn renaming_the_data_source_renames_its_consoles(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let mut renamed = console
+        .console
+        .read_with(cx, |console, _| console.connection().clone());
+    renamed.name = "Main Postgres".to_string();
+    console
+        .fixture
+        .panel
+        .update(cx, |panel, cx| panel.data_source_saved(renamed, cx));
+    cx.run_until_parked();
+    console.console.read_with(cx, |console, cx| {
+        assert_eq!(console.tab_content_text(0, cx), "Main Postgres console");
+    });
 }

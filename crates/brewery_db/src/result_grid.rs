@@ -210,16 +210,32 @@ impl ResultGrid {
         self.cursor_id.as_deref()
     }
 
+    pub fn horizontal_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.horizontal_scroll.offset()
+    }
+
+    pub fn vertical_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.scroll_handle.0.borrow().base_handle.offset()
+    }
+
+    /// Where the grid was painted last.
+    pub fn bounds(&self) -> gpui::Bounds<gpui::Pixels> {
+        self.horizontal_scroll.bounds()
+    }
+
+    /// The width of all columns, as of the last paint.
+    pub fn content_width(&self) -> gpui::Pixels {
+        self.horizontal_scroll.bounds().size.width + self.horizontal_scroll.max_offset().x
+    }
+
     pub fn scroll_handle(&self) -> &UniformListScrollHandle {
         &self.scroll_handle
     }
 
     /// Hands the cursor over for closing; no more pages are fetched afterwards.
     pub fn take_cursor(&mut self) -> Option<String> {
+        // Dropping the task drops the page in flight; the state is left as it was.
         self.fetch_task = None;
-        if self.pages.is_loading() {
-            self.pages.page_loaded(Vec::new(), true);
-        }
         self.cursor_id.take()
     }
 
@@ -227,6 +243,11 @@ impl ResultGrid {
     /// close to the end.
     pub fn rows_visible(&mut self, visible: Range<usize>, cx: &mut Context<Self>) {
         let end = visible.end;
+        // `uniform_list` measures its item size by rendering row 0 alone first; that is not
+        // what is on screen.
+        if visible == (0..1) && self.pages.row_count() > 1 {
+            return;
+        }
         self.last_visible = Some(visible);
         if self.pages.needs_more(end) {
             self.fetch_more(cx);
@@ -397,8 +418,25 @@ impl Render for ResultGrid {
         let widths = self.widths(window, cx);
         let total_width: f32 = widths.iter().sum();
         let row_count = self.pages.row_count();
+        let widths_for_rows = widths.clone();
+        let mut rows = uniform_list(
+            "result-rows",
+            row_count,
+            cx.processor(move |this, range: Range<usize>, _window, cx| {
+                this.rows_visible(range.clone(), cx);
+                range
+                    .map(|row| this.render_row(row, &widths_for_rows, cx))
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .flex_1()
+        .track_scroll(&self.scroll_handle);
+        // Each scroller takes only its own axis: otherwise a vertical wheel also slides the
+        // columns (the outer div takes `delta.y` as x) and a sideways swipe scrolls the rows.
+        rows.interactivity().base_style.restrict_scroll_to_axis = Some(true);
         div()
             .id("result-grid")
+            .restrict_scroll_to_axis()
             .key_context("QueryResultGrid")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::copy))
@@ -410,20 +448,7 @@ impl Render for ResultGrid {
                     .w(px(total_width))
                     .h_full()
                     .child(self.render_header(&widths, cx))
-                    .child(
-                        uniform_list(
-                            "result-rows",
-                            row_count,
-                            cx.processor(move |this, range: Range<usize>, _window, cx| {
-                                this.rows_visible(range.clone(), cx);
-                                range
-                                    .map(|row| this.render_row(row, &widths, cx))
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .flex_1()
-                        .track_scroll(&self.scroll_handle),
-                    ),
+                    .child(rows),
             )
     }
 }

@@ -96,6 +96,13 @@ Limits in this version:
 - Only one statement runs at a time; there is no "run all".
 - MySQL Connector/J is not bundled because of its GPL licence; MySQL servers are
   reached through MariaDB Connector/J.
+- On macOS the console keys are Cmd+Enter (run) and Cmd+F2 (stop).
+- Without a secret store on the system the password is not saved; a warning says
+  so when you save the data source.
+- PostgreSQL results stop loading more rows after about a minute without
+  scrolling ("Result expired — run again").
+- Expanding the tree of a data source waits while a statement runs on it: each
+  data source has one connection.
 
 ## Licence
 

@@ -70,6 +70,7 @@
   {
     "context": "QueryConsole",
     "bindings": {
+      "ctrl-enter": "brewery::RunStatement",
       "ctrl-f2": "brewery::CancelStatement",
     },
   },

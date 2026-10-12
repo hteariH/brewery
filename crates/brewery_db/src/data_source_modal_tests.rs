@@ -98,7 +98,17 @@ fn driver_ids_are_slugs_of_the_name() {
         driver_id_for_name("  MS SQL Server 2022! "),
         "ms-sql-server-2022"
     );
-    assert_eq!(driver_id_for_name("--"), "");
+    assert_eq!(driver_id_for_name(""), "");
+    assert_eq!(driver_id_for_name("  "), "");
+}
+
+#[test]
+fn names_without_ascii_letters_still_get_an_id() {
+    let cyrillic = driver_id_for_name("Драйвер");
+    assert!(cyrillic.starts_with("driver-"), "{cyrillic}");
+    assert_eq!(cyrillic, driver_id_for_name("Драйвер"), "stable");
+    assert_ne!(cyrillic, driver_id_for_name("Другой"));
+    assert!(driver_id_for_name("--").starts_with("driver-"));
 }
 
 #[test]

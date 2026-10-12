@@ -74,6 +74,7 @@
   {
     "context": "QueryConsole",
     "bindings": {
+      "cmd-enter": "brewery::RunStatement",
       "cmd-f2": "brewery::CancelStatement",
     },
   },

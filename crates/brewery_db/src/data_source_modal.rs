@@ -75,16 +75,30 @@ pub fn parse_jar_paths(text: &str) -> Vec<String> {
 }
 
 /// A driver id derived from the name the user gave the driver: lower case, `-` between words.
+/// A name without ASCII letters or digits (e.g. only Cyrillic) gets `driver-<hash of the name>`;
+/// an empty name gets an empty id.
 pub fn driver_id_for_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return String::new();
+    }
     let mut id = String::new();
-    for ch in name.trim().chars() {
+    for ch in name.chars() {
         if ch.is_ascii_alphanumeric() {
             id.push(ch.to_ascii_lowercase());
         } else if !id.is_empty() && !id.ends_with('-') {
             id.push('-');
         }
     }
-    id.trim_end_matches('-').to_string()
+    let id = id.trim_end_matches('-');
+    if !id.is_empty() {
+        return id.to_string();
+    }
+    // FNV-1a: stable across runs, unlike the std hasher.
+    let hash = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    format!("driver-{hash:08x}")
 }
 
 /// The text shown next to Test Connection for a daemon answer.

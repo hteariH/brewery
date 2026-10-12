@@ -2,7 +2,7 @@
 //! `db/introspect`, and a toolbar to add, edit, delete and refresh data sources.
 
 use crate::ToggleDatabasePanel;
-use crate::console::open_console;
+use crate::console::{QueryConsole, open_console};
 use crate::data_source_modal::DataSourceModal;
 use crate::statements::select_all_from;
 use crate::tree::{DbTree, Fetch, Row, RowKey, node_label};
@@ -316,6 +316,20 @@ impl DatabasePanel {
 
     /// Called by the dialog once the daemon stored the data source.
     pub fn data_source_saved(&mut self, saved: ConnectionInfo, cx: &mut Context<Self>) {
+        // Open consoles of this data source show its new name. Deferred: the dialog that calls
+        // this may still be in an update of the workspace's modal layer.
+        let workspace = self.workspace.clone();
+        let renamed = saved.clone();
+        cx.defer(move |cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    let consoles: Vec<_> = workspace.items_of_type::<QueryConsole>(cx).collect();
+                    for console in consoles {
+                        console.update(cx, |console, cx| console.connection_saved(&renamed, cx));
+                    }
+                })
+                .ok();
+        });
         // The URL or the credentials may have changed: what was listed may no longer be right.
         for fetch in self.tree.refresh(&saved.id) {
             self.introspect(fetch, cx);
