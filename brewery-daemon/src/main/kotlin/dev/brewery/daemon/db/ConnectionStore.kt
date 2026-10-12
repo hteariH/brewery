@@ -32,17 +32,17 @@ class ConnectionStore(root: Path) {
     private val gson: Gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
 
     @Synchronized
-    fun connections(): List<ConnectionInfo> = read().first.map { it.toInfo() }
+    fun connections(): List<ConnectionInfo> = read(forWrite = false).first.map { it.toInfo() }
 
     @Synchronized
-    fun connection(id: String): ConnectionInfo? = read().first.firstOrNull { it.id == id }?.toInfo()
+    fun connection(id: String): ConnectionInfo? = read(forWrite = false).first.firstOrNull { it.id == id }?.toInfo()
 
     /** Stores [info] (assigning a UUID when its id is blank) and returns it as saved; `hasPassword` is not stored. */
     @Synchronized
     fun saveConnection(info: ConnectionInfo): ConnectionInfo {
-        val id = info.id.ifBlank { UUID.randomUUID().toString() }
-        val stored = StoredConnection(id, info.name, info.driverId, info.url, info.user, TreeMap(info.options))
-        val (connections, drivers) = read()
+        val id = (info.id as String?).orEmpty().ifBlank { UUID.randomUUID().toString() }
+        val stored = StoredConnection(id, info.name, info.driverId, info.url, info.user, TreeMap(info.options ?: emptyMap()))
+        val (connections, drivers) = read(forWrite = true)
         val index = connections.indexOfFirst { it.id == id }
         write(if (index < 0) connections + stored else connections.toMutableList().also { it[index] = stored }, drivers)
         return stored.toInfo()
@@ -50,18 +50,18 @@ class ConnectionStore(root: Path) {
 
     @Synchronized
     fun deleteConnection(id: String): Boolean {
-        val (connections, drivers) = read()
+        val (connections, drivers) = read(forWrite = true)
         if (connections.none { it.id == id }) return false
         write(connections.filterNot { it.id == id }, drivers)
         return true
     }
 
     @Synchronized
-    fun drivers(): List<StoredDriver> = read().second
+    fun drivers(): List<StoredDriver> = read(forWrite = false).second
 
     @Synchronized
     fun saveDriver(driver: StoredDriver) {
-        val (connections, drivers) = read()
+        val (connections, drivers) = read(forWrite = true)
         val index = drivers.indexOfFirst { it.id == driver.id }
         write(connections, if (index < 0) drivers + driver else drivers.toMutableList().also { it[index] = driver })
     }
@@ -69,12 +69,15 @@ class ConnectionStore(root: Path) {
     private fun StoredConnection.toInfo() = ConnectionInfo(id, name, driverId, url, user, false, options ?: emptyMap())
 
     // A missing or unreadable file is an empty store: a hand-damaged db.json must not take the daemon down.
-    private fun read(): Pair<List<StoredConnection>, List<StoredDriver>> {
+    private fun read(forWrite: Boolean): Pair<List<StoredConnection>, List<StoredDriver>> {
         if (!Files.isRegularFile(file)) return emptyList<StoredConnection>() to emptyList()
         return try {
             val parsed = gson.fromJson(Files.readString(file), DbFile::class.java)
             (parsed?.connections ?: emptyList()) to (parsed?.drivers ?: emptyList())
         } catch (e: Exception) {
+            // Saving would replace the user's hand-edited file with just the new item, so writes refuse.
+            val reason = (e.cause?.message ?: e.message ?: e.javaClass.simpleName).lineSequence().first().take(200)
+            if (forWrite) throw DbException(-32603, "db.json is invalid: $reason")
             System.err.println("brewery: ignoring unreadable ${file.fileName}: ${e.javaClass.simpleName}")
             emptyList<StoredConnection>() to emptyList()
         }

@@ -39,7 +39,11 @@ class DbService(root: Path, private val secrets: SecretStore) : AutoCloseable {
         try {
             when {
                 password == null -> {}
-                password.isEmpty() -> secrets.remove(account(saved.id))
+                // Removing from a store that cannot be used is fine: nothing was stored there.
+                password.isEmpty() -> try {
+                    secrets.remove(account(saved.id))
+                } catch (_: SecretStoreUnavailable) {
+                }
                 else -> secrets.set(account(saved.id), password)
             }
         } catch (e: SecretStoreUnavailable) {
@@ -75,6 +79,18 @@ class DbService(root: Path, private val secrets: SecretStore) : AutoCloseable {
             DbTestResult(false, "Connection timed out after $TEST_TIMEOUT_SECONDS seconds", null)
         } catch (e: ExecutionException) {
             DbTestResult(false, describe(e.cause ?: e), null)
+        }
+    }
+
+    /** Opens the saved connection [id] for sessions; failures become `DB_AUTH_FAILED` / `DB_CONNECTION_FAILED`. */
+    fun openSaved(id: String): Connection {
+        val c = store.connection(id) ?: throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
+        return try {
+            openConnection(c.driverId, c.url, c.user, secrets.get(account(id)), c.options)
+        } catch (e: DbException) {
+            throw e
+        } catch (e: Exception) {
+            throw connectionFailure(e)
         }
     }
 
