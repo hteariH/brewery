@@ -17,7 +17,10 @@ use gpui::{
     WeakEntity, Window, px,
 };
 use project::Project;
-use ui::{ContextMenu, ListItem, ListItemSpacing, Tooltip, prelude::*, right_click_menu};
+use std::sync::Arc;
+use ui::{
+    ContextMenu, Disclosure, ListItem, ListItemSpacing, Tooltip, prelude::*, right_click_menu,
+};
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::{OpenLog, Workspace};
 
@@ -675,14 +678,13 @@ impl DatabasePanel {
                 match &row {
                     Row::DataSource {
                         connection,
-                        expanded,
+                        expanded: _,
                         error,
                     } => {
                         let key = RowKey::data_source(connection.id.clone());
                         let selected = self.selected.as_ref() == Some(&key);
                         let item = self
-                            .tree_item(ix, key, 0, Some(*expanded), selected, cx)
-                            .start_slot(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                            .tree_item(ix, key, 0, row_chevron(&row), icon, selected, cx)
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -719,13 +721,11 @@ impl DatabasePanel {
                         connection_id,
                         node,
                         depth,
-                        expanded,
+                        expanded: _,
                     } => {
                         let key = RowKey::new(connection_id.clone(), node.path.clone());
                         let selected = self.selected.as_ref() == Some(&key);
-                        let toggle = node.has_children.then_some(*expanded);
-                        self.tree_item(ix, key, *depth, toggle, selected, cx)
-                            .start_slot(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                        self.tree_item(ix, key, *depth, row_chevron(&row), icon, selected, cx)
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -760,17 +760,33 @@ impl DatabasePanel {
         ix: usize,
         key: RowKey,
         depth: usize,
-        toggle: Option<bool>,
+        chevron: Option<IconName>,
+        icon: IconName,
         selected: bool,
         cx: &mut Context<Self>,
     ) -> ListItem {
-        let toggled = key.clone();
+        // ListItem's own disclosure sits left of the row (outside it at depth 0) and hides
+        // when expanded, so the chevron is drawn in the row. Leaves keep the same width empty.
+        let disclosure = div()
+            .w(px(16.))
+            .flex_none()
+            .children(chevron.map(|chevron| {
+                let toggled = key.clone();
+                let on_toggle: Arc<dyn Fn(&ClickEvent, &mut Window, &mut App)> =
+                    Arc::new(cx.listener(move |this, _, _, cx| this.toggle(toggled.clone(), cx)));
+                Disclosure::new(("db-disclosure", ix), chevron == IconName::ChevronDown)
+                    .on_toggle_expanded(on_toggle)
+            }));
         ListItem::new(("db-row", ix))
             .indent_level(depth)
             .spacing(ListItemSpacing::Dense)
             .toggle_state(selected)
-            .toggle(toggle)
-            .on_toggle(cx.listener(move |this, _, _, cx| this.toggle(toggled.clone(), cx)))
+            .start_slot(
+                h_flex()
+                    .gap_0p5()
+                    .child(disclosure)
+                    .child(Icon::new(icon).size(IconSize::Small).color(Color::Muted)),
+            )
             .on_click(cx.listener(move |this, event, window, cx| {
                 this.on_row_click(key.clone(), event, window, cx)
             }))
@@ -779,14 +795,32 @@ impl DatabasePanel {
 
 fn message_item(id: (&'static str, usize), depth: usize, text: &str, color: Color) -> ListItem {
     ListItem::new(id)
-        .indent_level(depth + 1)
+        .indent_level(depth)
         .spacing(ListItemSpacing::Dense)
         .selectable(false)
+        // Lines up with the icons of the sibling rows, behind the chevron column.
+        .start_slot(div().w(px(16.)))
         .child(
             Label::new(text.to_string())
                 .size(LabelSize::Small)
                 .color(color),
         )
+}
+
+/// The disclosure chevron of a row: right when collapsed, down when expanded, none for leaves.
+pub fn row_chevron(row: &Row) -> Option<IconName> {
+    let expanded = match row {
+        Row::DataSource { expanded, .. } => *expanded,
+        Row::Node { node, expanded, .. } if node.has_children => *expanded,
+        Row::Node { .. } | Row::Loading { .. } | Row::Empty { .. } | Row::Error { .. } => {
+            return None;
+        }
+    };
+    Some(if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    })
 }
 
 /// A short driver label shown after the data source name.

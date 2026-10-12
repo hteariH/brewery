@@ -389,8 +389,9 @@ impl DataSourceModal {
         }
     }
 
-    fn validate(&mut self, params: &SaveConnectionParams) -> bool {
-        let missing = if params.connection.name.is_empty() {
+    /// Saving needs a name; testing only what a connection needs.
+    fn validate(&mut self, params: &SaveConnectionParams, needs_name: bool) -> bool {
+        let missing = if needs_name && params.connection.name.is_empty() {
             Some("Enter a name")
         } else if params.connection.url.is_empty() {
             Some("Enter a JDBC URL")
@@ -405,7 +406,7 @@ impl DataSourceModal {
 
     pub fn test_connection(&mut self, cx: &mut Context<Self>) {
         let params = self.params(cx);
-        if !self.validate(&params) {
+        if !self.validate(&params, false) {
             cx.notify();
             return;
         }
@@ -433,7 +434,7 @@ impl DataSourceModal {
             return;
         }
         let params = self.params(cx);
-        if !self.validate(&params) {
+        if !self.validate(&params, true) {
             cx.notify();
             return;
         }
@@ -690,15 +691,12 @@ impl DataSourceModal {
 
     fn render_footer(&self, cx: &mut Context<Self>) -> ModalFooter {
         ModalFooter::new()
+            // The result goes on its own line above the footer: a long driver message here
+            // would push Cancel and Save out of the dialog.
             .start_slot(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("data-source-test", "Test Connection")
-                            .disabled(self.test_state == TestState::Testing)
-                            .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))),
-                    )
-                    .children(self.render_test_state()),
+                Button::new("data-source-test", "Test Connection")
+                    .disabled(self.test_state == TestState::Testing)
+                    .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))),
             )
             .end_slot(
                 h_flex()
@@ -749,6 +747,10 @@ impl Render for DataSourceModal {
             .child(self.url.clone())
             .child(self.user.clone())
             .child(self.render_password(cx))
+            .children(
+                self.render_test_state()
+                    .map(|label| div().w_full().child(label)),
+            )
             .children(
                 self.error
                     .clone()

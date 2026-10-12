@@ -641,3 +641,42 @@ async fn a_failed_delete_is_reported_in_the_panel(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+async fn test_connection_does_not_need_a_name(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    let modal = fixture.open_add_dialog(cx);
+    modal.update(cx, |modal, cx| modal.test_connection(cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.calls_of("db/connections/test").len(), 1);
+    modal.read_with(cx, |modal, _| {
+        assert_eq!(modal.error(), None, "only Save asks for a name");
+        assert!(matches!(modal.test_state(), TestState::Succeeded(_)));
+    });
+}
+
+#[gpui::test]
+async fn every_expandable_row_has_a_chevron(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture
+        .panel
+        .update(cx, |panel, cx| panel.toggle(RowKey::data_source("c1"), cx));
+    cx.run_until_parked();
+    fixture.panel.update(cx, |panel, cx| {
+        panel.toggle(RowKey::new("c1", vec!["public".to_string()]), cx)
+    });
+    cx.run_until_parked();
+    let chevrons: Vec<Option<IconName>> = fixture.panel.read_with(cx, |panel, _| {
+        panel.tree().rows().iter().map(row_chevron).collect()
+    });
+    assert_eq!(
+        chevrons,
+        [
+            Some(IconName::ChevronDown),  // Local Postgres, expanded
+            Some(IconName::ChevronDown),  // public, expanded
+            Some(IconName::ChevronRight), // owners, collapsed table
+            None,                         // owners_id_seq, a leaf
+            Some(IconName::ChevronRight), // Reports, collapsed data source
+        ]
+    );
+}
