@@ -79,7 +79,7 @@ class PostgresCursorTest {
     @Test
     fun `a huge result is streamed not buffered`() {
         val started = System.nanoTime()
-        val r = service.execute(id, "SELECT g FROM generate_series(1, 50000000) g")
+        val r = service.execute(id, "SELECT generate_series(1, 50000000) AS g")
         val elapsedMs = (System.nanoTime() - started) / 1_000_000
         assertTrue(elapsedMs < 5_000, "execute took $elapsedMs ms: the result set was buffered")
         assertEquals(false, service.sessions.run(id) { it.autoCommit })
@@ -99,7 +99,7 @@ class PostgresCursorTest {
     @Test
     fun `an update commits even while a cursor streams and a typo keeps the cursor`() {
         service.execute(id, "CREATE TABLE IF NOT EXISTS stream_t (a int)")
-        val cursor = service.execute(id, "SELECT g FROM generate_series(1, 5000000) g").cursorId!!
+        val cursor = service.execute(id, "SELECT generate_series(1, 5000000) AS g").cursorId!!
         assertEquals(-32012, assertFailsWith<DbException> { service.execute(id, "SELECT * FROM no_such_table") }.code)
         assertEquals(listOf(listOf("1")), service.fetch(cursor, 0, 1).rows)
         assertEquals(1L, service.execute(id, "INSERT INTO stream_t VALUES (1)").updateCount)

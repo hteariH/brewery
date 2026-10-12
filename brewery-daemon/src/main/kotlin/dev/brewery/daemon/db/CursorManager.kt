@@ -48,8 +48,10 @@ private class Cursor(
  *    (SET autocommit style statements are not tracked.)
  *  - Any unexpected failure restores autocommit; the manager never leaves a transaction without an owner.
  *
- * MariaDB streams without autocommit changes; the driver loads a pending result fully when another statement
- * runs on the same connection.
+ * MariaDB streams without autocommit changes, but its driver loads a pending result fully into memory when another
+ * command runs on the same connection; so with [expireUnfinishedBeforeCommands] every execute and every
+ * introspection first cancels and closes the unfinished cursors of the session (fetch -> -32013, "result
+ * expired"). Finished cursors are not affected.
  *
  * [index] maps cursor id to this manager so that `fetch`/`close` can find the right session from an id alone.
  */
@@ -60,6 +62,8 @@ class CursorManager(
     private val manageTransactions: (Connection) -> Boolean = { false },
     private val clock: () -> Long = System::currentTimeMillis,
     private val streamTtlMs: Long = DEFAULT_STREAM_TTL_MS,
+    /** Whether the driver drains a pending streaming result into memory before the next command (MariaDB). */
+    private val expireUnfinishedBeforeCommands: (Connection) -> Boolean = { false },
 ) {
     private val cursors = LinkedHashMap<String, Cursor>()
     private var txOwners = 0
@@ -84,6 +88,7 @@ class CursorManager(
      * has been released, so the caller can classify it.
      */
     fun execute(connection: Connection, sql: String): DbExecuteResult {
+        expireUnfinishedIfNeeded(connection)
         if (!managesTransactions(connection)) return runStatement(connection, sql, ownsTx = false)
         val kind = SqlText.classify(sql)
         if (userTx) return runTracking(connection, sql, kind)
@@ -96,6 +101,26 @@ class CursorManager(
             restoreAutocommit(connection)
         }
         return if (kind == SqlText.Kind.READ && connection.autoCommit) executeFresh(connection, sql) else runTracking(connection, sql, kind)
+    }
+
+    /**
+     * MariaDB Connector/J reads the rest of a pending streaming result into memory before it sends any other
+     * command on the connection. To keep "rows are pulled by fetch", unfinished cursors are cancelled and closed
+     * first (fetch -> -32013, "result expired"). Called before every execute and before introspection.
+     */
+    fun expireUnfinishedIfNeeded(connection: Connection) {
+        if (!runCatching { expireUnfinishedBeforeCommands(connection) }.getOrDefault(false)) return
+        val victims = synchronized(cursors) {
+            val unfinished = cursors.values.filter { !it.done && !it.ownsTx }
+            unfinished.forEach { cursors.remove(it.id) }
+            unfinished
+        }
+        for (cursor in victims) {
+            index.remove(cursor.id, this)
+            runCatching { cursor.statement.cancel() }
+            runCatching { cursor.resultSet.close() }
+            runCatching { cursor.statement.close() }
+        }
     }
 
     private fun managesTransactions(connection: Connection): Boolean {
@@ -314,8 +339,8 @@ class CursorManager(
     }
 
     private fun restoreAutocommit(c: Connection) {
-        implicitOpen = false
-        runCatching { c.autoCommit = true }
+        // Only forget the implicit transaction once autocommit is really back; otherwise the leak guard needs it.
+        if (runCatching { c.autoCommit = true }.isSuccess) implicitOpen = false
     }
 
     /** The next row (rendered when [render]), or null once the result set is exhausted (which also releases it). */

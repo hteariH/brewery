@@ -21,6 +21,8 @@ class DbService(
     private val manageTransactions: (Connection) -> Boolean = ::isPostgres,
     /** How long an implicit streaming transaction may sit without a fetch before it is ended. */
     private val streamingTtlMs: Long = CursorManager.DEFAULT_STREAM_TTL_MS,
+    /** Whether unfinished cursors must be ended before any other command (MariaDB/MySQL driver behaviour). */
+    private val expireUnfinishedBeforeCommands: (Connection) -> Boolean = ::isMariaDb,
 ) : AutoCloseable {
     private val projectKey: String = try {
         root.toRealPath().toString()
@@ -130,7 +132,8 @@ class DbService(
 
     /** Lazily lists the children of [path] in the schema tree of connection [connectionId]. */
     fun introspect(connectionId: String, path: List<String>, includeSystem: Boolean = false): List<DbNode> =
-        sessions.run(connectionId) { c ->
+        sessions.runIn(connectionId) { session, c ->
+            cursorManagers[connectionId]?.takeIf { it.session === session }?.expireUnfinishedIfNeeded(c)
             try {
                 Introspector(c, includeSystem).children(path)
             } catch (e: SQLException) {
@@ -144,7 +147,7 @@ class DbService(
 
     private fun cursorsOf(connectionId: String, session: Session): CursorManager =
         cursorManagers.compute(connectionId) { _, old ->
-            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions, clock, streamingTtlMs).also { manager ->
+            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions, clock, streamingTtlMs, expireUnfinishedBeforeCommands).also { manager ->
                 // A manager of a closed session would otherwise stay in the map (and keep the session alive).
                 session.onClose { if (session.closed) cursorManagers.remove(connectionId, manager) }
             }
@@ -213,3 +216,9 @@ fun connectionFailure(error: Throwable): DbException {
 
 /** PostgreSQL only streams a result set (fetch size) inside a transaction. */
 fun isPostgres(connection: Connection): Boolean = connection.metaData.url?.startsWith("jdbc:postgresql:") == true
+
+/** MariaDB and MySQL URLs (the driver is Connector/J for MariaDB); it drains pending streaming results before the next command. */
+fun isMariaDb(connection: Connection): Boolean {
+    val url = connection.metaData.url ?: return false
+    return url.startsWith("jdbc:mariadb:") || url.startsWith("jdbc:mysql:")
+}

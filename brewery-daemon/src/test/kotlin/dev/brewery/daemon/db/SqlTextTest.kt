@@ -34,4 +34,33 @@ class SqlTextTest {
             assertEquals(Kind.OTHER, kind(sql), sql)
         }
     }
+
+    @Test
+    fun `keywords inside literals identifiers and comments do not matter`() {
+        val d = "$"
+        val plain = listOf(
+            "select * from t where op = 'DELETE'",
+            "SELECT * FROM audit_log WHERE op <> 'DELETE'",
+            "select 'it''s an update' from t",
+            """select "update" from t""",
+            """select "returning" from t""",
+            "select `into` from t",
+            "select 1 -- for update",
+            "select 1 /* insert /* nested */ still comment */",
+            "select ${d}${d}insert${d}${d}",
+            "select ${d}tag${d} delete ${d}${d} ${d}tag${d} from t",
+            """select E'it\'s an update' from t""",
+            "select ${d}1 from t where a = ${d}2",
+            "select 'x into y'",
+            "select 'unterminated for update",
+        )
+        for (sql in plain) assertEquals(Kind.READ, kind(sql), sql)
+        val notPlain = listOf(
+            "select 'a' from t for update",
+            """select "a" from t where x = 'y' returning z""",
+            "select 1 -- c\n into t2",
+            "select ${d}${d}x${d}${d} from t for share",
+        )
+        for (sql in notPlain) assertEquals(Kind.OTHER, kind(sql), sql)
+    }
 }
