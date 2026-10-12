@@ -2458,6 +2458,7 @@ dependencies = [
  "menu",
  "project",
  "serde_json",
+ "settings",
  "theme",
  "theme_settings",
  "ui",

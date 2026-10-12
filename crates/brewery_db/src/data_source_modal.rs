@@ -7,15 +7,15 @@ use brewery_daemon_client::{
     TestConnectionResult, daemon_error_message,
 };
 use gpui::{
-    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString, Task,
-    WeakEntity, Window,
+    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
+    Subscription, Task, WeakEntity, Window,
 };
 use std::collections::BTreeMap;
 use ui::{
     Checkbox, ContextMenu, DropdownMenu, Modal, ModalFooter, ModalHeader, Section, ToggleState,
     prelude::*,
 };
-use ui_input::InputField;
+use ui_input::{ErasedEditorEvent, InputField};
 use workspace::notifications::NotificationId;
 use workspace::{ModalView, Toast, Workspace};
 
@@ -53,14 +53,15 @@ pub fn url_after_driver_change(
     }
 }
 
-/// `None` keeps the stored password (or sets none for a new data source), `Some("")` forgets it.
+/// A typed password always wins; otherwise `Some("")` forgets the stored one and `None` keeps it
+/// (or sets none for a new data source).
 pub fn password_to_send(typed: &str, forget: bool) -> Option<String> {
-    if forget {
-        Some(String::new())
-    } else if typed.is_empty() {
-        None
-    } else {
+    if !typed.is_empty() {
         Some(typed.to_string())
+    } else if forget {
+        Some(String::new())
+    } else {
+        None
     }
 }
 
@@ -102,7 +103,7 @@ pub enum TestState {
     Failed(SharedString),
 }
 
-struct WarningNotification;
+pub(crate) struct WarningNotification;
 
 pub struct DataSourceModal {
     workspace: WeakEntity<Workspace>,
@@ -127,6 +128,10 @@ pub struct DataSourceModal {
     new_driver_jars: Entity<InputField>,
     add_driver_error: Option<SharedString>,
     adding_driver: bool,
+    /// Rebuilt only when the drivers or the choice change, so a re-render does not reset an open
+    /// dropdown.
+    driver_menu: Option<Entity<ContextMenu>>,
+    _field_subscriptions: Vec<Subscription>,
     _drivers_task: Option<Task<()>>,
     test_task: Option<Task<()>>,
     save_task: Option<Task<()>>,
@@ -143,30 +148,37 @@ impl DataSourceModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let field =
-            |label: &str, placeholder: &str, window: &mut Window, cx: &mut Context<Self>| {
-                let label = label.to_string();
-                let placeholder = placeholder.to_string();
-                cx.new(|cx| {
-                    InputField::new(window, cx, &placeholder)
-                        .label(label)
-                        .label_size(LabelSize::Small)
-                })
-            };
-        let name = field("Name", "My database", window, cx);
-        let url = field("URL", "jdbc:…", window, cx);
-        let user = field("User", "", window, cx);
+        let field = |label: &str,
+                     placeholder: &str,
+                     tab_index: isize,
+                     window: &mut Window,
+                     cx: &mut Context<Self>| {
+            let label = label.to_string();
+            let placeholder = placeholder.to_string();
+            cx.new(|cx| {
+                InputField::new(window, cx, &placeholder)
+                    .label(label)
+                    .label_size(LabelSize::Small)
+                    .tab_index(tab_index)
+            })
+        };
+        // Tab order: name, driver dropdown (2), URL, user, password, then the driver section.
+        let name = field("Name", "My database", 1, window, cx);
+        let url = field("URL", "jdbc:…", 3, window, cx);
+        let user = field("User", "", 4, window, cx);
         let password = cx.new(|cx| {
             InputField::new(window, cx, "")
                 .label("Password")
                 .label_size(LabelSize::Small)
+                .tab_index(5)
                 .masked(true)
         });
-        let new_driver_name = field("Driver name", "Oracle", window, cx);
-        let new_driver_class = field("Class name", "oracle.jdbc.OracleDriver", window, cx);
+        let new_driver_name = field("Driver name", "Oracle", 10, window, cx);
+        let new_driver_class = field("Class name", "oracle.jdbc.OracleDriver", 11, window, cx);
         let new_driver_jars = field(
             "Jar files (comma separated)",
             "/path/to/ojdbc11.jar",
+            12,
             window,
             cx,
         );
@@ -187,12 +199,39 @@ impl DataSourceModal {
             }
         };
 
+        // A test result is about the values it was run with: editing them makes it stale. The
+        // reset is deferred because `select_driver` edits the URL while the modal is updated.
+        let field_subscriptions = [&url, &user, &password]
+            .into_iter()
+            .map(|field| {
+                let modal = cx.weak_entity();
+                let editor = field.read(cx).editor().clone();
+                editor.subscribe(
+                    Box::new(move |event, _, cx| {
+                        if event == ErasedEditorEvent::BufferEdited {
+                            let modal = modal.clone();
+                            cx.defer(move |cx| {
+                                modal
+                                    .update(cx, |modal, cx| modal.forget_test_result(cx))
+                                    .ok();
+                            });
+                        }
+                    }),
+                    window,
+                    cx,
+                )
+            })
+            .collect();
+
         let drivers = daemon.read(cx).db_drivers(cx);
         let drivers_task = cx.spawn(async move |this, cx| {
             let drivers = drivers.await;
             this.update(cx, |this, cx| {
                 match drivers {
-                    Ok(drivers) => this.drivers = drivers,
+                    Ok(drivers) => {
+                        this.drivers = drivers;
+                        this.driver_menu = None;
+                    }
                     Err(error) => this.error = Some(daemon_error_message(&error).into()),
                 }
                 cx.notify();
@@ -222,6 +261,8 @@ impl DataSourceModal {
             new_driver_jars,
             add_driver_error: None,
             adding_driver: false,
+            driver_menu: None,
+            _field_subscriptions: field_subscriptions,
             _drivers_task: Some(drivers_task),
             test_task: None,
             save_task: None,
@@ -261,8 +302,33 @@ impl DataSourceModal {
         &self.password
     }
 
+    pub fn add_driver_error(&self) -> Option<&SharedString> {
+        self.add_driver_error.as_ref()
+    }
+
+    /// The name, class name and jar fields of the "Add driver" section.
+    pub fn new_driver_fields(&self) -> [&Entity<InputField>; 3] {
+        [
+            &self.new_driver_name,
+            &self.new_driver_class,
+            &self.new_driver_jars,
+        ]
+    }
+
+    pub fn set_show_add_driver(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.show_add_driver = show;
+        cx.notify();
+    }
+
     pub fn set_forget_password(&mut self, forget: bool, cx: &mut Context<Self>) {
         self.forget_password = forget;
+        self.forget_test_result(cx);
+    }
+
+    /// Drops a shown or pending test result once the values it was run with changed.
+    fn forget_test_result(&mut self, cx: &mut Context<Self>) {
+        self.test_task = None;
+        self.test_state = TestState::Idle;
         cx.notify();
     }
 
@@ -283,8 +349,8 @@ impl DataSourceModal {
             set_text(&self.url, &next, window, cx);
         }
         self.driver_id = driver_id;
-        self.test_state = TestState::Idle;
-        cx.notify();
+        self.driver_menu = None;
+        self.forget_test_result(cx);
     }
 
     fn params(&self, cx: &App) -> SaveConnectionParams {
@@ -436,6 +502,7 @@ impl DataSourceModal {
                         let id = driver.id.clone();
                         this.drivers.retain(|other| other.id != id);
                         this.drivers.push(driver);
+                        this.driver_menu = None;
                         this.show_add_driver = false;
                         this.select_driver(id, window, cx);
                     }
@@ -452,8 +519,18 @@ impl DataSourceModal {
         cx.emit(DismissEvent);
     }
 
-    fn confirm(&mut self, _: &menu::Confirm, _: &mut Window, cx: &mut Context<Self>) {
-        self.save(cx);
+    /// Enter in the "Add driver" fields adds the driver; anywhere else it saves.
+    fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let in_driver_section = self.show_add_driver
+            && self
+                .new_driver_fields()
+                .iter()
+                .any(|field| field.focus_handle(cx).contains_focused(window, cx));
+        if in_driver_section {
+            self.add_driver(window, cx);
+        } else {
+            self.save(cx);
+        }
     }
 
     fn driver_label(&self) -> SharedString {
@@ -465,10 +542,19 @@ impl DataSourceModal {
             .into()
     }
 
-    fn render_driver_dropdown(&self, window: &mut Window, cx: &mut Context<Self>) -> DropdownMenu {
+    fn render_driver_dropdown(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DropdownMenu {
         let modal = cx.weak_entity();
         let drivers = self.drivers.clone();
         let current = self.driver_id.clone();
+        if let Some(menu) = self.driver_menu.clone() {
+            return DropdownMenu::new("data-source-driver", self.driver_label(), menu)
+                .full_width(true)
+                .tab_index(2isize);
+        }
         let menu = ContextMenu::build(window, cx, move |mut menu, _, _| {
             for driver in drivers {
                 let modal = modal.clone();
@@ -492,7 +578,10 @@ impl DataSourceModal {
             }
             menu
         });
-        DropdownMenu::new("data-source-driver", self.driver_label(), menu).full_width(true)
+        self.driver_menu = Some(menu.clone());
+        DropdownMenu::new("data-source-driver", self.driver_label(), menu)
+            .full_width(true)
+            .tab_index(2isize)
     }
 
     fn render_password(&self, cx: &mut Context<Self>) -> impl IntoElement {

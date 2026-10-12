@@ -2,7 +2,7 @@
 //! `db/introspect`, and a toolbar to add, edit, delete and refresh data sources.
 
 use crate::data_source_modal::DataSourceModal;
-use crate::tree::{DbTree, Row, RowKey, node_label};
+use crate::tree::{DbTree, Fetch, Row, RowKey, node_label};
 use crate::{NewQueryConsole, ToggleDatabasePanel};
 use anyhow::Result;
 use brewery_daemon_client::{
@@ -93,6 +93,11 @@ impl DatabasePanel {
         &self.tree
     }
 
+    /// The last failure of a panel-wide action, shown under the toolbar.
+    pub fn notice(&self) -> Option<&SharedString> {
+        self.notice.as_ref()
+    }
+
     pub fn selected(&self) -> Option<&RowKey> {
         self.selected.as_ref()
     }
@@ -145,8 +150,8 @@ impl DatabasePanel {
                 self.status = Status::Ready;
                 // A restarted daemon has no open sessions; list everything that is open again.
                 if self.loaded {
-                    for key in self.tree.refresh_all() {
-                        self.introspect(key, cx);
+                    for fetch in self.tree.refresh_all() {
+                        self.introspect(fetch, cx);
                     }
                 }
                 self.fetch_connections(cx);
@@ -212,8 +217,12 @@ impl DatabasePanel {
         }));
     }
 
-    fn introspect(&mut self, key: RowKey, cx: &mut Context<Self>) {
+    fn introspect(&mut self, fetch: Fetch, cx: &mut Context<Self>) {
+        let Fetch { key, generation } = fetch;
         let Some(daemon) = self.ready_daemon(cx) else {
+            // Failed rather than Loading, so expanding again retries.
+            self.tree
+                .set_children(&key, generation, Err(WAITING_FOR_DAEMON.to_string()));
             return;
         };
         let children = daemon.read(cx).db_introspect(
@@ -227,8 +236,11 @@ impl DatabasePanel {
         cx.spawn(async move |this, cx| {
             let children = children.await;
             this.update(cx, |this, cx| {
-                this.tree
-                    .set_children(&key, children.map_err(|error| daemon_error_message(&error)));
+                this.tree.set_children(
+                    &key,
+                    generation,
+                    children.map_err(|error| daemon_error_message(&error)),
+                );
                 cx.notify();
             })
             .ok();
@@ -237,13 +249,14 @@ impl DatabasePanel {
     }
 
     pub fn toggle(&mut self, key: RowKey, cx: &mut Context<Self>) {
-        if self.tree.toggle(key.clone()) {
-            self.introspect(key, cx);
+        if let Some(fetch) = self.tree.toggle(key) {
+            self.introspect(fetch, cx);
         }
         cx.notify();
     }
 
-    /// Lists the data sources again and drops the cached schema of the selected one.
+    /// Lists the data sources again and drops the cached schema of the selected one, or of all of
+    /// them when nothing is selected.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if matches!(self.status, Status::Failed(_)) {
             if let Some(daemon) = self.daemon.clone() {
@@ -251,10 +264,12 @@ impl DatabasePanel {
             }
             return;
         }
-        if let Some(id) = self.selected.as_ref().map(|key| key.connection_id.clone()) {
-            for path in self.tree.refresh(&id) {
-                self.introspect(RowKey::new(id.clone(), path), cx);
-            }
+        let fetches = match self.selected.as_ref().map(|key| key.connection_id.clone()) {
+            Some(id) => self.tree.refresh(&id),
+            None => self.tree.refresh_all(),
+        };
+        for fetch in fetches {
+            self.introspect(fetch, cx);
         }
         self.fetch_connections(cx);
         cx.notify();
@@ -300,8 +315,8 @@ impl DatabasePanel {
     /// Called by the dialog once the daemon stored the data source.
     pub fn data_source_saved(&mut self, saved: ConnectionInfo, cx: &mut Context<Self>) {
         // The URL or the credentials may have changed: what was listed may no longer be right.
-        for path in self.tree.refresh(&saved.id) {
-            self.introspect(RowKey::new(saved.id.clone(), path), cx);
+        for fetch in self.tree.refresh(&saved.id) {
+            self.introspect(fetch, cx);
         }
         self.select_after_list = Some(saved.id);
         self.fetch_connections(cx);

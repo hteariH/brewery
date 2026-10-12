@@ -74,7 +74,12 @@ fn password_is_kept_replaced_or_forgotten() {
         password_to_send(" secret ", false).as_deref(),
         Some(" secret ")
     );
-    assert_eq!(password_to_send("ignored", true).as_deref(), Some(""));
+    assert_eq!(password_to_send("", true).as_deref(), Some(""));
+    assert_eq!(
+        password_to_send("new", true).as_deref(),
+        Some("new"),
+        "a typed password wins over Forget"
+    );
 }
 
 #[test]

@@ -70,6 +70,20 @@ fn outline(tree: &DbTree) -> Vec<String> {
         .collect()
 }
 
+/// Expands `key` and answers the fetch that expanding started.
+fn open(tree: &mut DbTree, key: RowKey, result: Result<Vec<DbNode>, String>) {
+    let fetch = tree.expand(key).expect("expanding should fetch");
+    reply(tree, &fetch, result);
+}
+
+fn reply(tree: &mut DbTree, fetch: &Fetch, result: Result<Vec<DbNode>, String>) {
+    tree.set_children(&fetch.key, fetch.generation, result);
+}
+
+fn schema(name: &str) -> DbNode {
+    node(DbNodeKind::Schema, &[name], true)
+}
+
 #[test]
 fn data_sources_start_collapsed() {
     let mut tree = DbTree::default();
@@ -87,18 +101,18 @@ fn expanding_loads_lazily_and_caches() {
     let mut tree = DbTree::default();
     tree.set_sources(vec![source("a", "Alpha")]);
 
-    assert!(tree.expand(key("a", &[])), "first expansion must fetch");
+    let fetch = tree
+        .expand(key("a", &[]))
+        .expect("first expansion must fetch");
+    assert_eq!(fetch.key, key("a", &[]));
     assert_eq!(outline(&tree), ["v Alpha", "  loading"]);
 
-    tree.set_children(
-        &key("a", &[]),
-        Ok(vec![node(DbNodeKind::Schema, &["public"], true)]),
-    );
+    reply(&mut tree, &fetch, Ok(vec![schema("public")]));
     assert_eq!(outline(&tree), ["v Alpha", "  > public"]);
 
-    assert!(tree.expand(key("a", &["public"])));
-    tree.set_children(
-        &key("a", &["public"]),
+    open(
+        &mut tree,
+        key("a", &["public"]),
         Ok(vec![
             node(DbNodeKind::Table, &["public", "owners"], true),
             node(DbNodeKind::Sequence, &["public", "owners_id_seq"], false),
@@ -116,8 +130,9 @@ fn expanding_loads_lazily_and_caches() {
 
     tree.collapse(&key("a", &[]));
     assert_eq!(outline(&tree), ["> Alpha"]);
-    assert!(
-        !tree.expand(key("a", &[])),
+    assert_eq!(
+        tree.expand(key("a", &[])),
+        None,
         "expanding again uses the cache"
     );
     assert_eq!(
@@ -136,9 +151,9 @@ fn expanding_loads_lazily_and_caches() {
 fn toggle_flips_expansion() {
     let mut tree = DbTree::default();
     tree.set_sources(vec![source("a", "Alpha")]);
-    assert!(tree.toggle(key("a", &[])));
+    assert!(tree.toggle(key("a", &[])).is_some());
     assert!(tree.is_expanded(&key("a", &[])));
-    assert!(!tree.toggle(key("a", &[])));
+    assert_eq!(tree.toggle(key("a", &[])), None);
     assert!(!tree.is_expanded(&key("a", &[])));
 }
 
@@ -159,14 +174,17 @@ fn folders_have_short_labels_and_columns_their_detail() {
 fn failures_show_an_error_row_and_a_badge_and_retry_on_expand() {
     let mut tree = DbTree::default();
     tree.set_sources(vec![source("a", "Alpha")]);
-    tree.expand(key("a", &[]));
-    tree.set_children(&key("a", &[]), Err("connection refused".to_string()));
+    open(
+        &mut tree,
+        key("a", &[]),
+        Err("connection refused".to_string()),
+    );
     assert_eq!(outline(&tree), ["v Alpha !", "  error: connection refused"]);
     assert_eq!(tree.root_error("a").as_deref(), Some("connection refused"));
 
     tree.collapse(&key("a", &[]));
     assert!(
-        tree.expand(key("a", &[])),
+        tree.expand(key("a", &[])).is_some(),
         "a failed listing is fetched again"
     );
     assert_eq!(outline(&tree), ["v Alpha", "  loading"]);
@@ -176,18 +194,13 @@ fn failures_show_an_error_row_and_a_badge_and_retry_on_expand() {
 fn nested_failures_and_empty_listings() {
     let mut tree = DbTree::default();
     tree.set_sources(vec![source("a", "Alpha")]);
-    tree.expand(key("a", &[]));
-    tree.set_children(
-        &key("a", &[]),
-        Ok(vec![
-            node(DbNodeKind::Schema, &["broken"], true),
-            node(DbNodeKind::Schema, &["empty"], true),
-        ]),
+    open(
+        &mut tree,
+        key("a", &[]),
+        Ok(vec![schema("broken"), schema("empty")]),
     );
-    tree.expand(key("a", &["broken"]));
-    tree.set_children(&key("a", &["broken"]), Err("denied".to_string()));
-    tree.expand(key("a", &["empty"]));
-    tree.set_children(&key("a", &["empty"]), Ok(Vec::new()));
+    open(&mut tree, key("a", &["broken"]), Err("denied".to_string()));
+    open(&mut tree, key("a", &["empty"]), Ok(Vec::new()));
     assert_eq!(
         outline(&tree),
         [
@@ -209,21 +222,39 @@ fn nested_failures_and_empty_listings() {
 fn late_replies_after_a_collapse_still_fill_the_cache_but_unasked_ones_do_not() {
     let mut tree = DbTree::default();
     tree.set_sources(vec![source("a", "Alpha")]);
-    tree.set_children(
-        &key("a", &[]),
-        Ok(vec![node(DbNodeKind::Schema, &["public"], true)]),
-    );
-    assert!(
-        tree.expand(key("a", &[])),
-        "a reply nobody asked for is ignored"
-    );
+    tree.set_children(&key("a", &[]), 1, Ok(vec![schema("public")]));
+    let fetch = tree
+        .expand(key("a", &[]))
+        .expect("a reply nobody asked for is ignored");
     tree.collapse(&key("a", &[]));
-    tree.set_children(
-        &key("a", &[]),
-        Ok(vec![node(DbNodeKind::Schema, &["public"], true)]),
-    );
-    assert!(!tree.expand(key("a", &[])));
+    reply(&mut tree, &fetch, Ok(vec![schema("public")]));
+    assert_eq!(tree.expand(key("a", &[])), None);
     assert_eq!(outline(&tree), ["v Alpha", "  > public"]);
+}
+
+#[test]
+fn a_reply_from_before_a_refresh_is_dropped() {
+    let mut tree = DbTree::default();
+    tree.set_sources(vec![source("a", "Alpha")]);
+    let old = tree.expand(key("a", &[])).expect("first expansion fetches");
+    let new = tree.refresh("a");
+    assert_eq!(new.len(), 1);
+    assert_ne!(new[0].generation, old.generation);
+
+    reply(&mut tree, &old, Ok(vec![schema("old_database")]));
+    assert_eq!(
+        outline(&tree),
+        ["v Alpha", "  loading"],
+        "the old URL's listing must not fill the new request's slot"
+    );
+    reply(&mut tree, &new[0], Ok(vec![schema("new_database")]));
+    assert_eq!(outline(&tree), ["v Alpha", "  > new_database"]);
+    reply(&mut tree, &new[0], Ok(vec![schema("again")]));
+    assert_eq!(
+        outline(&tree),
+        ["v Alpha", "  > new_database"],
+        "a settled listing is not replaced"
+    );
 }
 
 #[test]
@@ -231,19 +262,14 @@ fn refresh_clears_one_data_source_and_refetches_what_was_open() {
     let mut tree = DbTree::default();
     tree.set_sources(vec![source("a", "Alpha"), source("b", "Beta")]);
     for id in ["a", "b"] {
-        tree.expand(key(id, &[]));
-        tree.set_children(
-            &key(id, &[]),
-            Ok(vec![node(DbNodeKind::Schema, &["public"], true)]),
-        );
-        tree.expand(key(id, &["public"]));
-        tree.set_children(&key(id, &["public"]), Ok(Vec::new()));
+        open(&mut tree, key(id, &[]), Ok(vec![schema("public")]));
+        open(&mut tree, key(id, &["public"]), Ok(Vec::new()));
     }
 
-    let refetch = tree.refresh("a");
+    let refetch: Vec<RowKey> = tree.refresh("a").into_iter().map(|f| f.key).collect();
     assert_eq!(
         refetch,
-        vec![Vec::<String>::new(), vec!["public".to_string()]],
+        vec![key("a", &[]), key("a", &["public"])],
         "shortest paths first"
     );
     assert_eq!(
@@ -257,17 +283,15 @@ fn refresh_clears_one_data_source_and_refetches_what_was_open() {
         tree.refresh("b").is_empty(),
         "nothing open, nothing to fetch"
     );
-    assert!(tree.expand(key("b", &[])), "the cache is gone");
+    assert!(tree.expand(key("b", &[])).is_some(), "the cache is gone");
 }
 
 #[test]
 fn replacing_the_sources_forgets_removed_ones() {
     let mut tree = DbTree::default();
     tree.set_sources(vec![source("a", "Alpha"), source("b", "Beta")]);
-    tree.expand(key("a", &[]));
-    tree.set_children(&key("a", &[]), Ok(Vec::new()));
-    tree.expand(key("b", &[]));
-    tree.set_children(&key("b", &[]), Ok(Vec::new()));
+    open(&mut tree, key("a", &[]), Ok(Vec::new()));
+    open(&mut tree, key("b", &[]), Ok(Vec::new()));
 
     tree.set_sources(vec![source("b", "Beta (renamed)")]);
     assert_eq!(outline(&tree), ["v Beta (renamed)", "  empty"]);
@@ -284,13 +308,10 @@ fn replacing_the_sources_forgets_removed_ones() {
 fn clear_cache_keeps_expansion_and_refetches_everything_open() {
     let mut tree = DbTree::default();
     tree.set_sources(vec![source("a", "Alpha"), source("b", "Beta")]);
-    tree.expand(key("a", &[]));
-    tree.set_children(&key("a", &[]), Ok(Vec::new()));
-    tree.expand(key("b", &[]));
-    tree.set_children(&key("b", &[]), Ok(Vec::new()));
+    open(&mut tree, key("a", &[]), Ok(Vec::new()));
+    open(&mut tree, key("b", &[]), Ok(Vec::new()));
 
-    let mut refetch = tree.refresh_all();
-    refetch.sort();
+    let refetch: Vec<RowKey> = tree.refresh_all().into_iter().map(|f| f.key).collect();
     assert_eq!(refetch, vec![key("a", &[]), key("b", &[])]);
     assert_eq!(
         outline(&tree),

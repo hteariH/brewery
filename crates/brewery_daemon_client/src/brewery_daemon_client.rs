@@ -286,7 +286,7 @@ impl DaemonClient {
     }
 
     /// Keeps the daemon's `ResponseError` in the error chain, so callers can read its code and
-    /// message with `db_error_code` and `db_error_message`.
+    /// message with `daemon_error_code` and `daemon_error_message`.
     async fn db_call<R>(&self, params: R::Params, timeout: Duration) -> Result<R::Result>
     where
         R: lsp::request::Request,

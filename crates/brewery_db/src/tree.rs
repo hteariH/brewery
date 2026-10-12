@@ -76,9 +76,18 @@ impl Row {
     }
 }
 
+/// A listing to request: `generation` goes back with the reply to `DbTree::set_children`, so a
+/// reply to an older request (before a refresh) cannot fill the slot of the newer one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fetch {
+    pub key: RowKey,
+    pub generation: u64,
+}
+
 #[derive(Debug, Clone)]
 enum Children {
-    Loading,
+    /// Awaiting the reply to the request of this generation.
+    Loading(u64),
     Loaded(Vec<DbNode>),
     Failed(String),
 }
@@ -90,6 +99,7 @@ pub struct DbTree {
     sources: Vec<ConnectionInfo>,
     expanded: HashSet<RowKey>,
     children: HashMap<RowKey, Children>,
+    last_generation: u64,
 }
 
 /// How a node reads in the tree: the table's folders get the short names IntelliJ uses.
@@ -125,12 +135,18 @@ impl DbTree {
         self.expanded.contains(key)
     }
 
-    /// True when the children have to be fetched: never listed, or the last listing failed.
-    pub fn expand(&mut self, key: RowKey) -> bool {
-        let fetch = matches!(self.children.get(&key), None | Some(Children::Failed(_)));
-        if fetch {
-            self.children.insert(key.clone(), Children::Loading);
-        }
+    fn start_loading(&mut self, key: RowKey) -> Fetch {
+        self.last_generation += 1;
+        let generation = self.last_generation;
+        self.children
+            .insert(key.clone(), Children::Loading(generation));
+        Fetch { key, generation }
+    }
+
+    /// A fetch when the children have to be listed: never listed, or the last listing failed.
+    pub fn expand(&mut self, key: RowKey) -> Option<Fetch> {
+        let fetch = matches!(self.children.get(&key), None | Some(Children::Failed(_)))
+            .then(|| self.start_loading(key.clone()));
         self.expanded.insert(key);
         fetch
     }
@@ -140,20 +156,25 @@ impl DbTree {
         self.expanded.remove(key);
     }
 
-    /// True when expanding needs a fetch.
-    pub fn toggle(&mut self, key: RowKey) -> bool {
+    /// A fetch when expanding needs one.
+    pub fn toggle(&mut self, key: RowKey) -> Option<Fetch> {
         if self.is_expanded(&key) {
             self.collapse(&key);
-            false
+            None
         } else {
             self.expand(key)
         }
     }
 
-    /// Only a listing that was asked for and is still awaited is taken.
-    pub fn set_children(&mut self, key: &RowKey, result: Result<Vec<DbNode>, String>) {
+    /// Only the reply to the request that is still awaited is taken.
+    pub fn set_children(
+        &mut self,
+        key: &RowKey,
+        generation: u64,
+        result: Result<Vec<DbNode>, String>,
+    ) {
         if let Some(children) = self.children.get_mut(key)
-            && matches!(children, Children::Loading)
+            && matches!(children, Children::Loading(awaited) if *awaited == generation)
         {
             *children = match result {
                 Ok(nodes) => Children::Loaded(nodes),
@@ -171,25 +192,17 @@ impl DbTree {
 
     /// Drops the cache of one data source. What is open and visible stays open and is returned
     /// to be fetched again, shortest paths first; nodes hidden under a collapsed parent close.
-    pub fn refresh(&mut self, connection_id: &str) -> Vec<NodePath> {
-        let mut refetch: Vec<NodePath> = self
-            .reset(|key| key.connection_id == connection_id)
-            .into_iter()
-            .map(|key| key.path)
-            .collect();
-        refetch.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
-        refetch
+    pub fn refresh(&mut self, connection_id: &str) -> Vec<Fetch> {
+        self.reset(|key| key.connection_id == connection_id)
     }
 
-    /// `refresh` for every data source, after the daemon restarted.
-    pub fn refresh_all(&mut self) -> Vec<RowKey> {
-        let mut refetch = self.reset(|_| true);
-        refetch.sort_by(|a, b| a.path.len().cmp(&b.path.len()).then_with(|| a.cmp(b)));
-        refetch
+    /// `refresh` for every data source, after the daemon restarted or with nothing selected.
+    pub fn refresh_all(&mut self) -> Vec<Fetch> {
+        self.reset(|_| true)
     }
 
-    fn reset(&mut self, affected: impl Fn(&RowKey) -> bool) -> Vec<RowKey> {
-        let visible: Vec<RowKey> = self
+    fn reset(&mut self, affected: impl Fn(&RowKey) -> bool) -> Vec<Fetch> {
+        let mut visible: Vec<RowKey> = self
             .expanded
             .iter()
             .filter(|key| affected(key) && self.ancestors_expanded(key))
@@ -198,10 +211,17 @@ impl DbTree {
         self.expanded
             .retain(|key| !affected(key) || visible.contains(key));
         self.children.retain(|key, _| !affected(key));
-        for key in &visible {
-            self.children.insert(key.clone(), Children::Loading);
-        }
+        visible.sort_by(|a, b| {
+            (a.path.len(), &a.connection_id, &a.path).cmp(&(
+                b.path.len(),
+                &b.connection_id,
+                &b.path,
+            ))
+        });
         visible
+            .into_iter()
+            .map(|key| self.start_loading(key))
+            .collect()
     }
 
     fn ancestors_expanded(&self, key: &RowKey) -> bool {
@@ -232,7 +252,7 @@ impl DbTree {
 
     fn push_children(&self, parent: &RowKey, depth: usize, rows: &mut Vec<Row>) {
         match self.children.get(parent) {
-            None | Some(Children::Loading) => rows.push(Row::Loading {
+            None | Some(Children::Loading(_)) => rows.push(Row::Loading {
                 parent: parent.clone(),
                 depth,
             }),

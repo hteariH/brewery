@@ -1,46 +1,83 @@
 use super::*;
-use crate::data_source_modal::TestState;
+use crate::data_source_modal::{TestState, WarningNotification};
 use brewery_daemon_client::{
     BuildTool, Daemon, DaemonFactory, ProjectModel, RunConfiguration, SpringModel, StartDaemon,
 };
 use futures::FutureExt as _;
+use futures::channel::oneshot;
 use futures::future::LocalBoxFuture;
 use gpui::{TestAppContext, VisualTestContext};
 use serde_json::{Value, json};
+use settings::{DEFAULT_KEYMAP_PATH, KeymapFile};
 use std::any::Any;
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use util::path;
+use workspace::notifications::NotificationId;
 use workspace::{AppState, MultiWorkspace};
 
-type Calls = Rc<RefCell<Vec<(String, Value)>>>;
-
-/// Serves the `db/*` methods from an in-memory list of connections and records every call.
-struct FakeDaemon {
-    connections: Rc<RefCell<Vec<Value>>>,
-    calls: Calls,
+/// What the fake daemon knows and what it was asked; shared between the fake and the test.
+#[derive(Default)]
+struct FakeState {
+    connections: RefCell<Vec<Value>>,
+    calls: RefCell<Vec<(String, Value)>>,
+    /// Methods that fail with this message.
+    failing: RefCell<HashMap<String, String>>,
+    /// Replaces the successful `db/connections/test` answer.
+    test_reply: RefCell<Option<Value>>,
+    /// Methods whose replies wait until the test releases them, oldest first.
+    held_methods: RefCell<HashSet<String>>,
+    held: RefCell<Vec<(String, oneshot::Sender<()>)>>,
 }
 
-fn connection(id: &str, name: &str, driver: &str, has_password: bool) -> Value {
-    json!({
-        "id": id,
-        "name": name,
-        "driverId": driver,
-        "url": format!("jdbc:{driver}://localhost/{id}"),
-        "user": "app",
-        "hasPassword": has_password,
-        "options": {}
-    })
-}
+impl FakeState {
+    fn fail(&self, method: &str, message: &str) {
+        self.failing
+            .borrow_mut()
+            .insert(method.to_string(), message.to_string());
+    }
 
-impl FakeDaemon {
+    fn hold(&self, method: &str) {
+        self.held_methods.borrow_mut().insert(method.to_string());
+    }
+
+    fn held_count(&self, method: &str) -> usize {
+        self.held
+            .borrow()
+            .iter()
+            .filter(|(held, _)| held == method)
+            .count()
+    }
+
+    /// Lets the oldest held reply of `method` through.
+    fn release(&self, method: &str) {
+        let mut held = self.held.borrow_mut();
+        let ix = held
+            .iter()
+            .position(|(held, _)| held == method)
+            .expect("a reply of this method should be held");
+        let (_, sender) = held.remove(ix);
+        // The requester may be gone already (a dropped task); that is fine.
+        sender.send(()).ok();
+    }
+
     fn answer(&self, method: &str, params: &Value) -> anyhow::Result<Value> {
+        if let Some(message) = self.failing.borrow().get(method) {
+            anyhow::bail!("{message}");
+        }
         match method {
             "db/connections/list" => Ok(Value::Array(self.connections.borrow().clone())),
             "db/drivers" => Ok(json!([
                 { "id": "postgresql", "name": "PostgreSQL", "bundled": true, "jarPaths": [] },
                 { "id": "sqlite", "name": "SQLite", "bundled": true, "jarPaths": [] }
             ])),
+            "db/drivers/addJar" => Ok(json!({
+                "id": params["driverId"],
+                "name": params["name"],
+                "bundled": false,
+                "jarPaths": params["jarPaths"]
+            })),
             "db/connections/save" => {
                 let mut saved = params["connection"].clone();
                 if saved["id"] == "" {
@@ -62,10 +99,12 @@ impl FakeDaemon {
                     .retain(|other| other["id"] != params["id"]);
                 Ok(Value::Null)
             }
-            "db/connections/test" => Ok(json!({
-                "ok": true,
-                "message": "Connected",
-                "serverVersion": "PostgreSQL 16.4"
+            "db/connections/test" => Ok(self.test_reply.borrow().clone().unwrap_or_else(|| {
+                json!({
+                    "ok": true,
+                    "message": "Connected",
+                    "serverVersion": "PostgreSQL 16.4"
+                })
             })),
             "db/introspect" => {
                 if params["connectionId"] == "c2" {
@@ -93,6 +132,23 @@ impl FakeDaemon {
     }
 }
 
+/// Serves the `db/*` methods from `FakeState`.
+struct FakeDaemon {
+    state: Rc<FakeState>,
+}
+
+fn connection(id: &str, name: &str, driver: &str, has_password: bool) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "driverId": driver,
+        "url": format!("jdbc:{driver}://localhost/{id}"),
+        "user": "app",
+        "hasPassword": has_password,
+        "options": {}
+    })
+}
+
 impl Daemon for FakeDaemon {
     fn project_model(&self) -> LocalBoxFuture<'_, anyhow::Result<ProjectModel>> {
         async {
@@ -118,11 +174,24 @@ impl Daemon for FakeDaemon {
         method: &'static str,
         params: Value,
     ) -> LocalBoxFuture<'_, anyhow::Result<Value>> {
-        self.calls
+        let state = &self.state;
+        state
+            .calls
             .borrow_mut()
             .push((method.to_string(), params.clone()));
-        let answer = self.answer(method, &params);
-        async move { answer }.boxed_local()
+        let answer = state.answer(method, &params);
+        let gate = state.held_methods.borrow().contains(method).then(|| {
+            let (sender, receiver) = oneshot::channel();
+            state.held.borrow_mut().push((method.to_string(), sender));
+            receiver
+        });
+        async move {
+            if let Some(gate) = gate {
+                gate.await.ok();
+            }
+            answer
+        }
+        .boxed_local()
     }
 
     fn on_project_changed(&self, _: Box<dyn Fn() + Send>) -> Box<dyn Any> {
@@ -139,12 +208,13 @@ impl Daemon for FakeDaemon {
 struct Fixture {
     workspace: Entity<Workspace>,
     panel: Entity<DatabasePanel>,
-    calls: Calls,
+    state: Rc<FakeState>,
 }
 
 impl Fixture {
     fn calls_of(&self, method: &str) -> Vec<Value> {
-        self.calls
+        self.state
+            .calls
             .borrow()
             .iter()
             .filter(|(called, _)| called == method)
@@ -168,6 +238,23 @@ impl Fixture {
             workspace.active_modal::<DataSourceModal>(cx)
         })
     }
+
+    fn open_add_dialog(&self, cx: &mut VisualTestContext) -> Entity<DataSourceModal> {
+        self.panel
+            .update_in(cx, |panel, window, cx| panel.add_data_source(window, cx));
+        cx.run_until_parked();
+        self.modal(cx).expect("the dialog should be open")
+    }
+
+    fn panel_has_loading_row(&self, cx: &mut VisualTestContext) -> bool {
+        self.panel.read_with(cx, |panel, _| {
+            panel
+                .tree()
+                .rows()
+                .iter()
+                .any(|row| matches!(row, Row::Loading { .. }))
+        })
+    }
 }
 
 async fn workspace_with_panel(cx: &mut TestAppContext) -> (Fixture, &mut VisualTestContext) {
@@ -188,17 +275,16 @@ async fn workspace_with_panel(cx: &mut TestAppContext) -> (Fixture, &mut VisualT
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
     let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
-    let calls: Calls = Default::default();
-    let connections = Rc::new(RefCell::new(vec![
+    let state = Rc::new(FakeState::default());
+    *state.connections.borrow_mut() = vec![
         connection("c1", "Local Postgres", "postgresql", true),
         connection("c2", "Reports", "sqlite", false),
-    ]));
+    ];
     let start_daemon: StartDaemon = {
-        let calls = calls.clone();
+        let state = state.clone();
         Rc::new(move |_, _| {
             let daemon: Rc<dyn Daemon> = Rc::new(FakeDaemon {
-                connections: connections.clone(),
-                calls: calls.clone(),
+                state: state.clone(),
             });
             async move { Ok(daemon) }.boxed_local()
         })
@@ -216,7 +302,7 @@ async fn workspace_with_panel(cx: &mut TestAppContext) -> (Fixture, &mut VisualT
         Fixture {
             workspace,
             panel,
-            calls,
+            state,
         },
         cx,
     )
@@ -248,7 +334,7 @@ async fn the_panel_lists_the_data_sources_in_the_left_dock(cx: &mut TestAppConte
     let (fixture, cx) = workspace_with_panel(cx).await;
     assert_eq!(DatabasePanel::persistent_name(), "Database Panel");
     assert!(
-        fixture.calls.borrow().is_empty(),
+        fixture.state.calls.borrow().is_empty(),
         "no daemon before the panel is shown"
     );
 
@@ -533,4 +619,333 @@ async fn cancelling_the_delete_prompt_keeps_the_data_source(cx: &mut TestAppCont
     cx.run_until_parked();
     assert!(fixture.calls_of("db/connections/delete").is_empty());
     assert_eq!(fixture.source_names(cx), ["Local Postgres", "Reports"]);
+}
+
+fn load_default_keymap(cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        // Other crates' actions are not linked into this test binary, so their bindings fail to
+        // load; `menu::Confirm`/`menu::Cancel` and the editor's are what matter here.
+        cx.bind_keys(
+            KeymapFile::load_asset_allow_partial_failure(DEFAULT_KEYMAP_PATH, cx)
+                .expect("the default keymap should load"),
+        );
+    });
+}
+
+#[gpui::test]
+async fn expanding_shows_loading_until_the_reply_arrives(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture.state.hold("db/introspect");
+    fixture
+        .panel
+        .update(cx, |panel, cx| panel.toggle(RowKey::data_source("c1"), cx));
+    cx.run_until_parked();
+    assert!(fixture.panel_has_loading_row(cx));
+    assert_eq!(
+        rendered_rows(&fixture.panel, cx),
+        3,
+        "source, loading, source"
+    );
+
+    fixture.state.release("db/introspect");
+    cx.run_until_parked();
+    assert!(!fixture.panel_has_loading_row(cx));
+    assert_eq!(
+        rendered_rows(&fixture.panel, cx),
+        3,
+        "source, public, source"
+    );
+}
+
+#[gpui::test]
+async fn a_reply_from_before_a_refresh_does_not_fill_the_tree(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture.state.hold("db/introspect");
+    fixture
+        .panel
+        .update(cx, |panel, cx| panel.toggle(RowKey::data_source("c1"), cx));
+    cx.run_until_parked();
+    select_source(&fixture, "c1", cx);
+    fixture.panel.update(cx, |panel, cx| panel.refresh(cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.state.held_count("db/introspect"), 2);
+
+    fixture.state.release("db/introspect");
+    cx.run_until_parked();
+    assert!(
+        fixture.panel_has_loading_row(cx),
+        "the first reply belongs to the request before the refresh"
+    );
+    fixture.state.release("db/introspect");
+    cx.run_until_parked();
+    assert!(!fixture.panel_has_loading_row(cx));
+}
+
+#[gpui::test]
+async fn refresh_without_a_selection_relists_every_open_data_source(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture.panel.update(cx, |panel, cx| {
+        panel.toggle(RowKey::data_source("c1"), cx);
+        panel.toggle(RowKey::data_source("c2"), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(fixture.calls_of("db/introspect").len(), 2);
+    fixture.panel.update(cx, |panel, cx| {
+        panel.select(None, cx);
+        panel.refresh(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(fixture.calls_of("db/introspect").len(), 4);
+}
+
+#[gpui::test]
+async fn a_save_warning_is_shown_as_a_toast(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    let modal = fixture.open_add_dialog(cx);
+    let name = modal.read_with(cx, |modal, _| modal.name_field().clone());
+    set_field(&name, "Billing", cx);
+    modal.update(cx, |modal, cx| modal.save(cx));
+    cx.run_until_parked();
+
+    assert_eq!(fixture.calls_of("db/connections/save").len(), 1);
+    fixture.workspace.read_with(cx, |workspace, _| {
+        assert!(
+            workspace
+                .notification_ids()
+                .contains(&NotificationId::unique::<WarningNotification>()),
+            "the daemon's warning should be shown"
+        );
+    });
+}
+
+#[gpui::test]
+async fn a_failed_save_keeps_the_dialog_open_with_the_error(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture
+        .state
+        .fail("db/connections/save", "could not write .brewery/db.json");
+    let modal = fixture.open_add_dialog(cx);
+    let name = modal.read_with(cx, |modal, _| modal.name_field().clone());
+    set_field(&name, "Billing", cx);
+    modal.update(cx, |modal, cx| modal.save(cx));
+    cx.run_until_parked();
+
+    assert!(fixture.modal(cx).is_some(), "the dialog stays open");
+    modal.read_with(cx, |modal, _| {
+        assert_eq!(
+            modal.error().map(|error| error.as_ref()),
+            Some("could not write .brewery/db.json")
+        );
+    });
+    assert_eq!(
+        fixture.calls_of("db/connections/list").len(),
+        1,
+        "nothing to relist"
+    );
+}
+
+#[gpui::test]
+async fn test_connection_shows_testing_then_failures(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    let modal = fixture.open_add_dialog(cx);
+    let name = modal.read_with(cx, |modal, _| modal.name_field().clone());
+    set_field(&name, "Billing", cx);
+
+    // The daemon answers, but the connection did not work.
+    *fixture.state.test_reply.borrow_mut() = Some(json!({
+        "ok": false,
+        "message": "password authentication failed for user \"app\""
+    }));
+    fixture.state.hold("db/connections/test");
+    modal.update(cx, |modal, cx| modal.test_connection(cx));
+    cx.run_until_parked();
+    modal.read_with(cx, |modal, _| {
+        assert_eq!(modal.test_state(), &TestState::Testing)
+    });
+    fixture.state.release("db/connections/test");
+    cx.run_until_parked();
+    modal.read_with(cx, |modal, _| {
+        assert_eq!(
+            modal.test_state(),
+            &TestState::Failed("password authentication failed for user \"app\"".into())
+        )
+    });
+
+    // The daemon itself reports an error.
+    fixture.state.held_methods.borrow_mut().clear();
+    fixture
+        .state
+        .fail("db/connections/test", "Connection refused: localhost:5432");
+    modal.update(cx, |modal, cx| modal.test_connection(cx));
+    cx.run_until_parked();
+    modal.read_with(cx, |modal, _| {
+        assert_eq!(
+            modal.test_state(),
+            &TestState::Failed("Connection refused: localhost:5432".into())
+        )
+    });
+}
+
+#[gpui::test]
+async fn editing_a_field_drops_the_test_result_and_a_pending_test(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    let modal = fixture.open_add_dialog(cx);
+    let (name, url) = modal.read_with(cx, |modal, _| {
+        (modal.name_field().clone(), modal.url_field().clone())
+    });
+    set_field(&name, "Billing", cx);
+    cx.run_until_parked();
+
+    modal.update(cx, |modal, cx| modal.test_connection(cx));
+    cx.run_until_parked();
+    assert!(matches!(
+        modal.read_with(cx, |modal, _| modal.test_state().clone()),
+        TestState::Succeeded(_)
+    ));
+    set_field(&url, "jdbc:postgresql://elsewhere/app", cx);
+    cx.run_until_parked();
+    modal.read_with(cx, |modal, _| {
+        assert_eq!(modal.test_state(), &TestState::Idle)
+    });
+
+    fixture.state.hold("db/connections/test");
+    modal.update(cx, |modal, cx| modal.test_connection(cx));
+    cx.run_until_parked();
+    set_field(&url, "jdbc:postgresql://third/app", cx);
+    cx.run_until_parked();
+    fixture.state.release("db/connections/test");
+    cx.run_until_parked();
+    modal.read_with(cx, |modal, _| {
+        assert_eq!(
+            modal.test_state(),
+            &TestState::Idle,
+            "a result for the old URL is not shown"
+        )
+    });
+}
+
+#[gpui::test]
+async fn add_driver_registers_the_jars_and_selects_the_driver(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    let modal = fixture.open_add_dialog(cx);
+    let [name, class, jars] = modal.update(cx, |modal, cx| {
+        modal.set_show_add_driver(true, cx);
+        modal.new_driver_fields().map(Clone::clone)
+    });
+
+    // Missing fields are refused before anything is sent.
+    modal.update_in(cx, |modal, window, cx| modal.add_driver(window, cx));
+    modal.read_with(cx, |modal, _| {
+        assert_eq!(
+            modal.add_driver_error().map(|e| e.as_ref()),
+            Some("Enter a driver name")
+        )
+    });
+
+    set_field(&name, "Oracle XE", cx);
+    set_field(&class, "oracle.jdbc.OracleDriver", cx);
+    set_field(&jars, "/drivers/ojdbc11.jar, /drivers/orai18n.jar", cx);
+
+    fixture.state.fail(
+        "db/drivers/addJar",
+        "class oracle.jdbc.OracleDriver not found",
+    );
+    modal.update_in(cx, |modal, window, cx| modal.add_driver(window, cx));
+    cx.run_until_parked();
+    modal.read_with(cx, |modal, _| {
+        assert_eq!(
+            modal.add_driver_error().map(|e| e.as_ref()),
+            Some("class oracle.jdbc.OracleDriver not found")
+        );
+        assert_eq!(modal.driver_id(), "postgresql");
+    });
+
+    fixture.state.failing.borrow_mut().clear();
+    modal.update_in(cx, |modal, window, cx| modal.add_driver(window, cx));
+    cx.run_until_parked();
+    let expected = json!({
+        "driverId": "oracle-xe",
+        "name": "Oracle XE",
+        "className": "oracle.jdbc.OracleDriver",
+        "jarPaths": ["/drivers/ojdbc11.jar", "/drivers/orai18n.jar"]
+    });
+    assert_eq!(
+        fixture.calls_of("db/drivers/addJar"),
+        [expected.clone(), expected]
+    );
+    modal.read_with(cx, |modal, cx| {
+        assert_eq!(modal.driver_id(), "oracle-xe");
+        assert_eq!(modal.add_driver_error(), None);
+        assert_eq!(
+            modal.url_field().read(cx).text(cx),
+            "",
+            "the PostgreSQL template does not fit the new driver"
+        );
+    });
+}
+
+#[gpui::test]
+async fn escape_closes_the_dialog_and_enter_saves(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    load_default_keymap(cx);
+
+    fixture.open_add_dialog(cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(fixture.modal(cx).is_none(), "Esc closes the dialog");
+
+    let modal = fixture.open_add_dialog(cx);
+    // The dialog opens with the focus in Name, so the name can be typed straight away.
+    cx.simulate_input("Billing");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let saves = fixture.calls_of("db/connections/save");
+    assert_eq!(saves.len(), 1, "Enter saves");
+    assert_eq!(saves[0]["connection"]["name"], "Billing");
+    assert!(fixture.modal(cx).is_none());
+    drop(modal);
+
+    // In the driver section Enter adds the driver instead.
+    let modal = fixture.open_add_dialog(cx);
+    let [name, class, jars] = modal.update(cx, |modal, cx| {
+        modal.set_show_add_driver(true, cx);
+        modal.new_driver_fields().map(Clone::clone)
+    });
+    set_field(&class, "oracle.jdbc.OracleDriver", cx);
+    set_field(&jars, "/drivers/ojdbc11.jar", cx);
+    cx.update(|window, cx| window.focus(&name.focus_handle(cx), cx));
+    cx.simulate_input("Oracle");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(fixture.calls_of("db/drivers/addJar").len(), 1);
+    assert_eq!(
+        fixture.calls_of("db/connections/save").len(),
+        1,
+        "no second save"
+    );
+    assert!(fixture.modal(cx).is_some());
+}
+
+#[gpui::test]
+async fn a_failed_delete_is_reported_in_the_panel(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture
+        .state
+        .fail("db/connections/delete", "unknown connection c2");
+    select_source(&fixture, "c2", cx);
+    fixture
+        .panel
+        .update_in(cx, |panel, window, cx| panel.delete_selected(window, cx));
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Delete");
+    cx.run_until_parked();
+
+    assert_eq!(fixture.calls_of("db/connections/delete").len(), 1);
+    assert_eq!(fixture.source_names(cx), ["Local Postgres", "Reports"]);
+    fixture.panel.read_with(cx, |panel, _| {
+        assert_eq!(
+            panel.notice().map(|notice| notice.as_ref()),
+            Some("Could not delete \"Reports\": unknown connection c2")
+        );
+    });
 }
