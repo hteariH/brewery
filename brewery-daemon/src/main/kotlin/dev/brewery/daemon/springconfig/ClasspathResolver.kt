@@ -153,7 +153,11 @@ class ProcessCommandRunner(
             if (resolution.isCancelled) throw InterruptedException("cancelled")
             return CommandResult(process.exitValue(), tail(log))
         } finally {
-            Files.deleteIfExists(log)
+            // A sharing violation on Windows must not replace the original exception.
+            try {
+                Files.deleteIfExists(log)
+            } catch (_: Exception) {
+            }
         }
     }
 

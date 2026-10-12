@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -80,31 +80,50 @@ fn discover(
     Ok(server_binary(java, find_jar()?))
 }
 
-#[derive(Default)]
-struct Discovery {
-    /// Only successes are kept; a miss is looked up again after the retry window.
-    found: Option<LanguageServerBinary>,
-    last_miss: Option<Instant>,
-}
+/// Only successes are kept; a miss is looked up again after the retry window.
+type Found = Option<LanguageServerBinary>;
 
 /// Uses the locally found JDK and daemon jar; nothing is ever downloaded.
 pub struct SpringConfigLspAdapter {
     discover: Discover,
     retry_window: Duration,
     /// Held across a lookup so concurrent worktrees share one attempt (and one warning).
-    discovery: Mutex<Discovery>,
-    /// Mirrors "the last attempt missed", for the synchronous `is_opt_in_for`.
-    missed: AtomicBool,
+    discovery: Mutex<Found>,
+    /// When the last attempt missed, for the synchronous `is_opt_in_for`.
+    last_miss: StdMutex<Option<Instant>>,
+    now: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 impl SpringConfigLspAdapter {
     fn new(discover: Discover, retry_window: Duration) -> Self {
+        Self::with_clock(discover, retry_window, Arc::new(Instant::now))
+    }
+
+    /// The clock is a seam so tests can move past the retry window.
+    fn with_clock(
+        discover: Discover,
+        retry_window: Duration,
+        now: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Self {
         Self {
             discover,
             retry_window,
-            discovery: Mutex::new(Discovery::default()),
-            missed: AtomicBool::new(false),
+            discovery: Mutex::new(None),
+            last_miss: StdMutex::new(None),
+            now,
         }
+    }
+
+    /// The last miss, if it is still inside the retry window.
+    fn recent_miss(&self) -> bool {
+        let last_miss = *self.last_miss.lock().unwrap_or_else(|e| e.into_inner());
+        last_miss.is_some_and(|missed_at| {
+            (self.now)().saturating_duration_since(missed_at) < self.retry_window
+        })
+    }
+
+    fn set_miss(&self, miss: Option<Instant>) {
+        *self.last_miss.lock().unwrap_or_else(|e| e.into_inner()) = miss;
     }
 
     /// Discovery runs when a server is about to start, with the worktree's shell
@@ -116,29 +135,24 @@ impl SpringConfigLspAdapter {
         executor: &BackgroundExecutor,
     ) -> Result<LanguageServerBinary> {
         let mut discovery = self.discovery.lock().await;
-        if let Some(binary) = &discovery.found {
+        if let Some(binary) = &*discovery {
             return Ok(binary.clone());
         }
-        if discovery
-            .last_miss
-            .is_some_and(|missed_at| missed_at.elapsed() < self.retry_window)
-        {
+        if self.recent_miss() {
             return Err(Self::not_found());
         }
         // Discovery may run `java -version`, so it stays off the main thread.
         let discover = self.discover.clone();
         match executor.spawn(async move { discover(&env) }).await {
             Ok(binary) => {
-                discovery.found = Some(binary.clone());
-                discovery.last_miss = None;
-                self.missed.store(false, Ordering::Relaxed);
+                *discovery = Some(binary.clone());
+                self.set_miss(None);
                 Ok(binary)
             }
             Err(error) => {
                 // One warning per miss window: attempts are rate limited above.
                 log::warn!("Spring configuration completion is off: {error:#}");
-                discovery.last_miss = Some(Instant::now());
-                self.missed.store(true, Ordering::Relaxed);
+                self.set_miss(Some((self.now)()));
                 Err(Self::not_found())
             }
         }
@@ -185,12 +199,13 @@ impl LspAdapter for SpringConfigLspAdapter {
         LanguageServerName::new_static(SERVER_NAME)
     }
 
-    /// While the last discovery missed the server is opt-in, so the default server list
-    /// skips it instead of failing (and flagging an error) for every buffer and
+    /// For the retry window after a miss the server is opt-in, so the default server
+    /// list skips it instead of failing (and flagging an error) for every buffer and
     /// worktree. Not yet tried counts as available, so buffers restored at startup get
-    /// the server; an explicit start still reaches `binary` and retries.
+    /// the server; once the window passes it is listed again, so the next server-tree
+    /// evaluation (another YAML/Properties buffer) retries discovery.
     fn is_opt_in_for(&self, _: &LanguageName) -> bool {
-        self.missed.load(Ordering::Relaxed)
+        self.recent_miss()
     }
 }
 
@@ -199,7 +214,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use anyhow::anyhow;
     use gpui::TestAppContext;
@@ -359,7 +374,6 @@ mod tests {
         let adapter = SpringConfigLspAdapter::new(discover, Duration::ZERO);
         let executor = cx.executor().clone();
         assert!(adapter.binary(HashMap::new(), &executor).await.is_err());
-        assert!(adapter.is_opt_in_for(&yaml()));
         assert_eq!(
             adapter
                 .binary(HashMap::new(), &executor)
@@ -369,6 +383,27 @@ mod tests {
                 .map(command),
             fake_command()
         );
+        assert!(!adapter.is_opt_in_for(&yaml()));
+        assert!(adapter.binary(HashMap::new(), &executor).await.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[gpui::test]
+    async fn the_server_is_listed_again_once_the_retry_window_passes(cx: &mut TestAppContext) {
+        let (discover, attempts) = flaky(1);
+        let start = Instant::now();
+        let offset_ms = Arc::new(AtomicU64::new(0));
+        let clock = {
+            let offset_ms = offset_ms.clone();
+            Arc::new(move || start + Duration::from_millis(offset_ms.load(Ordering::SeqCst)))
+        };
+        let adapter = SpringConfigLspAdapter::with_clock(discover, RETRY_WINDOW, clock);
+        let executor = cx.executor().clone();
+        assert!(adapter.binary(HashMap::new(), &executor).await.is_err());
+        assert!(adapter.is_opt_in_for(&yaml()));
+        offset_ms.store(29_000, Ordering::SeqCst);
+        assert!(adapter.is_opt_in_for(&yaml()));
+        offset_ms.store(31_000, Ordering::SeqCst);
         assert!(!adapter.is_opt_in_for(&yaml()));
         assert!(adapter.binary(HashMap::new(), &executor).await.is_ok());
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
