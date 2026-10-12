@@ -12,9 +12,11 @@ import org.eclipse.lsp4j.DiagnosticTag
 import org.eclipse.lsp4j.DidChangeConfigurationParams
 import org.eclipse.lsp4j.DidChangeTextDocumentParams
 import org.eclipse.lsp4j.DidChangeWatchedFilesParams
+import org.eclipse.lsp4j.DidChangeWatchedFilesRegistrationOptions
 import org.eclipse.lsp4j.DidCloseTextDocumentParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
 import org.eclipse.lsp4j.DidSaveTextDocumentParams
+import org.eclipse.lsp4j.FileSystemWatcher
 import org.eclipse.lsp4j.Hover
 import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.InitializeParams
@@ -22,12 +24,18 @@ import org.eclipse.lsp4j.InitializeResult
 import org.eclipse.lsp4j.InitializedParams
 import org.eclipse.lsp4j.MarkupContent
 import org.eclipse.lsp4j.MarkupKind
+import org.eclipse.lsp4j.MessageParams
+import org.eclipse.lsp4j.MessageType
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.PublishDiagnosticsParams
 import org.eclipse.lsp4j.Range
+import org.eclipse.lsp4j.Registration
+import org.eclipse.lsp4j.RegistrationParams
+import org.eclipse.lsp4j.SaveOptions
 import org.eclipse.lsp4j.ServerCapabilities
 import org.eclipse.lsp4j.ServerInfo
 import org.eclipse.lsp4j.TextDocumentSyncKind
+import org.eclipse.lsp4j.TextDocumentSyncOptions
 import org.eclipse.lsp4j.TextEdit
 import org.eclipse.lsp4j.jsonrpc.messages.Either
 import org.eclipse.lsp4j.services.LanguageClient
@@ -41,8 +49,11 @@ import java.nio.file.Paths
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 const val SERVER_NAME = "brewery-spring-config"
 
@@ -56,24 +67,54 @@ private fun fileKind(uri: String): FileKind? {
     return if (match.groupValues[3] == "properties") FileKind.PROPERTIES else FileKind.YAML
 }
 
+// Build inputs whose change can change the dependency jars.
+private val BUILD_FILE = Regex("""^(build|settings)\.gradle(\.kts)?$|^pom\.xml$""")
+private val BUILD_FILE_GLOBS = listOf(
+    "**/build.gradle", "**/build.gradle.kts", "**/settings.gradle", "**/settings.gradle.kts", "**/pom.xml",
+    "**/gradle/libs.versions.toml",
+)
+
+private fun isBuildFile(uri: String): Boolean {
+    val name = uri.substringAfterLast('/')
+    return BUILD_FILE.matches(name) || name == "libs.versions.toml" && uri.substringBeforeLast('/').endsWith("/gradle")
+}
+
 /**
- * LSP server for Spring Boot `application*.properties|yml|yaml` files. Metadata is read from the project's
- * dependency jars in the background after `initialized`; until it is there (or when the project has none)
- * the server answers with nothing, so it never produces misleading "unknown property" warnings.
+ * LSP server for Spring Boot `application*.properties|yml|yaml` files. Metadata comes from the project's
+ * dependency jars and its own metadata files; resolving them runs a build tool, so it starts only when the first
+ * Spring configuration file is opened and runs again (debounced) when a build file changes. Until metadata is
+ * there (or when the project has none) the server answers with nothing, so it never produces misleading
+ * "unknown property" warnings.
  */
 class SpringConfigServer(
-    private val loadMetadata: (Path) -> SpringMetadata = { root -> SpringMetadata.fromClasspath(resolveClasspath(root)) },
+    private val loadMetadata: (Path, Resolution) -> SpringMetadata = { root, resolution ->
+        SpringMetadata.fromClasspath(resolveClasspath(root, resolution))
+    },
     private val debounceMs: Long = 300,
+    private val reloadDebounceMs: Long = 1000,
     private val onExit: () -> Unit = {},
 ) : LanguageServer, LanguageClientAware {
     private var client: LanguageClient? = null
     private var root: Path? = null
+    private var watchBuildFiles = false
 
     @Volatile
     private var metadata: SpringMetadata? = null
     private val documents = ConcurrentHashMap<String, String>()
+
+    // Documents that were sent diagnostics, so they can be cleared when metadata goes away or they close.
+    private val reported = ConcurrentHashMap.newKeySet<String>()
     private val pending = ConcurrentHashMap<String, ScheduledFuture<*>>()
-    private val scheduler = Executors.newScheduledThreadPool(2) { r -> Thread(r, "spring-config-lsp").apply { isDaemon = true } }
+    private val loadStarted = AtomicBoolean(false)
+    private val pendingReload = AtomicReference<ScheduledFuture<*>?>()
+
+    // Resolution can take minutes, so it has its own thread; diagnostics are computed and sent on a single other
+    // thread, which keeps them in order and lets them flow while the classpath is being resolved.
+    private val loader = Executors.newSingleThreadExecutor { r -> Thread(r, "spring-config-classpath").apply { isDaemon = true } }
+    private val publisher = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "spring-config-diagnostics").apply { isDaemon = true }
+    }
+    private val resolution = Resolution(warn = ::logWarning)
 
     override fun connect(client: LanguageClient) {
         this.client = client
@@ -81,8 +122,15 @@ class SpringConfigServer(
 
     override fun initialize(params: InitializeParams): CompletableFuture<InitializeResult> {
         root = rootOf(params)
+        watchBuildFiles = params.capabilities?.workspace?.didChangeWatchedFiles?.dynamicRegistration == true
         val capabilities = ServerCapabilities().apply {
-            setTextDocumentSync(TextDocumentSyncKind.Full)
+            setTextDocumentSync(
+                TextDocumentSyncOptions().apply {
+                    openClose = true
+                    change = TextDocumentSyncKind.Full
+                    setSave(SaveOptions(false))
+                },
+            )
             completionProvider = CompletionOptions(false, listOf(".", ":", "="))
             setHoverProvider(true)
         }
@@ -100,19 +148,20 @@ class SpringConfigServer(
     }
 
     override fun initialized(params: InitializedParams?) {
-        val projectRoot = root
-        scheduler.execute {
-            metadata = if (projectRoot == null) SpringMetadata.EMPTY else try {
-                loadMetadata(projectRoot)
-            } catch (_: Throwable) {
-                SpringMetadata.EMPTY
-            }
-            documents.keys.forEach(::publish)
-        }
+        if (!watchBuildFiles) return
+        val watchers = BUILD_FILE_GLOBS.map { FileSystemWatcher(Either.forLeft(it)) }
+        val registration = Registration(
+            "brewery-spring-config-build-files", "workspace/didChangeWatchedFiles",
+            DidChangeWatchedFilesRegistrationOptions(watchers),
+        )
+        client?.registerCapability(RegistrationParams(listOf(registration)))
     }
 
     override fun shutdown(): CompletableFuture<Any> {
-        scheduler.shutdownNow()
+        resolution.cancel()
+        pendingReload.getAndSet(null)?.cancel(false)
+        loader.shutdownNow()
+        publisher.shutdownNow()
         return CompletableFuture.completedFuture(null)
     }
 
@@ -122,19 +171,81 @@ class SpringConfigServer(
 
     override fun getWorkspaceService(): WorkspaceService = object : WorkspaceService {
         override fun didChangeConfiguration(params: DidChangeConfigurationParams?) {}
-        override fun didChangeWatchedFiles(params: DidChangeWatchedFilesParams?) {}
+        override fun didChangeWatchedFiles(params: DidChangeWatchedFilesParams) {
+            if (params.changes.orEmpty().any { isBuildFile(it.uri) }) scheduleReload()
+        }
+    }
+
+    private fun logWarning(message: String) {
+        client?.logMessage(MessageParams(MessageType.Warning, message))
+    }
+
+    /** Starts the first resolution; later ones come only from build file changes. */
+    private fun ensureLoading() {
+        if (loadStarted.compareAndSet(false, true)) submitLoad()
+    }
+
+    private fun scheduleReload() {
+        // Nothing has asked for metadata yet, so the first Spring file will resolve the current build anyway.
+        if (!loadStarted.get() || publisher.isShutdown) return
+        val next = try {
+            publisher.schedule({ submitLoad() }, reloadDebounceMs, TimeUnit.MILLISECONDS)
+        } catch (_: RejectedExecutionException) {
+            return
+        }
+        pendingReload.getAndSet(next)?.cancel(false)
+    }
+
+    private fun submitLoad() {
+        val projectRoot = root
+        try {
+            loader.execute {
+                val loaded = if (projectRoot == null) SpringMetadata.EMPTY else try {
+                    loadMetadata(projectRoot, resolution)
+                } catch (e: Throwable) {
+                    if (!resolution.isCancelled) {
+                        logWarning("Spring configuration: could not read configuration metadata: ${e.message ?: e}")
+                    }
+                    SpringMetadata.EMPTY
+                }
+                if (resolution.isCancelled) return@execute
+                metadata = loaded
+                runOnPublisher { documents.keys.forEach(::publish) }
+            }
+        } catch (_: RejectedExecutionException) {
+            // Shut down meanwhile.
+        }
+    }
+
+    private fun runOnPublisher(action: () -> Unit) {
+        try {
+            publisher.execute(action)
+        } catch (_: RejectedExecutionException) {
+            // Shut down meanwhile.
+        }
     }
 
     private fun schedulePublish(uri: String) {
         pending.remove(uri)?.cancel(false)
-        if (scheduler.isShutdown) return
-        pending[uri] = scheduler.schedule({ publish(uri) }, debounceMs, TimeUnit.MILLISECONDS)
+        if (publisher.isShutdown) return
+        try {
+            pending[uri] = publisher.schedule({ publish(uri) }, debounceMs, TimeUnit.MILLISECONDS)
+        } catch (_: RejectedExecutionException) {
+            // Shut down meanwhile.
+        }
     }
 
+    /** Runs on the publisher thread only. */
     private fun publish(uri: String) {
-        val meta = metadata?.takeUnless { it.isEmpty } ?: return
+        val meta = metadata ?: return
         val text = documents[uri] ?: return
         val kind = fileKind(uri) ?: return
+        if (meta.isEmpty) {
+            // Metadata went away (a build file broke the resolution): clear what was reported before.
+            if (reported.remove(uri)) client?.publishDiagnostics(PublishDiagnosticsParams(uri, emptyList()))
+            return
+        }
+        reported.add(uri)
         client?.publishDiagnostics(PublishDiagnosticsParams(uri, diagnose(text, kind, meta)))
     }
 
@@ -142,6 +253,7 @@ class SpringConfigServer(
         override fun didOpen(params: DidOpenTextDocumentParams) {
             val uri = params.textDocument.uri
             documents[uri] = params.textDocument.text
+            if (fileKind(uri) != null) ensureLoading()
             schedulePublish(uri)
         }
 
@@ -156,12 +268,16 @@ class SpringConfigServer(
         override fun didClose(params: DidCloseTextDocumentParams) {
             val uri = params.textDocument.uri
             pending.remove(uri)?.cancel(false)
-            val wasReported = metadata?.isEmpty == false && fileKind(uri) != null
             documents.remove(uri)
-            if (wasReported) client?.publishDiagnostics(PublishDiagnosticsParams(uri, emptyList()))
+            runOnPublisher {
+                if (reported.remove(uri)) client?.publishDiagnostics(PublishDiagnosticsParams(uri, emptyList()))
+            }
         }
 
-        override fun didSave(params: DidSaveTextDocumentParams?) {}
+        override fun didSave(params: DidSaveTextDocumentParams) {
+            // Clients without file watching may still route saves of build files here.
+            if (isBuildFile(params.textDocument.uri)) scheduleReload()
+        }
 
         override fun completion(params: CompletionParams): CompletableFuture<Either<List<CompletionItem>, CompletionList>> {
             val items = run {

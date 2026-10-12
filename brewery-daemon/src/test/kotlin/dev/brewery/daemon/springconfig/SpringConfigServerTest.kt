@@ -5,8 +5,17 @@ import org.eclipse.lsp4j.CompletionItem
 import org.eclipse.lsp4j.CompletionParams
 import org.eclipse.lsp4j.Diagnostic
 import org.eclipse.lsp4j.DiagnosticSeverity
+import com.google.gson.JsonObject
 import org.eclipse.lsp4j.DidChangeTextDocumentParams
+import org.eclipse.lsp4j.DidChangeWatchedFilesCapabilities
+import org.eclipse.lsp4j.DidChangeWatchedFilesParams
 import org.eclipse.lsp4j.DidOpenTextDocumentParams
+import org.eclipse.lsp4j.DidSaveTextDocumentParams
+import org.eclipse.lsp4j.FileChangeType
+import org.eclipse.lsp4j.FileEvent
+import org.eclipse.lsp4j.MessageType
+import org.eclipse.lsp4j.RegistrationParams
+import org.eclipse.lsp4j.WorkspaceClientCapabilities
 import org.eclipse.lsp4j.HoverParams
 import org.eclipse.lsp4j.InitializeParams
 import org.eclipse.lsp4j.InitializedParams
@@ -27,7 +36,9 @@ import java.io.File
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
@@ -39,12 +50,18 @@ import kotlin.test.assertTrue
 
 private class RecordingClient : LanguageClient {
     val diagnostics = LinkedBlockingQueue<PublishDiagnosticsParams>()
+    val logs = LinkedBlockingQueue<MessageParams>()
+    val registrations = LinkedBlockingQueue<RegistrationParams>()
     override fun publishDiagnostics(d: PublishDiagnosticsParams) { diagnostics.add(d) }
     override fun telemetryEvent(o: Any?) {}
     override fun showMessage(m: MessageParams?) {}
     override fun showMessageRequest(r: ShowMessageRequestParams?): CompletableFuture<MessageActionItem> =
         CompletableFuture.completedFuture(null)
-    override fun logMessage(m: MessageParams?) {}
+    override fun logMessage(m: MessageParams) { logs.add(m) }
+    override fun registerCapability(params: RegistrationParams): CompletableFuture<Void> {
+        registrations.add(params)
+        return CompletableFuture.completedFuture(null)
+    }
 }
 
 class SpringConfigServerTest {
@@ -53,11 +70,19 @@ class SpringConfigServerTest {
     private val client = RecordingClient()
     private val closers = ArrayList<() -> Unit>()
 
+    private val loads = AtomicInteger()
+
     private fun start(
         metadata: SpringMetadata = SpringMetadata.fromClasspath(listOf(jar)),
         gate: CompletableFuture<Unit>? = null,
+        capabilities: ClientCapabilities = ClientCapabilities(),
+        load: (Path, Resolution) -> SpringMetadata = { _, _ -> gate?.get(); metadata },
     ): LanguageServer {
-        val server = SpringConfigServer(loadMetadata = { gate?.get(); metadata }, debounceMs = 50)
+        val server = SpringConfigServer(
+            loadMetadata = { root, resolution -> loads.incrementAndGet(); load(root, resolution) },
+            debounceMs = 50,
+            reloadDebounceMs = 150,
+        )
         val c2s = PipedOutputStream()
         val s2c = PipedOutputStream()
         val serverIn = PipedInputStream(c2s)
@@ -71,7 +96,7 @@ class SpringConfigServerTest {
         val proxy = clientLauncher.remoteProxy
         val init = InitializeParams().apply {
             rootUri = root.toURI().toString()
-            capabilities = ClientCapabilities()
+            this.capabilities = capabilities
         }
         proxy.initialize(init).get(10, TimeUnit.SECONDS)
         proxy.initialized(InitializedParams())
@@ -114,12 +139,15 @@ class SpringConfigServerTest {
 
     @Test
     fun `initialize advertises the capabilities and server name`() {
-        val server = SpringConfigServer(loadMetadata = { SpringMetadata.EMPTY })
+        val server = SpringConfigServer(loadMetadata = { _, _ -> SpringMetadata.EMPTY })
         val result = server.initialize(InitializeParams()).get()
         assertEquals("brewery-spring-config", result.serverInfo.name)
         assertEquals(setOf(".", ":", "="), result.capabilities.completionProvider.triggerCharacters.toSet())
         assertTrue(result.capabilities.hoverProvider.left)
-        assertEquals(TextDocumentSyncKind.Full, result.capabilities.textDocumentSync.left)
+        val sync = result.capabilities.textDocumentSync.right
+        assertEquals(TextDocumentSyncKind.Full, sync.change)
+        assertTrue(sync.openClose)
+        assertNotNull(sync.save)
     }
 
     @Test
@@ -287,5 +315,89 @@ class SpringConfigServerTest {
 
         val props = open(server, "application.properties", "spring.jpa.show-sql=\n")
         assertEquals("true", complete(server, props, 0, 20).edit("true").newText)
+    }
+
+    private fun awaitLoads(n: Int) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (loads.get() < n && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        assertEquals(n, loads.get())
+    }
+
+    private fun changed(server: LanguageServer, vararg names: String) =
+        server.workspaceService.didChangeWatchedFiles(
+            DidChangeWatchedFilesParams(names.map { FileEvent(uri(it), FileChangeType.Changed) }),
+        )
+
+    @Test
+    fun `the classpath is resolved on the first Spring config file, not on initialized`() {
+        val server = start()
+        Thread.sleep(300)
+        assertEquals(0, loads.get())
+        // Build changes before any Spring file is open do not start anything either.
+        changed(server, "build.gradle.kts")
+        open(server, "config.properties", "a=1\n")
+        Thread.sleep(400)
+        assertEquals(0, loads.get())
+        open(server, "application.yml", "server:\n  port: 1\n")
+        awaitLoads(1)
+        open(server, "application-dev.properties", "server.port=1\n")
+        Thread.sleep(300)
+        assertEquals(1, loads.get())
+    }
+
+    @Test
+    fun `build file changes re-resolve the classpath once per burst`() {
+        val bogus = makeJar(
+            root, "bogus.jar",
+            mapOf("META-INF/spring-configuration-metadata.json" to """{"properties":[{"name":"bogus.key","type":"java.lang.String"}]}"""),
+        )
+        val before = SpringMetadata.fromClasspath(listOf(jar))
+        val after = SpringMetadata.fromClasspath(listOf(jar, bogus))
+        val server = start(load = { _, _ -> if (loads.get() == 1) before else after })
+        val u = open(server, "application.properties", "bogus.key=1\n")
+        assertEquals(1, nextDiagnostics(u).size)
+        changed(server, "src/main/java/A.java")
+        changed(server, "build.gradle.kts", "settings.gradle")
+        changed(server, "gradle/libs.versions.toml")
+        // The first load may publish twice (open and load completion); wait for the reloaded result.
+        while (nextDiagnostics(u).isNotEmpty()) continue
+        awaitLoads(2)
+        Thread.sleep(400)
+        assertEquals(2, loads.get())
+
+        // A save of a build file the client routed to this server is the fallback when nothing is watched.
+        server.textDocumentService.didSave(DidSaveTextDocumentParams(TextDocumentIdentifier(uri("pom.xml"))))
+        awaitLoads(3)
+        server.textDocumentService.didSave(DidSaveTextDocumentParams(TextDocumentIdentifier(uri("application.yml"))))
+        Thread.sleep(400)
+        assertEquals(3, loads.get())
+    }
+
+    @Test
+    fun `build files are watched when the client supports dynamic registration`() {
+        val dynamic = ClientCapabilities().apply {
+            workspace = WorkspaceClientCapabilities().apply {
+                didChangeWatchedFiles = DidChangeWatchedFilesCapabilities(true)
+            }
+        }
+        start(capabilities = dynamic)
+        val registration = assertNotNull(client.registrations.poll(10, TimeUnit.SECONDS)).registrations.single()
+        assertEquals("workspace/didChangeWatchedFiles", registration.method)
+        val globs = (registration.registerOptions as JsonObject).getAsJsonArray("watchers")
+            .map { it.asJsonObject.get("globPattern").asString }
+        assertTrue("**/pom.xml" in globs && "**/build.gradle.kts" in globs && "**/gradle/libs.versions.toml" in globs, globs.toString())
+
+        start()
+        assertNull(client.registrations.poll(500, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `resolution problems are logged as warnings`() {
+        val server = start(load = { _, resolution -> resolution.warn("Maven exited with code 1"); error("boom") })
+        open(server, "application.properties", "a=1\n")
+        val messages = listOf(client.logs.poll(10, TimeUnit.SECONDS), client.logs.poll(10, TimeUnit.SECONDS))
+        assertTrue(messages.all { it?.type == MessageType.Warning }, messages.toString())
+        assertTrue(messages.any { it?.message == "Maven exited with code 1" }, messages.toString())
+        assertTrue(messages.any { it?.message?.contains("boom") == true }, messages.toString())
     }
 }

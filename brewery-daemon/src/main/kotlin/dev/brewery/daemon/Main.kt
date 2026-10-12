@@ -25,6 +25,8 @@ fun runSpringConfigLsp(input: InputStream, rpcOut: OutputStream, exit: (Int) -> 
     val launcher = LSPLauncher.createServerLauncher(server, input, rpcOut)
     server.connect(launcher.remoteProxy)
     launcher.startListening().get()
+    // The client may vanish without a `shutdown` request; a Maven child process would then outlive us.
+    server.shutdown()
     exit(0)
 }
 
