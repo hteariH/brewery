@@ -19,6 +19,12 @@ dependencies {
     implementation("org.gradle:gradle-tooling-api:9.8.1")
     implementation("org.apache.maven:maven-model:3.9.16")
     implementation("com.github.javaparser:javaparser-core:3.28.2")
+    // Database drivers (bundled) and the OS secret store. MariaDB Connector/J is LGPL-2.1 and stays an
+    // unmodified, separate jar inside the fat jar; MySQL Connector/J is GPL and is deliberately not used.
+    implementation("org.postgresql:postgresql:42.7.14")
+    implementation("org.mariadb.jdbc:mariadb-java-client:3.5.10")
+    implementation("org.xerial:sqlite-jdbc:3.53.4.0")
+    implementation("com.github.javakeyring:java-keyring:1.0.4")
     runtimeOnly("org.slf4j:slf4j-nop:2.0.17")
     testImplementation(kotlin("test"))
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
@@ -113,5 +119,7 @@ tasks.shadowJar {
     archiveBaseName.set("brewery-daemon")
     archiveClassifier.set("all")
     archiveVersion.set("")
+    // INCLUDE lets the service-file merger see every copy (java.sql.Driver lists one driver per jar).
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
     mergeServiceFiles()
 }

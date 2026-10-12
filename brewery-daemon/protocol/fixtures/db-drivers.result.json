@@ -1,0 +1,6 @@
+[
+  { "id": "postgresql", "name": "PostgreSQL", "bundled": true, "jarPaths": [] },
+  { "id": "mysql", "name": "MySQL", "bundled": true, "jarPaths": [] },
+  { "id": "mariadb", "name": "MariaDB", "bundled": true, "jarPaths": [] },
+  { "id": "sqlite", "name": "SQLite", "bundled": true, "jarPaths": [] }
+]

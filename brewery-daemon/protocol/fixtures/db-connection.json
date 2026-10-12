@@ -1,0 +1,9 @@
+{
+  "id": "c1",
+  "name": "Local Postgres",
+  "driverId": "postgresql",
+  "url": "jdbc:postgresql://localhost:5432/app",
+  "user": "app",
+  "hasPassword": true,
+  "options": { "ssl": "true" }
+}

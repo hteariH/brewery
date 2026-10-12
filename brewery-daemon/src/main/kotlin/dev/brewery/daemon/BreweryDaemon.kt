@@ -1,5 +1,18 @@
 package dev.brewery.daemon
 
+import dev.brewery.daemon.db.ConnectionInfo
+import dev.brewery.daemon.db.DbConnectionsDeleteParams
+import dev.brewery.daemon.db.DbConnectionsListParams
+import dev.brewery.daemon.db.DbConnectionsSaveParams
+import dev.brewery.daemon.db.DbConnectionsTestParams
+import dev.brewery.daemon.db.DbDriversAddJarParams
+import dev.brewery.daemon.db.DbDriversParams
+import dev.brewery.daemon.db.DbException
+import dev.brewery.daemon.db.DbService
+import dev.brewery.daemon.db.DbTestResult
+import dev.brewery.daemon.db.DriverInfo
+import dev.brewery.daemon.db.KeyringSecretStore
+import dev.brewery.daemon.db.SecretStore
 import dev.brewery.daemon.project.GradleModelReader
 import dev.brewery.daemon.project.MavenModelReader
 import dev.brewery.daemon.project.detectBuildTool
@@ -11,6 +24,7 @@ import dev.brewery.daemon.spring.SpringModel
 import dev.brewery.daemon.spring.SpringScanner
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.ResponseError
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
 import java.io.IOException
 import java.nio.file.ClosedWatchServiceException
 import java.nio.file.FileVisitResult
@@ -37,6 +51,8 @@ class BreweryDaemon(
     private val debounceMillis: Long = DEFAULT_DEBOUNCE_MILLIS,
     // Injected so tests can pick the wrapper spelling without depending on the host OS.
     private val windows: Boolean = System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true),
+    // Opened lazily on first use, so a machine without a keyring costs nothing until a password is saved.
+    private val secretStore: SecretStore = KeyringSecretStore(),
     // Last so call sites can pass the reader as a trailing lambda.
     private val modelReader: ((Path) -> ProjectModel)? = null,
 ) : BreweryServer, AutoCloseable {
@@ -49,6 +65,7 @@ class BreweryDaemon(
     private var cachedSpring: CompletableFuture<SpringModel>? = null
     private var pendingSpringNotification: ScheduledFuture<*>? = null
     private val springScanner = SpringScanner()
+    private var db: DbService? = null
 
     // One import at a time: an invalidation during a running import just queues the next one behind it
     // instead of racing a parallel Gradle/Maven run against the same project.
@@ -56,6 +73,8 @@ class BreweryDaemon(
     // Scanning parses every source file, so it gets its own thread rather than delaying the next import.
     private val scanner = Executors.newSingleThreadExecutor(daemonThreads("brewery-spring-scan"))
     private val notifier = Executors.newSingleThreadScheduledExecutor(daemonThreads("brewery-notify"))
+    // Database calls block on keyrings, drivers and the network, so they must not run on the JSON-RPC reader thread.
+    private val dbExecutor = Executors.newCachedThreadPool(daemonThreads("brewery-db"))
 
     fun connect(client: BreweryClient) {
         this.client = client
@@ -79,7 +98,10 @@ class BreweryDaemon(
             pendingNotification = null
             pendingSpringNotification?.cancel(false)
             pendingSpringNotification = null
+            db?.close()
+            db = null
         }
+        dbExecutor.shutdownNow()
         notifier.shutdownNow()
         importer.shutdownNow()
         scanner.shutdownNow()
@@ -105,6 +127,8 @@ class BreweryDaemon(
             watcher?.close()
             watcher = newWatcher
             root = dir
+            db?.close()
+            db = null
             cached = null
             cachedSpring = null
             // A notification armed for the previous project would tell the client to refresh the wrong one.
@@ -139,6 +163,48 @@ class BreweryDaemon(
         val project = projectModel(ProjectModelParams())
         val spring = springModel(SpringModelParams())
         return project.thenCombine(spring) { p, s -> RunConfigurations.build(p, s, windows) }
+    }
+
+    override fun dbDrivers(params: DbDriversParams): CompletableFuture<List<DriverInfo>> = dbCall { it.drivers() }
+
+    override fun dbDriversAddJar(params: DbDriversAddJarParams): CompletableFuture<DriverInfo> =
+        dbCall { it.addJar(params.driverId, params.name, params.className, params.jarPaths) }
+
+    override fun dbConnectionsList(params: DbConnectionsListParams): CompletableFuture<List<ConnectionInfo>> =
+        dbCall { it.list() }
+
+    override fun dbConnectionsSave(params: DbConnectionsSaveParams): CompletableFuture<ConnectionInfo> =
+        dbCall { it.save(params.connection, params.password) }
+
+    override fun dbConnectionsDelete(params: DbConnectionsDeleteParams): CompletableFuture<Any?> =
+        dbCall { it.delete(params.id); null }
+
+    override fun dbConnectionsTest(params: DbConnectionsTestParams): CompletableFuture<DbTestResult> =
+        dbCall { it.test(params.connection, params.password) }
+
+    private fun <T> dbCall(block: (DbService) -> T): CompletableFuture<T> {
+        val service = synchronized(lock) {
+            val dir = root ?: return failed(ErrorCodes.NOT_OPENED, "No project is open")
+            db ?: DbService(dir, secretStore).also { db = it }
+        }
+        val future = CompletableFuture<T>()
+        try {
+            dbExecutor.execute {
+                try {
+                    future.complete(block(service))
+                } catch (e: DbException) {
+                    future.completeExceptionally(e.toResponseError())
+                } catch (e: Throwable) {
+                    // The message of an unexpected failure may carry connection details; keep only its type.
+                    future.completeExceptionally(
+                        ResponseErrorException(ResponseError(ResponseErrorCode.InternalError.value, "Database call failed: ${e.javaClass.simpleName}", null)),
+                    )
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            future.completeExceptionally(e)
+        }
+        return future
     }
 
     // Caller holds [lock]. A future that already failed may still be cached when its completion handler ran

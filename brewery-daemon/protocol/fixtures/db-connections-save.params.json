@@ -1,0 +1,12 @@
+{
+  "connection": {
+    "id": "",
+    "name": "Local Postgres",
+    "driverId": "postgresql",
+    "url": "jdbc:postgresql://localhost:5432/app",
+    "user": "app",
+    "hasPassword": false,
+    "options": {}
+  },
+  "password": null
+}

@@ -1,0 +1,122 @@
+package dev.brewery.daemon.db
+
+import java.nio.file.Path
+import java.sql.Connection
+import java.sql.SQLException
+import java.util.Properties
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+
+/** Connection management of one project: `db.json`, the OS secret store and the driver registry. */
+class DbService(root: Path, private val secrets: SecretStore) : AutoCloseable {
+    private val projectKey: String = try {
+        root.toRealPath().toString()
+    } catch (_: Exception) {
+        root.toAbsolutePath().normalize().toString()
+    }
+    private val store = ConnectionStore(root)
+    val registry = DriverRegistry(store)
+    private val testThreads = Executors.newCachedThreadPool { r -> Thread(r, "brewery-db-test").apply { isDaemon = true } }
+
+    private fun account(id: String) = "$projectKey#$id"
+
+    fun drivers(): List<DriverInfo> = registry.list()
+
+    fun addJar(driverId: String, name: String, className: String, jarPaths: List<String>): DriverInfo =
+        registry.addJar(driverId, name, className, jarPaths)
+
+    fun list(): List<ConnectionInfo> = store.connections().map { it.copy(hasPassword = secrets.get(account(it.id)) != null) }
+
+    fun save(connection: ConnectionInfo, password: String?): ConnectionInfo {
+        if (registry.list().none { it.id == connection.driverId }) {
+            throw DbException(DbErrorCodes.NOT_FOUND, "Unknown driver: ${connection.driverId}")
+        }
+        val saved = store.saveConnection(connection)
+        var warning: String? = null
+        try {
+            when {
+                password == null -> {}
+                password.isEmpty() -> secrets.remove(account(saved.id))
+                else -> secrets.set(account(saved.id), password)
+            }
+        } catch (e: SecretStoreUnavailable) {
+            warning = "Password was not stored: ${e.message}"
+        }
+        return saved.copy(hasPassword = secrets.get(account(saved.id)) != null, warning = warning)
+    }
+
+    fun delete(id: String) {
+        if (!store.deleteConnection(id)) throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
+        try {
+            secrets.remove(account(id))
+        } catch (_: SecretStoreUnavailable) {
+            // Nothing could have been stored there.
+        }
+    }
+
+    /** Never throws for connection problems: they come back as `ok = false` with the driver's message. */
+    fun test(connection: ConnectionInfo, password: String?): DbTestResult {
+        val effective = password?.takeIf { it.isNotEmpty() }
+            ?: connection.id.takeIf { it.isNotBlank() && password == null }?.let { secrets.get(account(it)) }
+        val task = testThreads.submit(Callable {
+            openConnection(connection.driverId, connection.url, connection.user, effective, connection.options).use { c ->
+                val meta = c.metaData
+                "${meta.databaseProductName} ${meta.databaseProductVersion}".trim()
+            }
+        })
+        return try {
+            val version = task.get(TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            DbTestResult(true, "Connected to $version", version)
+        } catch (_: TimeoutException) {
+            task.cancel(true)
+            DbTestResult(false, "Connection timed out after $TEST_TIMEOUT_SECONDS seconds", null)
+        } catch (e: ExecutionException) {
+            DbTestResult(false, describe(e.cause ?: e), null)
+        }
+    }
+
+    /** Opens a JDBC connection through the driver itself, not `DriverManager`. */
+    fun openConnection(
+        driverId: String,
+        url: String,
+        user: String?,
+        password: String?,
+        options: Map<String, String>,
+    ): Connection {
+        val driver = registry.driver(driverId)
+        val props = Properties()
+        (options ?: emptyMap()).forEach { (k, v) -> props.setProperty(k, v) }
+        if (!user.isNullOrEmpty()) props.setProperty("user", user)
+        if (!password.isNullOrEmpty()) props.setProperty("password", password)
+        // MariaDB Connector/J 3 only accepts the jdbc:mysql: scheme with an extra flag; users expect it to work.
+        val effectiveUrl = if (driverId == "mysql" && url.startsWith("jdbc:mysql:")) "jdbc:mariadb:" + url.removePrefix("jdbc:mysql:") else url
+        return driver.connect(effectiveUrl, props)
+            ?: throw SQLException("The ${driverId} driver does not accept this URL", "08001")
+    }
+
+    override fun close() {
+        testThreads.shutdownNow()
+        registry.close()
+    }
+
+    private fun describe(error: Throwable): String {
+        val text = error.message?.trim().takeUnless { it.isNullOrEmpty() } ?: error.javaClass.simpleName
+        val state = (error as? SQLException)?.sqlState
+        return (if (state != null) "$text (SQLState $state)" else text).take(MAX_MESSAGE)
+    }
+
+    private companion object {
+        const val TEST_TIMEOUT_SECONDS = 20L
+        const val MAX_MESSAGE = 2000
+    }
+}
+
+/** Maps a connection failure to the plan's domain codes: SQLState `28*` is an authentication failure. */
+fun connectionFailure(error: Throwable): DbException {
+    val state = (error as? SQLException)?.sqlState
+    val code = if (state != null && state.startsWith("28")) DbErrorCodes.AUTH_FAILED else DbErrorCodes.CONNECTION_FAILED
+    return DbException(code, error.message ?: error.javaClass.simpleName)
+}

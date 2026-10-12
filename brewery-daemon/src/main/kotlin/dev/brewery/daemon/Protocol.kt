@@ -6,6 +6,15 @@ import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonWriter
 import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
 import org.eclipse.lsp4j.jsonrpc.services.JsonRequest
+import dev.brewery.daemon.db.ConnectionInfo
+import dev.brewery.daemon.db.DbConnectionsDeleteParams
+import dev.brewery.daemon.db.DbConnectionsListParams
+import dev.brewery.daemon.db.DbConnectionsSaveParams
+import dev.brewery.daemon.db.DbConnectionsTestParams
+import dev.brewery.daemon.db.DbDriversAddJarParams
+import dev.brewery.daemon.db.DbDriversParams
+import dev.brewery.daemon.db.DbTestResult
+import dev.brewery.daemon.db.DriverInfo
 import dev.brewery.daemon.run.RunConfiguration
 import dev.brewery.daemon.run.RunConfigurationsParams
 import dev.brewery.daemon.spring.SpringModel
@@ -61,6 +70,12 @@ interface BreweryServer {
     @JsonRequest("project/model") fun projectModel(params: ProjectModelParams): CompletableFuture<ProjectModel>
     @JsonRequest("spring/model") fun springModel(params: SpringModelParams): CompletableFuture<SpringModel>
     @JsonRequest("run/configurations") fun runConfigurations(params: RunConfigurationsParams): CompletableFuture<List<RunConfiguration>>
+    @JsonRequest("db/drivers") fun dbDrivers(params: DbDriversParams): CompletableFuture<List<DriverInfo>>
+    @JsonRequest("db/drivers/addJar") fun dbDriversAddJar(params: DbDriversAddJarParams): CompletableFuture<DriverInfo>
+    @JsonRequest("db/connections/list") fun dbConnectionsList(params: DbConnectionsListParams): CompletableFuture<List<ConnectionInfo>>
+    @JsonRequest("db/connections/save") fun dbConnectionsSave(params: DbConnectionsSaveParams): CompletableFuture<ConnectionInfo>
+    @JsonRequest("db/connections/delete") fun dbConnectionsDelete(params: DbConnectionsDeleteParams): CompletableFuture<Any?>
+    @JsonRequest("db/connections/test") fun dbConnectionsTest(params: DbConnectionsTestParams): CompletableFuture<DbTestResult>
 }
 
 interface BreweryClient {
