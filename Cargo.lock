@@ -2447,6 +2447,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewery_db"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "brewery_daemon_client",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "menu",
+ "project",
+ "serde_json",
+ "theme",
+ "theme_settings",
+ "ui",
+ "ui_input",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "brewery_run_widget"
 version = "0.1.0"
 dependencies = [
@@ -22541,6 +22561,7 @@ dependencies = [
  "breadcrumbs",
  "brewery_build",
  "brewery_core",
+ "brewery_db",
  "brewery_search_everywhere",
  "brewery_services",
  "brewery_spring_config",

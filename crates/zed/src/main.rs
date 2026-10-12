@@ -687,6 +687,8 @@ fn main() {
         brewery_build::init(cx);
         // brewery: Services tool window actions
         brewery_services::init(cx);
+        // brewery: Database tool window actions
+        brewery_db::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: settings::CopilotSettings::get_global(cx)
                 .enterprise_uri
