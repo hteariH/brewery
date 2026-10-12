@@ -132,6 +132,36 @@ class DbProtocolTest {
     }
 
     @Test
+    fun `execute fetch cancel close over the wire`() {
+        open()
+        val file = Files.createTempFile("brewery", ".db")
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$file").use {
+            it.createStatement().use { st ->
+                st.executeUpdate("CREATE TABLE t (id INTEGER NOT NULL PRIMARY KEY, v TEXT)")
+                st.executeUpdate("INSERT INTO t VALUES (1, 'a'), (2, NULL), (3, 'c')")
+            }
+        }
+        val saved = await(server.dbConnectionsSave(DbConnectionsSaveParams(ConnectionInfo("", "L", "sqlite", "jdbc:sqlite:$file", null, false, emptyMap()), null)))
+        val r = await(server.dbExecute(DbExecuteParams(saved.id, "SELECT id, v FROM t ORDER BY id")))
+        assertEquals(listOf("id", "v"), r.columns.map { it.name })
+        assertEquals(null, r.updateCount)
+        val page = await(server.dbFetch(DbFetchParams(r.cursorId!!, 0, 2)))
+        assertEquals(listOf(listOf("1", "a"), listOf("2", null)), page.rows)
+        assertEquals(false, page.done)
+        assertEquals(-32602, errorCode(server.dbFetch(DbFetchParams(r.cursorId!!, 0, 2))))
+        assertEquals(true, await(server.dbFetch(DbFetchParams(r.cursorId!!, 2, 2))).done)
+        await(server.dbCancel(DbCancelParams(saved.id)))
+        await(server.dbClose(DbCloseParams(r.cursorId!!)))
+        assertEquals(-32013, errorCode(server.dbFetch(DbFetchParams(r.cursorId!!, 0, 1))))
+        val upd = await(server.dbExecute(DbExecuteParams(saved.id, "UPDATE t SET v = 'z'")))
+        assertEquals(null, upd.cursorId)
+        assertEquals(3L, upd.updateCount)
+        assertEquals(-32012, errorCode(server.dbExecute(DbExecuteParams(saved.id, "SELEKT"))))
+        assertEquals(-32013, errorCode(server.dbExecute(DbExecuteParams("missing", "SELECT 1"))))
+        assertEquals(-32013, errorCode(server.dbCancel(DbCancelParams("missing"))))
+    }
+
+    @Test
     fun `error code constants match the plan`() {
         assertEquals(-32010, DbErrorCodes.CONNECTION_FAILED)
         assertEquals(-32011, DbErrorCodes.AUTH_FAILED)
@@ -151,6 +181,13 @@ class DbProtocolTest {
         assertTrue(test.ok)
         val drivers = gson.fromJson(fixture("db-drivers.result.json"), Array<DriverInfo>::class.java)
         assertEquals(4, drivers.size)
+        val exec = gson.fromJson(fixture("db-execute.result.json"), DbExecuteResult::class.java)
+        assertEquals(listOf("id", "name"), exec.columns.map { it.name })
+        assertEquals(null, exec.updateCount)
+        assertEquals(12L, exec.elapsedMs)
+        val fetch = gson.fromJson(fixture("db-fetch.result.json"), DbFetchResult::class.java)
+        assertEquals(listOf("2", null), fetch.rows[1])
+        assertEquals(false, fetch.done)
         val nodes = gson.fromJson(fixture("db-introspect.result.json"), Array<DbNode>::class.java)
         assertEquals(listOf("schema", "table", "folder", "column", "index", "foreignKey", "sequence"), nodes.map { it.kind })
         assertEquals(null, nodes[0].detail)

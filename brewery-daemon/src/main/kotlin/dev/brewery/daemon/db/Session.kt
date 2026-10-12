@@ -192,10 +192,14 @@ class SessionManager(
         return created
     }
 
-    fun <T> run(id: String, block: (Connection) -> T): T {
+    fun <T> run(id: String, block: (Connection) -> T): T = runIn(id) { _, c -> block(c) }
+
+    /** Like [run], but the block also gets the [Session] it runs in. */
+    fun <T> runIn(id: String, block: (Session, Connection) -> T): T {
         repeat(2) {
             try {
-                return session(id).run(block)
+                val s = session(id)
+                return s.run { c -> block(s, c) }
             } catch (_: SessionClosedException) {
                 // Raced with an idle close or a re-save: take a fresh session.
             }

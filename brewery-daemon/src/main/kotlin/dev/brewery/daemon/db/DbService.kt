@@ -5,6 +5,7 @@ import java.sql.Connection
 import java.sql.SQLException
 import java.util.Properties
 import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -132,6 +133,49 @@ class DbService(
                 throw queryFailure(e)
             }
         }
+
+    // cursor id -> the manager (one per live session) that owns it
+    private val cursorIndex = ConcurrentHashMap<String, CursorManager>()
+    private val cursorManagers = ConcurrentHashMap<String, CursorManager>()
+
+    private fun cursorsOf(connectionId: String, session: Session): CursorManager =
+        cursorManagers.compute(connectionId) { _, old -> old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex) }!!
+
+    /** Runs [sql] on the session of [connectionId] and returns after the first result; see [CursorManager.execute]. */
+    fun execute(connectionId: String, sql: String): DbExecuteResult = try {
+        sessions.runIn(connectionId) { session, c -> cursorsOf(connectionId, session).execute(c, sql) }
+    } catch (e: SQLException) {
+        throw queryFailure(e)
+    }
+
+    fun fetch(cursorId: String, offset: Int, limit: Int): DbFetchResult {
+        val manager = cursorIndex[cursorId] ?: throw DbException(DbErrorCodes.NOT_FOUND, "Unknown cursor: $cursorId")
+        return try {
+            manager.session.run { manager.fetch(cursorId, offset.toLong(), limit) }
+        } catch (_: SessionClosedException) {
+            throw DbException(DbErrorCodes.NOT_FOUND, "Unknown cursor: $cursorId")
+        } catch (e: SQLException) {
+            throw queryFailure(e)
+        }
+    }
+
+    /** Aborts the statement currently running on the session; a no-op when nothing runs. Works from any thread. */
+    fun cancel(connectionId: String?, cursorId: String?) {
+        val id = connectionId?.takeIf { it.isNotBlank() }
+            ?: cursorId?.let { cursorIndex[it] }?.let { m -> cursorManagers.entries.firstOrNull { it.value === m }?.key }
+            ?: throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: ${connectionId ?: ""}")
+        sessions.session(id).cancelRunning()
+    }
+
+    /** Idempotent: unknown or already evicted cursors are ignored. */
+    fun closeCursor(cursorId: String) {
+        val manager = cursorIndex[cursorId] ?: return
+        try {
+            manager.session.run { manager.close(cursorId) }
+        } catch (_: SessionClosedException) {
+            // The session's close listener already released everything.
+        }
+    }
 
     override fun close() {
         sessions.close()

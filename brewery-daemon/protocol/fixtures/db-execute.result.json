@@ -1,0 +1,9 @@
+{
+  "cursorId": "6f1c2b9e-3d4a-4c55-9a0b-1f2e3d4c5b6a",
+  "columns": [
+    { "name": "id", "type": "integer" },
+    { "name": "name", "type": "varchar" }
+  ],
+  "updateCount": null,
+  "elapsedMs": 12
+}

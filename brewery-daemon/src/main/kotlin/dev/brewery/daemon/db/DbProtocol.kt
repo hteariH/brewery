@@ -8,6 +8,8 @@ object DbErrorCodes {
     const val AUTH_FAILED = -32011
     const val QUERY_FAILED = -32012
     const val NOT_FOUND = -32013
+    /** JSON-RPC invalid params, e.g. a fetch offset behind a forward-only cursor. */
+    const val INVALID_PARAMS = -32602
 }
 
 /** A domain failure of the database methods; the daemon turns it into a JSON-RPC error with [code]. */
@@ -43,3 +45,20 @@ data class DbDriversAddJarParams(val driverId: String, val name: String, val cla
 
 /** [includeSystem] (optional, default false) also lists `pg_catalog`, `information_schema`, `sqlite_*` and the like. */
 data class DbIntrospectParams(val connectionId: String, val path: List<String>?, val includeSystem: Boolean? = null)
+
+data class DbExecuteParams(val connectionId: String, val sql: String)
+data class ColumnInfo(val name: String, val type: String)
+
+/** [cursorId] is null for statements that produce no result set; then [updateCount] is set instead. */
+data class DbExecuteResult(val cursorId: String?, val columns: List<ColumnInfo>, val updateCount: Long?, val elapsedMs: Long)
+
+/**
+ * Rows [offset, offset + limit) of a cursor; limit is capped at 1000. Results are forward-only: an offset behind
+ * what was already fetched is rejected with -32602, an offset ahead skips rows.
+ */
+data class DbFetchParams(val cursorId: String, val offset: Int, val limit: Int)
+data class DbFetchResult(val rows: List<List<String?>>, val done: Boolean)
+
+/** Cancels the running statement of the session of [connectionId]; [cursorId] may stand in for it when it is blank. */
+data class DbCancelParams(val connectionId: String?, val cursorId: String? = null)
+data class DbCloseParams(val cursorId: String)

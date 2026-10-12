@@ -7,12 +7,18 @@ import com.google.gson.stream.JsonWriter
 import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
 import org.eclipse.lsp4j.jsonrpc.services.JsonRequest
 import dev.brewery.daemon.db.ConnectionInfo
+import dev.brewery.daemon.db.DbCancelParams
+import dev.brewery.daemon.db.DbCloseParams
 import dev.brewery.daemon.db.DbConnectionsDeleteParams
 import dev.brewery.daemon.db.DbConnectionsListParams
 import dev.brewery.daemon.db.DbConnectionsSaveParams
 import dev.brewery.daemon.db.DbConnectionsTestParams
 import dev.brewery.daemon.db.DbDriversAddJarParams
 import dev.brewery.daemon.db.DbDriversParams
+import dev.brewery.daemon.db.DbExecuteParams
+import dev.brewery.daemon.db.DbExecuteResult
+import dev.brewery.daemon.db.DbFetchParams
+import dev.brewery.daemon.db.DbFetchResult
 import dev.brewery.daemon.db.DbIntrospectParams
 import dev.brewery.daemon.db.DbNode
 import dev.brewery.daemon.db.DbTestResult
@@ -79,6 +85,10 @@ interface BreweryServer {
     @JsonRequest("db/connections/delete") fun dbConnectionsDelete(params: DbConnectionsDeleteParams): CompletableFuture<Any?>
     @JsonRequest("db/connections/test") fun dbConnectionsTest(params: DbConnectionsTestParams): CompletableFuture<DbTestResult>
     @JsonRequest("db/introspect") fun dbIntrospect(params: DbIntrospectParams): CompletableFuture<List<DbNode>>
+    @JsonRequest("db/execute") fun dbExecute(params: DbExecuteParams): CompletableFuture<DbExecuteResult>
+    @JsonRequest("db/fetch") fun dbFetch(params: DbFetchParams): CompletableFuture<DbFetchResult>
+    @JsonRequest("db/cancel") fun dbCancel(params: DbCancelParams): CompletableFuture<Any?>
+    @JsonRequest("db/close") fun dbClose(params: DbCloseParams): CompletableFuture<Any?>
 }
 
 interface BreweryClient {
