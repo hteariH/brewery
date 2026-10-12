@@ -71,6 +71,32 @@ descriptions on hover, and warns about unknown and deprecated keys. It uses the
 projects are read through the Tooling API, and Maven projects through
 `dependency:build-classpath`. The Brewery daemon needs a JDK 21 or newer.
 
+## Databases
+
+The Database tool window (left stripe) lists the project's data sources. Use `+`
+to add one: PostgreSQL, MySQL, MariaDB and SQLite drivers are bundled, and any
+other database works through a JDBC driver jar you add in the same dialog. Test
+Connection checks the settings before you save them. Expand a data source to
+browse schemas, tables, views, columns, indexes and foreign keys.
+
+New Query Console opens a SQL editor for the selected data source. Ctrl+Enter
+runs the selected text or the statement under the cursor, and Ctrl+F2 stops it.
+Results appear in a grid under the editor, and more rows load as you scroll.
+Double-click a table to open a console with `SELECT * FROM` that table.
+
+Data sources are saved in `.brewery/db.json`, which you can commit. Passwords are
+never written there: they go to the operating system's secret store (Windows
+Credential Manager, Secret Service on Linux, macOS Keychain).
+
+Limits in this version:
+
+- Consoles on the same data source share one connection, so stopping a statement
+  in one console can stop a statement running in another, and running a
+  statement ends the unread results of the other consoles.
+- Only one statement runs at a time; there is no "run all".
+- MySQL Connector/J is not bundled because of its GPL licence; MySQL servers are
+  reached through MariaDB Connector/J.
+
 ## Licence
 
 The editor is GPL-3.0-or-later, like Zed. See `LICENSE-GPL`.
