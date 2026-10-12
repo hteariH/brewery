@@ -15,10 +15,12 @@ import java.util.concurrent.TimeoutException
 class DbService(
     root: Path,
     private val secrets: SecretStore,
-    clock: () -> Long = System::currentTimeMillis,
+    private val clock: () -> Long = System::currentTimeMillis,
     idleTimeoutMs: Long = SessionManager.DEFAULT_IDLE_TIMEOUT_MS,
     /** Whether a connection needs autocommit off to stream result sets; PostgreSQL does. Tests force it on. */
     private val manageTransactions: (Connection) -> Boolean = ::isPostgres,
+    /** How long an implicit streaming transaction may sit without a fetch before it is ended. */
+    private val streamingTtlMs: Long = CursorManager.DEFAULT_STREAM_TTL_MS,
 ) : AutoCloseable {
     private val projectKey: String = try {
         root.toRealPath().toString()
@@ -142,7 +144,7 @@ class DbService(
 
     private fun cursorsOf(connectionId: String, session: Session): CursorManager =
         cursorManagers.compute(connectionId) { _, old ->
-            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions).also { manager ->
+            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions, clock, streamingTtlMs).also { manager ->
                 // A manager of a closed session would otherwise stay in the map (and keep the session alive).
                 session.onClose { if (session.closed) cursorManagers.remove(connectionId, manager) }
             }

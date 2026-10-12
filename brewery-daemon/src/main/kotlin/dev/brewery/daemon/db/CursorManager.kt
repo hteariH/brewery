@@ -25,23 +25,31 @@ private class Cursor(
 
 /**
  * The open cursors of one [Session]: a statement plus its forward-only result set each, up to [MAX_CURSORS]
- * (the oldest is closed to make room). Everything except [closeAll] must be called on the session thread, i.e.
- * inside `Session.run`. [closeAll] is registered as a session close listener and is idempotent, so it may run
- * on an `08*` connection drop and again at final close.
+ * (the oldest is closed to make room; finished cursors keep their slot until closed). Everything except
+ * [closeAll] and [streamingExpired] must be called on the session thread, i.e. inside `Session.run`. [closeAll]
+ * is registered as a session close listener and is idempotent, so it may run on an `08*` connection drop and
+ * again at final close.
  *
  * Streaming: statements get a fetch size of [FETCH_SIZE], so MariaDB and PostgreSQL pull rows from the server as
  * `fetch` asks for them instead of buffering the whole result in `execute`. PostgreSQL only does that inside a
- * transaction, so when [manageTransactions] says so, `execute` of a query turns autocommit off and the manager
- * owns that transaction until the last streaming cursor is finished, closed, evicted or dropped; then it commits
- * and turns autocommit back on. Consequences, all deliberate:
- *  - A statement that returns no result set while streaming cursors are open is committed at once (so it behaves
- *    as autocommit), which closes the server-side portals: the streaming cursors are dropped (fetch -> -32013).
- *  - A failing statement while cursors are open is rolled back to a savepoint, so the cursors survive.
- *  - A failing or cancelled `fetch` aborts the transaction and drops all streaming cursors.
- *  - Statements that cannot run inside a transaction block (VACUUM, CREATE DATABASE, ...; SQLState 25001) are
- *    re-run once in autocommit mode.
- *  - MariaDB streams without autocommit changes; the driver loads a pending result fully when another statement
- *    runs on the same connection.
+ * transaction, so when [manageTransactions] says so (see [SqlText] for what counts as a plain read):
+ *  - A plain read (SELECT/WITH/VALUES/TABLE/SHOW/EXPLAIN without FOR UPDATE/SHARE, RETURNING, INTO or DML) on a
+ *    connection in autocommit mode turns autocommit off. That implicit transaction is owned by the streaming
+ *    cursors; when the last one is finished, closed, evicted or dropped, the manager commits and turns autocommit
+ *    back on. It is also ended after [streamTtlMs] without a fetch or execute (the owning cursors are dropped,
+ *    fetch -> -32013), so an abandoned result tab cannot hold a server transaction open.
+ *  - Every other statement runs unchanged in the driver's current mode (DML ... RETURNING is therefore buffered).
+ *    Running one while the implicit transaction is open first commits it and drops the streaming cursors
+ *    (fetch -> -32013): the clients must treat that as "result expired".
+ *  - A failing plain read while cursors stream is rolled back to a savepoint; they survive. A failing or
+ *    cancelled `fetch` aborts the transaction and drops all streaming cursors.
+ *  - BEGIN / START TRANSACTION switches the session to the user's control: nothing is wrapped, committed or
+ *    rolled back by the manager and results are buffered by the driver, until COMMIT / END / ROLLBACK / ABORT.
+ *    (SET autocommit style statements are not tracked.)
+ *  - Any unexpected failure restores autocommit; the manager never leaves a transaction without an owner.
+ *
+ * MariaDB streams without autocommit changes; the driver loads a pending result fully when another statement
+ * runs on the same connection.
  *
  * [index] maps cursor id to this manager so that `fetch`/`close` can find the right session from an id alone.
  */
@@ -50,15 +58,22 @@ class CursorManager(
     private val index: MutableMap<String, CursorManager>,
     /** Whether the driver needs autocommit off to stream rows (PostgreSQL); see "Streaming" above. */
     private val manageTransactions: (Connection) -> Boolean = { false },
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val streamTtlMs: Long = DEFAULT_STREAM_TTL_MS,
 ) {
     private val cursors = LinkedHashMap<String, Cursor>()
     private var txOwners = 0
     private var txConnection: Connection? = null
     private var policyConnection: Connection? = null
     private var policy = false
+    /** True from the moment we turned autocommit off until we turned it back on. */
+    private var implicitOpen = false
+    @Volatile private var lastStreamActivity = 0L
+    private var userTx = false
 
     init {
         session.onClose { closeAll() }
+        session.onSweep(::streamingExpired) { expireStreaming(it) }
     }
 
     val openCount: Int get() = synchronized(cursors) { cursors.size }
@@ -68,12 +83,19 @@ class CursorManager(
      * result set that stays open as a cursor. A driver [java.sql.SQLException] propagates after the statement
      * has been released, so the caller can classify it.
      */
-    fun execute(connection: Connection, sql: String): DbExecuteResult = when {
-        !managesTransactions(connection) -> runStatement(connection, sql, ownsTx = false)
-        synchronized(cursors) { txOwners } > 0 -> executeInOpenTransaction(connection, sql)
-        connection.autoCommit -> executeFresh(connection, sql)
-        // Somebody else already put the connection in a transaction: leave it alone.
-        else -> runStatement(connection, sql, ownsTx = false)
+    fun execute(connection: Connection, sql: String): DbExecuteResult {
+        if (!managesTransactions(connection)) return runStatement(connection, sql, ownsTx = false)
+        val kind = SqlText.classify(sql)
+        if (userTx) return runTracking(connection, sql, kind)
+        if (synchronized(cursors) { txOwners } > 0) {
+            if (kind == SqlText.Kind.READ) return executeInOpenTransaction(connection, sql)
+            finishImplicit(connection)
+        } else if (implicitOpen && !connection.autoCommit) {
+            // Left behind by a failure we did not see: nobody owns it, so end it.
+            runCatching { connection.rollback() }
+            restoreAutocommit(connection)
+        }
+        return if (kind == SqlText.Kind.READ && connection.autoCommit) executeFresh(connection, sql) else runTracking(connection, sql, kind)
     }
 
     private fun managesTransactions(connection: Connection): Boolean {
@@ -84,20 +106,30 @@ class CursorManager(
         return policy
     }
 
+    private fun runTracking(c: Connection, sql: String, kind: SqlText.Kind): DbExecuteResult {
+        val result = runStatement(c, sql, ownsTx = false)
+        when (kind) {
+            SqlText.Kind.TX_BEGIN -> userTx = true
+            SqlText.Kind.TX_END -> userTx = false
+            else -> {}
+        }
+        return result
+    }
+
     private fun executeFresh(c: Connection, sql: String): DbExecuteResult {
         c.autoCommit = false
+        implicitOpen = true
         try {
             val result = runStatement(c, sql, ownsTx = true)
             if (result.cursorId == null) {
                 c.commit()
-                c.autoCommit = true
+                restoreAutocommit(c)
             }
             return result
-        } catch (e: SQLException) {
+        } catch (t: Throwable) {
             runCatching { c.rollback() }
-            runCatching { c.autoCommit = true }
-            if (e.sqlState == "25001") return runStatement(c, sql, ownsTx = false)
-            throw e
+            endTransaction(c)
+            throw t
         }
     }
 
@@ -105,21 +137,16 @@ class CursorManager(
         val savepoint = c.setSavepoint()
         try {
             val result = runStatement(c, sql, ownsTx = true)
-            if (result.cursorId != null) {
-                runCatching { c.releaseSavepoint(savepoint) }
-                return result
-            }
-            c.commit()
-            endTransaction(c)
+            runCatching { c.releaseSavepoint(savepoint) }
             return result
-        } catch (e: SQLException) {
+        } catch (t: Throwable) {
             try {
                 c.rollback(savepoint)
-            } catch (_: SQLException) {
+            } catch (_: Throwable) {
                 runCatching { c.rollback() }
                 endTransaction(c)
             }
-            throw e
+            throw t
         }
     }
 
@@ -128,7 +155,8 @@ class CursorManager(
         session.runningStatement = statement
         var kept = false
         try {
-            statement.fetchSize = FETCH_SIZE
+            // A driver that rejects a fetch size just buffers.
+            runCatching { statement.fetchSize = FETCH_SIZE }
             val started = System.nanoTime()
             val hasResultSet = statement.execute(sql)
             val elapsedMs = (System.nanoTime() - started) / 1_000_000
@@ -145,6 +173,7 @@ class CursorManager(
                     cursor.ownsTx = true
                     txOwners++
                     txConnection = connection
+                    lastStreamActivity = clock()
                 }
                 while (cursors.size >= MAX_CURSORS) {
                     val oldest = cursors.keys.first()
@@ -176,6 +205,7 @@ class CursorManager(
             )
         }
         val max = minOf(limit, MAX_LIMIT)
+        if (cursor.ownsTx) lastStreamActivity = clock()
         if (!cursor.done) session.runningStatement = cursor.statement
         try {
             while (cursor.position < offset) {
@@ -200,6 +230,7 @@ class CursorManager(
             forget(cursor)
             throw e
         } finally {
+            if (cursor.ownsTx) lastStreamActivity = clock()
             session.runningStatement = null
         }
     }
@@ -212,8 +243,24 @@ class CursorManager(
 
     /** Closes and forgets every cursor. Idempotent. */
     fun closeAll() {
+        userTx = false
         val all = synchronized(cursors) { cursors.values.toList().also { cursors.clear() } }
         all.forEach(::closeCursor)
+    }
+
+    /** True when the implicit streaming transaction has seen no activity for the TTL. Safe from any thread. */
+    fun streamingExpired(): Boolean = synchronized(cursors) { txOwners > 0 } && clock() - lastStreamActivity >= streamTtlMs
+
+    /** Ends an expired implicit streaming transaction: commits, drops the owning cursors, restores autocommit. */
+    private fun expireStreaming(c: Connection) {
+        if (!streamingExpired()) return
+        runCatching { c.commit() }
+        endTransaction(c)
+    }
+
+    private fun finishImplicit(c: Connection) {
+        runCatching { c.commit() }
+        endTransaction(c)
     }
 
     private fun forget(cursor: Cursor) {
@@ -241,7 +288,7 @@ class CursorManager(
             txConnection = null
             if (c != null) {
                 runCatching { c.commit() }
-                runCatching { c.autoCommit = true }
+                restoreAutocommit(c)
             }
         }
     }
@@ -263,6 +310,11 @@ class CursorManager(
             runCatching { cursor.resultSet.close() }
             runCatching { cursor.statement.close() }
         }
+        restoreAutocommit(c)
+    }
+
+    private fun restoreAutocommit(c: Connection) {
+        implicitOpen = false
         runCatching { c.autoCommit = true }
     }
 
@@ -288,5 +340,6 @@ class CursorManager(
         const val MAX_CURSORS = 20
         const val MAX_LIMIT = 1000
         const val FETCH_SIZE = 500
+        const val DEFAULT_STREAM_TTL_MS = 60_000L
     }
 }

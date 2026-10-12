@@ -41,6 +41,7 @@ class Session(
     private val gate = ReentrantLock()
     private val busy = AtomicInteger()
     private val closeListeners = CopyOnWriteArrayList<() -> Unit>()
+    private val sweepHooks = CopyOnWriteArrayList<Pair<() -> Boolean, (Connection) -> Unit>>()
 
     @Volatile private var connection: Connection? = null
     @Volatile private var sessionThread: Thread? = null
@@ -128,8 +129,10 @@ class Session(
      * pending" flag: with nothing running it would kill the next, unrelated statement.
      */
     fun cancelRunning() {
-        val target = running ?: return
         val generation = runGeneration.get()
+        val target = running ?: return
+        // The run may have changed between the two reads; SQLite's interrupt is connection-wide.
+        if (runGeneration.get() != generation) return
         runCatching { target.cancel() }
         for (delay in CANCEL_RETRY_MS) {
             try {
@@ -139,6 +142,26 @@ class Session(
             } catch (_: RejectedExecutionException) {
                 return
             }
+        }
+    }
+
+    /**
+     * Housekeeping for the sweeper: when [due] says so (cheap, any thread), [action] runs on the session thread
+     * with the connection, but only if the session is open, connected and not busy. A sweep that finds nothing
+     * due does not count as use, so it never keeps an idle session alive.
+     */
+    fun onSweep(due: () -> Boolean, action: (Connection) -> Unit) {
+        sweepHooks.add(due to action)
+    }
+
+    fun sweep() {
+        if (closed || busy.get() > 0 || connection == null) return
+        val hooks = sweepHooks.filter { it.first() }
+        if (hooks.isEmpty()) return
+        try {
+            run { c -> hooks.forEach { (_, action) -> runCatching { action(c) } } }
+        } catch (_: Exception) {
+            // Closed or dropped meanwhile: nothing to maintain.
         }
     }
 
@@ -185,8 +208,9 @@ class Session(
     private companion object {
         const val CLOSE_WAIT_SECONDS = 5L
         val CANCEL_RETRY_MS = longArrayOf(50, 250, 1000)
+        // A few threads: a cancel that blocks on a dead network must not delay the cancels of other sessions.
         val retryScheduler: ScheduledExecutorService by lazy {
-            Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "brewery-db-cancel").apply { isDaemon = true } }
+            Executors.newScheduledThreadPool(3) { r -> Thread(r, "brewery-db-cancel").apply { isDaemon = true } }
         }
     }
 }
@@ -242,6 +266,7 @@ class SessionManager(
     /** Closes sessions that have been idle for the timeout. Called by the sweeper; public so tests can drive it. */
     fun sweep() {
         for ((id, s) in sessions.entries.toList()) {
+            s.sweep()
             if (s.closeIfIdle(idleTimeoutMs)) sessions.remove(id, s)
         }
     }

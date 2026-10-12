@@ -106,4 +106,22 @@ class PostgresCursorTest {
         assertEquals(true, service.sessions.run(id) { it.autoCommit })
         assertEquals(-32013, assertFailsWith<DbException> { service.fetch(cursor, 1, 1) }.code)
     }
+
+    @Test
+    fun `BEGIN INSERT ROLLBACK really rolls back`() {
+        service.execute(id, "CREATE TABLE IF NOT EXISTS tx_t (a int)")
+        service.execute(id, "BEGIN")
+        service.execute(id, "INSERT INTO tx_t VALUES (1)")
+        service.execute(id, "ROLLBACK")
+        val count = service.fetch(service.execute(id, "SELECT count(*) FROM tx_t").cursorId!!, 0, 1)
+        assertEquals(listOf(listOf("0")), count.rows)
+    }
+
+    @Test
+    fun `insert returning commits at once`() {
+        service.execute(id, "CREATE TABLE IF NOT EXISTS ret_t (a int)")
+        val r = service.execute(id, "INSERT INTO ret_t VALUES (7) RETURNING a")
+        assertEquals(listOf(listOf("7")), service.fetch(r.cursorId!!, 0, 5).rows)
+        assertEquals(true, service.sessions.run(id) { it.autoCommit })
+    }
 }
