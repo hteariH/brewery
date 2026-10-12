@@ -43,6 +43,10 @@ tasks.test {
     useJUnitPlatform()
     // NoticesTest inspects the packaged jar, so it has to exist before the tests run.
     dependsOn(tasks.shadowJar)
+    // CI logs show which tests were skipped, e.g. the Docker-backed database tests.
+    testLogging {
+        events("skipped", "failed")
+    }
 }
 
 // Shadow keeps only the first META-INF/LICENSE it meets and drops the rest, which would strip the notices
