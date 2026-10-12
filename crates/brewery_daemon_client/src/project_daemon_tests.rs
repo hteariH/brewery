@@ -4,6 +4,7 @@ use fs::FakeFs;
 use gpui::TestAppContext;
 use serde_json::json;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use util::path;
 
@@ -57,6 +58,10 @@ struct Fake {
     project_changed: Handlers,
     spring_changed: Handlers,
     exit: ExitHandlers,
+    db_calls: Rc<RefCell<Vec<(&'static str, serde_json::Value)>>>,
+    db_replies: Rc<
+        RefCell<HashMap<&'static str, std::result::Result<serde_json::Value, lsp::ResponseError>>>,
+    >,
 }
 
 struct FakeDaemon(Fake);
@@ -79,6 +84,23 @@ impl Daemon for FakeDaemon {
 
     fn run_configurations(&self) -> LocalBoxFuture<'_, Result<Vec<RunConfiguration>>> {
         async { Ok(Vec::new()) }.boxed_local()
+    }
+
+    fn db_request(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> LocalBoxFuture<'_, Result<serde_json::Value>> {
+        self.0.db_calls.borrow_mut().push((method, params));
+        let reply = self.0.db_replies.borrow().get(method).cloned();
+        async move {
+            match reply {
+                Some(Ok(value)) => Ok(value),
+                Some(Err(error)) => Err(Error::new(error).context(format!("{method} failed"))),
+                None => Err(anyhow!("no canned reply for {method}")),
+            }
+        }
+        .boxed_local()
     }
 
     fn on_project_changed(&self, f: Box<dyn Fn() + Send>) -> Box<dyn Any> {
@@ -286,4 +308,311 @@ async fn a_failed_start_is_reported(cx: &mut TestAppContext) {
             }
         );
     });
+}
+
+fn fixture(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap()
+}
+
+#[gpui::test]
+async fn database_calls_reach_the_daemon_as_json(cx: &mut TestAppContext) {
+    use crate::protocol::*;
+    let fake = Fake::default();
+    {
+        let mut replies = fake.db_replies.borrow_mut();
+        replies.insert(
+            DbDrivers::METHOD,
+            Ok(fixture(include_str!(
+                "../../../brewery-daemon/protocol/fixtures/db-drivers.result.json"
+            ))),
+        );
+        replies.insert(
+            DbConnections::METHOD,
+            Ok(serde_json::json!([fixture(include_str!(
+                "../../../brewery-daemon/protocol/fixtures/db-connection.json"
+            ))])),
+        );
+        replies.insert(
+            DbSaveConnection::METHOD,
+            Ok(fixture(include_str!(
+                "../../../brewery-daemon/protocol/fixtures/db-connection.json"
+            ))),
+        );
+        replies.insert(
+            DbTestConnection::METHOD,
+            Ok(fixture(include_str!(
+                "../../../brewery-daemon/protocol/fixtures/db-connections-test.result.json"
+            ))),
+        );
+        replies.insert(
+            DbIntrospect::METHOD,
+            Ok(fixture(include_str!(
+                "../../../brewery-daemon/protocol/fixtures/db-introspect.result.json"
+            ))),
+        );
+        replies.insert(
+            DbExecute::METHOD,
+            Ok(fixture(include_str!(
+                "../../../brewery-daemon/protocol/fixtures/db-execute.result.json"
+            ))),
+        );
+        replies.insert(
+            DbFetch::METHOD,
+            Ok(fixture(include_str!(
+                "../../../brewery-daemon/protocol/fixtures/db-fetch.result.json"
+            ))),
+        );
+        replies.insert(
+            DbAddDriver::METHOD,
+            Ok(serde_json::json!({"id": "h2", "name": "H2", "bundled": false, "jarPaths": ["/h2.jar"]})),
+        );
+        for method in [
+            DbDeleteConnection::METHOD,
+            DbCancel::METHOD,
+            DbClose::METHOD,
+        ] {
+            replies.insert(method, Ok(serde_json::Value::Null));
+        }
+    }
+    let project = project(cx, &fake).await;
+    let daemon = cx.update(|cx| ProjectDaemon::for_project(&project, cx));
+    cx.run_until_parked();
+
+    let drivers = daemon
+        .read_with(cx, |d, cx| d.db_drivers(cx))
+        .await
+        .unwrap();
+    assert_eq!(drivers.len(), 4);
+    let added = daemon
+        .read_with(cx, |d, cx| {
+            d.db_add_driver(
+                AddDriverParams {
+                    driver_id: "h2".into(),
+                    name: "H2".into(),
+                    class_name: "org.h2.Driver".into(),
+                    jar_paths: vec!["/h2.jar".into()],
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert!(!added.bundled);
+    let connections = daemon
+        .read_with(cx, |d, cx| d.db_connections(cx))
+        .await
+        .unwrap();
+    assert_eq!(connections[0].id, "c1");
+    let saved = daemon
+        .read_with(cx, |d, cx| {
+            d.db_save_connection(
+                SaveConnectionParams {
+                    connection: connections[0].clone(),
+                    password: Some("pw".into()),
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(saved.name, "Local Postgres");
+    let tested = daemon
+        .read_with(cx, |d, cx| {
+            d.db_test_connection(
+                TestConnectionParams {
+                    connection: saved.clone(),
+                    password: None,
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert!(tested.ok);
+    daemon
+        .read_with(cx, |d, cx| d.db_delete_connection("c1".into(), cx))
+        .await
+        .unwrap();
+    let nodes = daemon
+        .read_with(cx, |d, cx| {
+            d.db_introspect(
+                IntrospectParams {
+                    connection_id: "c1".into(),
+                    path: vec!["public".into()],
+                    include_system: None,
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(nodes.len(), 7);
+    let executed = daemon
+        .read_with(cx, |d, cx| {
+            d.db_execute(
+                ExecuteParams {
+                    connection_id: "c1".into(),
+                    sql: "select 1".into(),
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    let cursor_id = executed.cursor_id.unwrap();
+    let page = daemon
+        .read_with(cx, |d, cx| {
+            d.db_fetch(
+                FetchParams {
+                    cursor_id: cursor_id.clone(),
+                    offset: 0,
+                    limit: 500,
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.rows.len(), 4);
+    daemon
+        .read_with(cx, |d, cx| {
+            d.db_cancel(
+                CancelParams {
+                    connection_id: Some("c1".into()),
+                    cursor_id: None,
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    daemon
+        .read_with(cx, |d, cx| d.db_close(cursor_id.clone(), cx))
+        .await
+        .unwrap();
+
+    let calls = fake.db_calls.borrow();
+    let methods: Vec<&str> = calls.iter().map(|(method, _)| *method).collect();
+    assert_eq!(
+        methods,
+        vec![
+            "db/drivers",
+            "db/drivers/addJar",
+            "db/connections/list",
+            "db/connections/save",
+            "db/connections/test",
+            "db/connections/delete",
+            "db/introspect",
+            "db/execute",
+            "db/fetch",
+            "db/cancel",
+            "db/close",
+        ]
+    );
+    assert_eq!(calls[0].1, serde_json::json!({}));
+    assert_eq!(calls[3].1["password"], serde_json::json!("pw"));
+    assert_eq!(
+        calls[3].1["connection"]["driverId"],
+        serde_json::json!("postgresql")
+    );
+    assert_eq!(calls[5].1, serde_json::json!({"id": "c1"}));
+    assert_eq!(
+        calls[6].1,
+        serde_json::json!({"connectionId": "c1", "path": ["public"]})
+    );
+    assert_eq!(
+        calls[8].1,
+        serde_json::json!({"cursorId": cursor_id, "offset": 0, "limit": 500})
+    );
+    assert_eq!(calls[10].1, serde_json::json!({"cursorId": cursor_id}));
+}
+
+#[gpui::test]
+async fn a_database_error_keeps_the_daemon_code_and_message(cx: &mut TestAppContext) {
+    use crate::protocol::*;
+    let fake = Fake::default();
+    fake.db_replies.borrow_mut().insert(
+        DbExecute::METHOD,
+        Err(lsp::ResponseError::new(
+            lsp::ResponseErrorCode::Other(DB_QUERY_FAILED.into()),
+            "syntax error at or near \"selec\" (SQLState 42601)",
+        )),
+    );
+    let project = project(cx, &fake).await;
+    let daemon = cx.update(|cx| ProjectDaemon::for_project(&project, cx));
+    cx.run_until_parked();
+
+    let error = daemon
+        .read_with(cx, |d, cx| {
+            d.db_execute(
+                ExecuteParams {
+                    connection_id: "c1".into(),
+                    sql: "selec".into(),
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        crate::daemon_error_code(&error),
+        Some(DB_QUERY_FAILED.into())
+    );
+    assert_eq!(
+        crate::daemon_error_message(&error),
+        "syntax error at or near \"selec\" (SQLState 42601)"
+    );
+    assert!(!crate::is_import_error(&error));
+
+    // No daemon answer at all: no code, the whole chain as the message.
+    let transport = anyhow!("Server reset the connection").context("db/execute failed");
+    assert_eq!(crate::daemon_error_code(&transport), None);
+    assert_eq!(
+        crate::daemon_error_message(&transport),
+        "db/execute failed: Server reset the connection"
+    );
+}
+
+#[gpui::test]
+async fn database_calls_fail_while_the_daemon_is_not_running(cx: &mut TestAppContext) {
+    let fake = Fake::default();
+    let project = project(cx, &fake).await;
+    let daemon = cx.update(|cx| ProjectDaemon::for_project(&project, cx));
+    // Not parked yet: the daemon is still connecting.
+    let error = daemon
+        .read_with(cx, |d, cx| d.db_drivers(cx))
+        .await
+        .unwrap_err();
+    assert_eq!(crate::daemon_error_code(&error), None);
+    assert!(error.to_string().contains("not running"), "{error}");
+}
+
+/// A daemon written before the database methods existed keeps the trait's default.
+struct NoDbDaemon;
+
+impl Daemon for NoDbDaemon {
+    fn project_model(&self) -> LocalBoxFuture<'_, Result<ProjectModel>> {
+        async { Err(not_running()) }.boxed_local()
+    }
+    fn spring_model(&self) -> LocalBoxFuture<'_, Result<SpringModel>> {
+        async { Err(not_running()) }.boxed_local()
+    }
+    fn run_configurations(&self) -> LocalBoxFuture<'_, Result<Vec<RunConfiguration>>> {
+        async { Err(not_running()) }.boxed_local()
+    }
+    fn on_project_changed(&self, _: Box<dyn Fn() + Send>) -> Box<dyn Any> {
+        Box::new(())
+    }
+    fn on_spring_changed(&self, _: Box<dyn Fn() + Send>) -> Box<dyn Any> {
+        Box::new(())
+    }
+    fn on_exit(&self, _: Box<dyn FnOnce() + Send>) {}
+}
+
+#[test]
+fn the_default_db_request_fails() {
+    let error =
+        futures::executor::block_on(NoDbDaemon.db_request("db/drivers", serde_json::json!({})))
+            .unwrap_err();
+    assert!(error.to_string().contains("db/drivers"), "{error}");
 }

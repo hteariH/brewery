@@ -21,15 +21,21 @@ pub use project_daemon::{
     ProjectDaemonEvent, StartDaemon,
 };
 pub use protocol::{
-    BuildModule, BuildTask, BuildTool, HttpMethod, PROTOCOL_VERSION, ProjectModel,
-    RunConfiguration, RunConfigurationKind, SpringApp, SpringBean, SpringBeanKind, SpringEndpoint,
-    SpringModel,
+    AddDriverParams, BuildModule, BuildTask, BuildTool, CancelParams, CloseParams, ColumnInfo,
+    ConnectionInfo, DB_AUTH_FAILED, DB_CONNECTION_FAILED, DB_FETCH_LIMIT_MAX, DB_INVALID_PARAMS,
+    DB_NOT_FOUND, DB_QUERY_FAILED, DbNode, DbNodeKind, DeleteConnectionParams, DriverInfo,
+    ExecuteParams, ExecuteResult, FetchParams, FetchResult, HttpMethod, IntrospectParams,
+    PROTOCOL_VERSION, ProjectModel, RunConfiguration, RunConfigurationKind, SaveConnectionParams,
+    SpringApp, SpringBean, SpringBeanKind, SpringEndpoint, SpringModel, TestConnectionParams,
+    TestConnectionResult,
 };
 
 use anyhow::{Context as _, Error, Result, bail};
 use gpui::{AppContext as _, AsyncApp, BackgroundExecutor, Task};
 use parking_lot::Mutex;
 use protocol::{
+    ConnectionsListParams, DbAddDriver, DbCancel, DbClose, DbConnections, DbDeleteConnection,
+    DbDrivers, DbExecute, DbFetch, DbIntrospect, DbSaveConnection, DbTestConnection, DriversParams,
     GetProjectModel, GetRunConfigurations, GetSpringModel, Initialize, InitializeParams,
     OpenProject, OpenProjectParams, ProjectChanged, ProjectModelParams, RunConfigurationsParams,
     SpringChanged, SpringModelParams,
@@ -47,6 +53,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(600);
 /// `lsp::LanguageServer` has no exit event, so the process is polled.
 const EXIT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Database calls that are not a user-driven statement: connecting, introspecting, closing.
+const DB_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Whether a daemon call failed because the build files could not be imported, as opposed to the
 /// daemon being unreachable. The first is fixed by editing the build; the second needs a restart.
@@ -58,6 +66,29 @@ pub fn is_import_error(error: &Error) -> bool {
                 i64::from(response.code) == i64::from(protocol::BUILD_IMPORT_FAILED)
             })
     })
+}
+
+/// The JSON-RPC error the daemon answered with, if `error` is one (as opposed to a transport
+/// failure such as a dead process).
+fn daemon_response_error(error: &Error) -> Option<&lsp::ResponseError> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<lsp::ResponseError>())
+}
+
+/// The code of the daemon error behind `error`, e.g. `DB_QUERY_FAILED`. `None` when the daemon
+/// did not answer at all.
+pub fn daemon_error_code(error: &Error) -> Option<i64> {
+    daemon_response_error(error).map(|response| i64::from(response.code))
+}
+
+/// The message the daemon sent (driver text and SQLState for failed queries), without the
+/// "brewery-daemon ... failed" context. Falls back to the whole error chain for transport errors.
+pub fn daemon_error_message(error: &Error) -> String {
+    match daemon_response_error(error) {
+        Some(response) => response.message.clone(),
+        None => format!("{error:#}"),
+    }
 }
 
 /// Dropping the client also stops the daemon: `lsp::LanguageServer` shuts its process
@@ -166,6 +197,106 @@ impl DaemonClient {
             .await
             .into_response()
             .context("brewery-daemon could not list the run configurations")
+    }
+
+    /// Sends one `db/*` request. Used by the `Daemon` seam, which carries JSON so that a test
+    /// fake can answer every database call with canned data.
+    pub async fn db_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        use lsp::request::Request as _;
+        fn params_of<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Result<T> {
+            serde_json::from_value(params).context("invalid database request parameters")
+        }
+        fn result_of<T: serde::Serialize>(result: T) -> Result<serde_json::Value> {
+            serde_json::to_value(result).context("invalid database response")
+        }
+        match method {
+            DbDrivers::METHOD => result_of(self.db_drivers().await?),
+            DbAddDriver::METHOD => result_of(self.db_add_driver(params_of(params)?).await?),
+            DbConnections::METHOD => result_of(self.db_connections().await?),
+            DbSaveConnection::METHOD => {
+                result_of(self.db_save_connection(params_of(params)?).await?)
+            }
+            DbDeleteConnection::METHOD => {
+                result_of(self.db_delete_connection(params_of(params)?).await?)
+            }
+            DbTestConnection::METHOD => {
+                result_of(self.db_test_connection(params_of(params)?).await?)
+            }
+            DbIntrospect::METHOD => result_of(self.db_introspect(params_of(params)?).await?),
+            DbExecute::METHOD => result_of(self.db_execute(params_of(params)?).await?),
+            DbFetch::METHOD => result_of(self.db_fetch(params_of(params)?).await?),
+            DbCancel::METHOD => result_of(self.db_cancel(params_of(params)?).await?),
+            DbClose::METHOD => result_of(self.db_close(params_of(params)?).await?),
+            other => bail!("unknown database method {other}"),
+        }
+    }
+
+    pub async fn db_drivers(&self) -> Result<Vec<DriverInfo>> {
+        self.db_call::<DbDrivers>(DriversParams {}, DB_TIMEOUT)
+            .await
+    }
+
+    pub async fn db_add_driver(&self, params: AddDriverParams) -> Result<DriverInfo> {
+        self.db_call::<DbAddDriver>(params, DB_TIMEOUT).await
+    }
+
+    pub async fn db_connections(&self) -> Result<Vec<ConnectionInfo>> {
+        self.db_call::<DbConnections>(ConnectionsListParams {}, DB_TIMEOUT)
+            .await
+    }
+
+    pub async fn db_save_connection(&self, params: SaveConnectionParams) -> Result<ConnectionInfo> {
+        self.db_call::<DbSaveConnection>(params, DB_TIMEOUT).await
+    }
+
+    pub async fn db_delete_connection(&self, params: DeleteConnectionParams) -> Result<()> {
+        self.db_call::<DbDeleteConnection>(params, DB_TIMEOUT).await
+    }
+
+    pub async fn db_test_connection(
+        &self,
+        params: TestConnectionParams,
+    ) -> Result<TestConnectionResult> {
+        self.db_call::<DbTestConnection>(params, DB_TIMEOUT).await
+    }
+
+    pub async fn db_introspect(&self, params: IntrospectParams) -> Result<Vec<DbNode>> {
+        self.db_call::<DbIntrospect>(params, DB_TIMEOUT).await
+    }
+
+    /// A statement may run for as long as the user lets it; `db_cancel` is the way out.
+    pub async fn db_execute(&self, params: ExecuteParams) -> Result<ExecuteResult> {
+        self.db_call::<DbExecute>(params, Duration::MAX).await
+    }
+
+    pub async fn db_fetch(&self, params: FetchParams) -> Result<FetchResult> {
+        self.db_call::<DbFetch>(params, Duration::MAX).await
+    }
+
+    pub async fn db_cancel(&self, params: CancelParams) -> Result<()> {
+        self.db_call::<DbCancel>(params, DB_TIMEOUT).await
+    }
+
+    pub async fn db_close(&self, params: CloseParams) -> Result<()> {
+        self.db_call::<DbClose>(params, DB_TIMEOUT).await
+    }
+
+    /// Keeps the daemon's `ResponseError` in the error chain, so callers can read its code and
+    /// message with `db_error_code` and `db_error_message`.
+    async fn db_call<R>(&self, params: R::Params, timeout: Duration) -> Result<R::Result>
+    where
+        R: lsp::request::Request,
+        R::Result: 'static + Send,
+    {
+        self.server
+            .request::<R>(params, timeout)
+            .await
+            .into_response()
+            .with_context(|| format!("brewery-daemon {} failed", R::METHOD))
     }
 
     /// Calls `f` whenever the daemon reports that build files changed. The handler is

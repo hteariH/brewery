@@ -4,16 +4,26 @@
 //! ask `ProjectDaemon::for_project` instead of starting their own. The daemon lives as long as
 //! some panel holds the returned entity; the registry only keeps weak handles.
 
-use crate::protocol::{ProjectModel, RunConfiguration, SpringModel};
+use crate::protocol::{
+    AddDriverParams, CancelParams, CloseParams, ConnectionInfo, ConnectionsListParams, DbAddDriver,
+    DbCancel, DbClose, DbConnections, DbDeleteConnection, DbDrivers, DbExecute, DbFetch,
+    DbIntrospect, DbNode, DbSaveConnection, DbTestConnection, DeleteConnectionParams, DriverInfo,
+    DriversParams, ExecuteParams, ExecuteResult, FetchParams, FetchResult, IntrospectParams,
+    ProjectModel, RunConfiguration, SaveConnectionParams, SpringModel, TestConnectionParams,
+    TestConnectionResult,
+};
 use crate::{DaemonClient, is_import_error};
-use anyhow::{Error, Result, anyhow};
+use anyhow::{Context as _, Error, Result, anyhow};
 use futures::future::LocalBoxFuture;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
     Task, WeakEntity,
 };
+use lsp::request::Request as _;
 use project::Project;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -25,6 +35,18 @@ pub trait Daemon {
     fn project_model(&self) -> LocalBoxFuture<'_, Result<ProjectModel>>;
     fn spring_model(&self) -> LocalBoxFuture<'_, Result<SpringModel>>;
     fn run_configurations(&self) -> LocalBoxFuture<'_, Result<Vec<RunConfiguration>>>;
+    /// One `db/*` request as JSON: `method` is the wire name (`protocol::DbExecute::METHOD`, ...),
+    /// `params` and the result are the serialised wire types. A single entry point keeps the seam
+    /// small: a test fake matches on `method` and answers every database call with canned data.
+    /// Daemons that know no databases keep the default, which fails.
+    fn db_request(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> LocalBoxFuture<'_, Result<serde_json::Value>> {
+        let _ = params;
+        async move { Err(anyhow!("{method} is not supported by this daemon")) }.boxed_local()
+    }
     /// The handler lives as long as the returned guard.
     fn on_project_changed(&self, f: Box<dyn Fn() + Send>) -> Box<dyn Any>;
     /// The handler lives as long as the returned guard.
@@ -44,6 +66,14 @@ impl Daemon for DaemonClient {
 
     fn run_configurations(&self) -> LocalBoxFuture<'_, Result<Vec<RunConfiguration>>> {
         DaemonClient::run_configurations(self).boxed_local()
+    }
+
+    fn db_request(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+    ) -> LocalBoxFuture<'_, Result<serde_json::Value>> {
+        DaemonClient::db_request(self, method, params).boxed_local()
     }
 
     fn on_project_changed(&self, f: Box<dyn Fn() + Send>) -> Box<dyn Any> {
@@ -291,6 +321,82 @@ impl ProjectDaemon {
         };
         cx.foreground_executor()
             .spawn(async move { client.run_configurations().await })
+    }
+
+    /// Every `db/*` call goes through here, so a failed one carries the daemon's error (see
+    /// `daemon_error_code` and `daemon_error_message`) when the daemon answered.
+    fn db_call<P, R>(&self, method: &'static str, params: P, cx: &App) -> Task<Result<R>>
+    where
+        P: Serialize,
+        R: DeserializeOwned + 'static,
+    {
+        let Some(client) = self.client.clone() else {
+            return Task::ready(Err(not_running()));
+        };
+        let params = match serde_json::to_value(params) {
+            Ok(params) => params,
+            Err(error) => return Task::ready(Err(error.into())),
+        };
+        cx.foreground_executor().spawn(async move {
+            let value = client.db_request(method, params).await?;
+            serde_json::from_value(value).with_context(|| format!("unexpected {method} response"))
+        })
+    }
+
+    pub fn db_drivers(&self, cx: &App) -> Task<Result<Vec<DriverInfo>>> {
+        self.db_call(DbDrivers::METHOD, DriversParams {}, cx)
+    }
+
+    pub fn db_add_driver(&self, params: AddDriverParams, cx: &App) -> Task<Result<DriverInfo>> {
+        self.db_call(DbAddDriver::METHOD, params, cx)
+    }
+
+    pub fn db_connections(&self, cx: &App) -> Task<Result<Vec<ConnectionInfo>>> {
+        self.db_call(DbConnections::METHOD, ConnectionsListParams {}, cx)
+    }
+
+    pub fn db_save_connection(
+        &self,
+        params: SaveConnectionParams,
+        cx: &App,
+    ) -> Task<Result<ConnectionInfo>> {
+        self.db_call(DbSaveConnection::METHOD, params, cx)
+    }
+
+    pub fn db_delete_connection(&self, id: String, cx: &App) -> Task<Result<()>> {
+        self.db_call(
+            DbDeleteConnection::METHOD,
+            DeleteConnectionParams { id },
+            cx,
+        )
+    }
+
+    pub fn db_test_connection(
+        &self,
+        params: TestConnectionParams,
+        cx: &App,
+    ) -> Task<Result<TestConnectionResult>> {
+        self.db_call(DbTestConnection::METHOD, params, cx)
+    }
+
+    pub fn db_introspect(&self, params: IntrospectParams, cx: &App) -> Task<Result<Vec<DbNode>>> {
+        self.db_call(DbIntrospect::METHOD, params, cx)
+    }
+
+    pub fn db_execute(&self, params: ExecuteParams, cx: &App) -> Task<Result<ExecuteResult>> {
+        self.db_call(DbExecute::METHOD, params, cx)
+    }
+
+    pub fn db_fetch(&self, params: FetchParams, cx: &App) -> Task<Result<FetchResult>> {
+        self.db_call(DbFetch::METHOD, params, cx)
+    }
+
+    pub fn db_cancel(&self, params: CancelParams, cx: &App) -> Task<Result<()>> {
+        self.db_call(DbCancel::METHOD, params, cx)
+    }
+
+    pub fn db_close(&self, cursor_id: String, cx: &App) -> Task<Result<()>> {
+        self.db_call(DbClose::METHOD, CloseParams { cursor_id }, cx)
     }
 
     fn project_root(&self, cx: &App) -> Option<PathBuf> {
