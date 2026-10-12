@@ -2,14 +2,24 @@ name: Brewery CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_build:
+        description: "Build the Windows release-fast brewery.exe"
+        type: boolean
+        default: true
+      all_platforms:
+        description: "Also build Linux and macOS release-fast"
+        type: boolean
+        default: false
 
+# A newer push to a branch cancels the run it supersedes; main and tags always finish.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -17,28 +27,131 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Caches are saved from main and tags only. Branches restore main's caches, so they
+  # can't evict them from the repository's 10 GB cache budget.
+  SAVE_CACHE: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  check:
-    name: Check and test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2025]
-    runs-on: ${{ matrix.os }}
+  # Decides which jobs this run needs. Manual runs and tags always run everything.
+  changes:
+    name: Changes
+    runs-on: ubuntu-24.04
+    outputs:
+      rust: ${{ steps.plan.outputs.rust }}
+      daemon: ${{ steps.plan.outputs.daemon }}
+      windows_check: ${{ steps.plan.outputs.windows_check }}
+      windows_build: ${{ steps.plan.outputs.windows_build }}
+      other_builds: ${{ steps.plan.outputs.other_builds }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'tooling/**'
+              - 'extensions/**'
+              - 'assets/**'
+              - 'brewery-daemon/protocol/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - 'script/linux'
+              - '.github/workflows/brewery_ci.yml'
+            daemon:
+              - 'brewery-daemon/**'
+              - '.github/workflows/brewery_ci.yml'
+      - id: plan
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RUST_CHANGED: ${{ steps.filter.outputs.rust }}
+          DAEMON_CHANGED: ${{ steps.filter.outputs.daemon }}
+          INPUT_WINDOWS_BUILD: ${{ inputs.windows_build }}
+          INPUT_ALL_PLATFORMS: ${{ inputs.all_platforms }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          everything=false
+          if [[ "$EVENT" == workflow_dispatch || "$REF" == refs/tags/* ]]; then everything=true; fi
+          rust=false; daemon=false
+          if [[ $everything == true || "$RUST_CHANGED" == true ]]; then rust=true; fi
+          if [[ $everything == true || "$DAEMON_CHANGED" == true ]]; then daemon=true; fi
+          # "[win]" in the pushed commit message asks for the Windows check and exe on a branch.
+          win_tag=false
+          if [[ "$EVENT" == push && "$HEAD_MESSAGE" == *"[win]"* ]]; then win_tag=true; fi
+          windows_check=false
+          if [[ $rust == true && ( "$REF" == refs/heads/main || $everything == true || $win_tag == true ) ]]; then
+            windows_check=true
+          fi
+          windows_build=false
+          if [[ "$REF" == refs/tags/* || $win_tag == true ]]; then windows_build=true; fi
+          if [[ "$REF" == refs/heads/main && "$EVENT" == push && $rust == true ]]; then windows_build=true; fi
+          if [[ "$EVENT" == workflow_dispatch && "$INPUT_WINDOWS_BUILD" == true ]]; then windows_build=true; fi
+          other_builds=false
+          if [[ "$REF" == refs/tags/* ]]; then other_builds=true; fi
+          if [[ "$EVENT" == workflow_dispatch && "$INPUT_ALL_PLATFORMS" == true ]]; then other_builds=true; fi
+          {
+            echo "rust=$rust"
+            echo "daemon=$daemon"
+            echo "windows_check=$windows_check"
+            echo "windows_build=$windows_build"
+            echo "other_builds=$other_builds"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  check-linux:
+    name: Check and test (ubuntu-24.04)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
       - name: Free disk space
-        if: runner.os == 'Linux'
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: false
       - uses: actions/checkout@v4
       - name: Install Linux dependencies
-        if: runner.os == 'Linux'
         run: script/linux
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: brewery-check
+          save-if: ${{ env.SAVE_CACHE }}
+          cache-on-failure: true
+      - name: Check
+        run: cargo check -p zed --locked
+      # extension_store_test::test_extension_store_with_test_extension builds a WASM test
+      # extension and downloads toolchains; it times out on hosted runners. Run it locally.
+      - name: Test Brewery hook-ins
+        run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension
+      - name: Test workspace hook-ins
+        run: cargo test --locked -p workspace --lib
+      - name: Build the daemon jar
+        working-directory: brewery-daemon
+        run: ./gradlew shadowJar --no-daemon
+      # The crate's end-to-end test skips itself without this variable, so it is what makes the test real.
+      - name: Test daemon client against the built jar
+        env:
+          BREWERY_DAEMON_JAR: ${{ github.workspace }}/brewery-daemon/build/libs/brewery-daemon-all.jar
+        run: cargo test --locked -p brewery_daemon_client
+
+  check-windows:
+    name: Check and test (windows-2025)
+    needs: changes
+    if: needs.changes.outputs.windows_check == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
       - name: Install MSVC Spectre libraries
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
@@ -49,10 +162,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: brewery-check
+          save-if: ${{ env.SAVE_CACHE }}
+          cache-on-failure: true
+      # The Windows release build compiles all of zed when it runs in the same workflow.
       - name: Check
+        if: needs.changes.outputs.windows_build != 'true'
         run: cargo check -p zed --locked
-      # extension_store_test::test_extension_store_with_test_extension builds a WASM test
-      # extension and downloads toolchains; it times out on hosted runners. Run it locally.
       - name: Test Brewery hook-ins
         run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension
       - name: Test workspace hook-ins
@@ -60,6 +175,8 @@ jobs:
 
   daemon:
     name: Daemon (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.daemon == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -83,56 +200,55 @@ jobs:
           path: brewery-daemon/build/libs/brewery-daemon-all.jar
           retention-days: 14
 
-  daemon-integration:
-    name: Daemon client integration (ubuntu-24.04)
-    needs: daemon
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+  # Runs alongside the checks: the release-fast profile shares nothing with the test builds.
+  build-windows:
+    name: Build (windows-2025)
+    needs: changes
+    if: needs.changes.outputs.windows_build == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 240
+    env:
+      # release-fast inherits full debuginfo, which is too heavy for hosted runners.
+      CARGO_PROFILE_RELEASE_FAST_DEBUG: limited
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: false
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-      - uses: actions/download-artifact@v4
-        with:
-          name: brewery-daemon-ubuntu-24.04
-          path: daemon-jar
-      - name: Install Linux dependencies
-        run: script/linux
+      - name: Install MSVC Spectre libraries
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $p = Start-Process -Wait -PassThru -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
+          # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: brewery-daemon-integration
-      # The crate's end-to-end test skips itself without this variable, so it is what makes the test real.
-      - name: Test daemon client against the built jar
-        env:
-          BREWERY_DAEMON_JAR: ${{ github.workspace }}/daemon-jar/brewery-daemon-all.jar
-        run: cargo test --locked -p brewery_daemon_client
+          shared-key: brewery-build
+          save-if: ${{ env.SAVE_CACHE }}
+          cache-on-failure: true
+      - name: Build
+        run: cargo build --locked --profile release-fast -p zed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brewery-windows-2025
+          path: target/release-fast/brewery.exe
+          retention-days: 14
 
-  build:
+  # Linux and macOS release builds run on tags, or on a manual run with "all_platforms".
+  build-other:
     name: Build (${{ matrix.os }})
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    needs: check
+    needs: changes
+    if: needs.changes.outputs.other_builds == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            binary: target/release-fast/brewery
-          - os: windows-2025
-            binary: target/release-fast/brewery.exe
           - os: macos-15
-            binary: target/release-fast/brewery
             unsupported: true
     continue-on-error: ${{ matrix.unsupported == true }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
     env:
-      # release-fast inherits full debuginfo, which is too heavy for hosted runners.
       CARGO_PROFILE_RELEASE_FAST_DEBUG: limited
     steps:
       - name: Free disk space
@@ -144,22 +260,15 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: script/linux
-      - name: Install MSVC Spectre libraries
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $p = Start-Process -Wait -PassThru -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
-          # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
-          if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: brewery-build
+          save-if: ${{ startsWith(github.ref, 'refs/tags/') }}
+          cache-on-failure: true
       - name: Build
         run: cargo build --locked --profile release-fast -p zed
       - uses: actions/upload-artifact@v4
         with:
           name: brewery-${{ matrix.os }}
-          path: ${{ matrix.binary }}
+          path: target/release-fast/brewery
           retention-days: 14
