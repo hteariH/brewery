@@ -207,3 +207,17 @@ fn select_all_from_a_table_path() {
         "SELECT * FROM pets"
     );
 }
+
+#[test]
+fn common_non_reserved_keywords_are_quoted_too() {
+    for word in [
+        "rank", "row", "interval", "window", "level", "comment", "range",
+    ] {
+        assert_eq!(
+            quote_identifier("postgresql", word),
+            format!("\"{word}\""),
+            "{word}"
+        );
+    }
+    assert_eq!(quote_identifier("mysql", "rank"), "`rank`");
+}

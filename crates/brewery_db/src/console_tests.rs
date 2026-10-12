@@ -6,8 +6,11 @@ use crate::tree::RowKey;
 use brewery_daemon_client::{DB_NOT_FOUND, DB_QUERY_FAILED};
 use editor::SelectionEffects;
 use gpui::{ScrollStrategy, TestAppContext, VisualTestContext};
+use language::{Language, LanguageConfig};
 use serde_json::{Value, json};
 use settings::{BaseKeymap, DEFAULT_KEYMAP_PATH, KeymapFile, SPECIFIC_OVERRIDES_KEYMAP_PATH};
+use std::sync::Arc;
+use std::time::Duration;
 use workspace::item::ItemHandle as _;
 
 struct Console {
@@ -453,4 +456,86 @@ async fn keystrokes_run_cancel_and_copy(cx: &mut TestAppContext) {
         cx.read_from_clipboard().and_then(|item| item.text()),
         Some("name 3".to_string())
     );
+}
+
+#[gpui::test]
+async fn sql_highlighting_arrives_when_the_extension_registers_the_language(
+    cx: &mut TestAppContext,
+) {
+    let (console, cx) = console(cx).await;
+    let language_name = |console: &Console, cx: &mut VisualTestContext| {
+        console.console.read_with(cx, |console, cx| {
+            let buffer = console.editor().read(cx).buffer().read(cx).as_singleton()?;
+            Some(buffer.read(cx).language()?.name().to_string())
+        })
+    };
+    assert_eq!(language_name(&console, cx), None, "plain text without SQL");
+
+    // The `sql` extension installs later (first launch) and registers its language.
+    let languages = console.fixture.workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).languages().clone()
+    });
+    languages.add(Arc::new(Language::new(
+        LanguageConfig {
+            name: "SQL".into(),
+            ..LanguageConfig::default()
+        },
+        None,
+    )));
+    cx.run_until_parked();
+    assert_eq!(language_name(&console, cx).as_deref(), Some("SQL"));
+}
+
+#[gpui::test]
+async fn the_console_exposes_its_editor_to_the_search_bar(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let item: Box<dyn workspace::item::ItemHandle> = Box::new(console.console.clone());
+    let editor = console
+        .console
+        .read_with(cx, |console, _| console.editor().clone());
+    cx.update(|_, cx| {
+        assert_eq!(
+            item.act_as::<Editor>(cx).map(|found| found.entity_id()),
+            Some(editor.entity_id())
+        );
+        assert!(item.to_searchable_item_handle(cx).is_some());
+    });
+}
+
+#[gpui::test]
+async fn a_cancel_the_driver_ignores_frees_the_console_after_a_while(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.fixture.state.hold("db/execute");
+    console.type_sql("select * from owners", cx);
+    console.run(cx);
+    console.console.update_in(cx, |console, window, cx| {
+        console.cancel(&CancelStatement, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(console.status(cx), "Cancelling…");
+
+    cx.executor()
+        .advance_clock(CANCEL_GIVE_UP + Duration::from_millis(1));
+    cx.run_until_parked();
+    console
+        .console
+        .read_with(cx, |console, _| assert!(!console.is_running()));
+    assert_eq!(console.status(cx), CANCEL_IGNORED);
+
+    // A new run works; when the abandoned statement finally ends, its result is not shown and
+    // its cursor is closed.
+    console.run(cx);
+    assert_eq!(console.executed().len(), 2);
+    console.fixture.state.release("db/execute");
+    cx.run_until_parked();
+    assert_eq!(
+        console.fixture.calls_of("db/close"),
+        [json!({ "cursorId": "k1" })]
+    );
+    console.fixture.state.release("db/execute");
+    cx.run_until_parked();
+    let cursor = console
+        .grid(cx)
+        .read_with(cx, |grid, _| grid.cursor_id().map(str::to_string));
+    assert_eq!(cursor.as_deref(), Some("k2"));
 }

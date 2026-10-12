@@ -9,17 +9,24 @@ use brewery_daemon_client::{
     CancelParams, ConnectionInfo, ExecuteParams, ExecuteResult, ProjectDaemon, daemon_error_message,
 };
 use editor::{Editor, MultiBufferOffset};
+use futures::StreamExt as _;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString, Subscription,
-    Window, px, relative,
+    AnyEntity, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
+    Subscription, Task, Window, px, relative,
 };
 use language::Buffer;
 use project::Project;
+use std::any::TypeId;
 use ui::{Tooltip, prelude::*};
 use workspace::Workspace;
 use workspace::item::Item;
+use workspace::searchable::SearchableItemHandle;
 
 pub const NOTHING_TO_RUN: &str = "Nothing to run";
+/// How long a cancelled statement may keep the console busy before it is left to finish alone.
+pub const CANCEL_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(10);
+pub const CANCEL_IGNORED: &str =
+    "The statement did not stop; it is left to finish and its result will not be shown";
 const SQL_LANGUAGE: &str = "SQL";
 /// How the run key reads on this platform (see the keymap overrides).
 const RUN_KEY: &str = if cfg!(target_os = "macos") {
@@ -53,6 +60,10 @@ pub struct QueryConsole {
     outcome: Outcome,
     /// `Some` while a statement runs; `true` once cancelling was asked for.
     running: Option<bool>,
+    /// Numbers the runs, so the late answer of an abandoned statement is not shown.
+    run_id: u64,
+    /// Gives up waiting for a cancelled statement that keeps running.
+    cancel_timeout: Option<Task<()>>,
 }
 
 impl QueryConsole {
@@ -69,14 +80,21 @@ impl QueryConsole {
             buffer.set_language_registry(languages.clone());
             buffer
         });
-        // Highlighting comes from the SQL extension once it is installed; plain text until then.
-        let sql = languages.language_for_name(SQL_LANGUAGE);
+        // Highlighting comes from the SQL extension. On a first launch it is still being
+        // installed, so look again whenever the registry changes; plain text until then.
         buffer.update(cx, |_, cx| {
+            let mut changes = languages.subscribe();
             cx.spawn(async move |buffer, cx| {
-                if let Ok(sql) = sql.await {
-                    buffer
-                        .update(cx, |buffer, cx| buffer.set_language(Some(sql), cx))
-                        .ok();
+                loop {
+                    if let Ok(sql) = languages.language_for_name(SQL_LANGUAGE).await {
+                        buffer
+                            .update(cx, |buffer, cx| buffer.set_language(Some(sql), cx))
+                            .ok();
+                        return;
+                    }
+                    if changes.next().await.is_none() || buffer.upgrade().is_none() {
+                        return;
+                    }
                 }
             })
             .detach();
@@ -99,6 +117,8 @@ impl QueryConsole {
             editor,
             outcome: Outcome::Empty,
             running: None,
+            run_id: 0,
+            cancel_timeout: None,
         }
     }
 
@@ -164,6 +184,8 @@ impl QueryConsole {
         self.close_cursor(cx);
         self.outcome = Outcome::Empty;
         self.running = Some(false);
+        self.run_id += 1;
+        let run_id = self.run_id;
         let execute = self.daemon.read(cx).db_execute(
             ExecuteParams {
                 connection_id: self.connection.id.clone(),
@@ -172,8 +194,8 @@ impl QueryConsole {
             cx,
         );
         let daemon = self.daemon.clone();
-        // Detached rather than owned, so that a cursor opened after the tab was closed is still
-        // closed.
+        // Detached rather than owned, so that a cursor opened after the tab was closed (or after
+        // the run was abandoned) is still closed.
         cx.spawn(async move |this, cx| {
             let result = execute.await;
             let cursor = result
@@ -181,8 +203,8 @@ impl QueryConsole {
                 .ok()
                 .and_then(|result| result.cursor_id.clone());
             let shown = this
-                .update(cx, |this, cx| this.finish_run(result, note, cx))
-                .is_ok();
+                .update(cx, |this, cx| this.finish_run(run_id, result, note, cx))
+                .unwrap_or(false);
             if !shown && let Some(cursor) = cursor {
                 let close = cx.update(|cx| daemon.read(cx).db_close(cursor, cx));
                 close.await.ok();
@@ -192,13 +214,19 @@ impl QueryConsole {
         cx.notify();
     }
 
+    /// Shows the answer of run `run_id`; `false` when that run was abandoned meanwhile.
     fn finish_run(
         &mut self,
+        run_id: u64,
         result: anyhow::Result<ExecuteResult>,
         note: Option<SharedString>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        if run_id != self.run_id || self.running.is_none() {
+            return false;
+        }
         self.running = None;
+        self.cancel_timeout = None;
         self.outcome = match result {
             Ok(ExecuteResult {
                 cursor_id: Some(cursor_id),
@@ -224,6 +252,7 @@ impl QueryConsole {
             Err(error) => Outcome::Failed(daemon_error_message(&error).into()),
         };
         cx.notify();
+        true
     }
 
     pub fn cancel(&mut self, _: &CancelStatement, _: &mut Window, cx: &mut Context<Self>) {
@@ -232,6 +261,19 @@ impl QueryConsole {
         }
         self.running = Some(true);
         self.send_cancel(cx);
+        // Some drivers ignore cancel; do not keep the console blocked until the statement ends.
+        let run_id = self.run_id;
+        self.cancel_timeout = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(CANCEL_GIVE_UP).await;
+            this.update(cx, |this, cx| {
+                if this.run_id == run_id && this.running == Some(true) {
+                    this.running = None;
+                    this.outcome = Outcome::Notice(CANCEL_IGNORED.into());
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
         cx.notify();
     }
 
@@ -264,6 +306,7 @@ impl QueryConsole {
             self.send_cancel(cx);
         }
         self.running = None;
+        self.cancel_timeout = None;
         self.close_cursor(cx);
     }
 
@@ -460,6 +503,26 @@ impl Item for QueryConsole {
 
     fn telemetry_event_text(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Lets editor-bound features (go to line, the buffer search bar) reach the SQL editor.
+    fn act_as_type<'a>(
+        &'a self,
+        type_id: TypeId,
+        self_handle: &'a Entity<Self>,
+        _: &'a App,
+    ) -> Option<AnyEntity> {
+        if type_id == TypeId::of::<Self>() {
+            Some(self_handle.clone().into())
+        } else if type_id == TypeId::of::<Editor>() {
+            Some(self.editor.clone().into())
+        } else {
+            None
+        }
+    }
+
+    fn as_searchable(&self, _: &Entity<Self>, _: &App) -> Option<Box<dyn SearchableItemHandle>> {
+        Some(Box::new(self.editor.clone()))
     }
 }
 

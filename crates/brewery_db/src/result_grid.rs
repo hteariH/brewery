@@ -101,8 +101,10 @@ impl GridPages {
                 }
             }
         }
+        // An empty page also ends the result: asking again would only get another empty page.
+        let empty = rows.is_empty();
         self.rows.extend(rows);
-        self.state = if done {
+        self.state = if done || empty {
             PageState::Done
         } else {
             PageState::Idle
@@ -291,9 +293,15 @@ impl ResultGrid {
         cx.write_to_clipboard(ClipboardItem::new_string(value));
     }
 
-    fn widths(&self, window: &Window) -> Vec<f32> {
+    fn widths(&self, window: &Window, cx: &App) -> Vec<f32> {
         // The cells use the buffer font at the small text size; monospace, so a char count does.
-        let char_width = f32::from(window.rem_size()) * 0.875 * 0.6;
+        let font_size = rems(0.875).to_pixels(window.rem_size());
+        let font = theme::theme_settings(cx).buffer_font(cx).clone();
+        let text_system = window.text_system();
+        let char_width = text_system
+            .em_advance(text_system.resolve_font(&font), font_size)
+            .map(f32::from)
+            .unwrap_or(f32::from(font_size) * 0.6);
         self.pages
             .column_chars()
             .iter()
@@ -386,7 +394,7 @@ impl ResultGrid {
 
 impl Render for ResultGrid {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let widths = self.widths(window);
+        let widths = self.widths(window, cx);
         let total_width: f32 = widths.iter().sum();
         let row_count = self.pages.row_count();
         div()

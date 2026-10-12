@@ -148,3 +148,16 @@ fn cell_text_stays_on_one_line() {
     assert_eq!(single_line("a\nb\r\nc\td"), "a b  c d");
     assert_eq!(single_line("plain"), "plain");
 }
+
+#[test]
+fn an_empty_page_ends_the_result_even_when_not_done() {
+    // A daemon that answers "no rows, more to come" would otherwise be asked again and again.
+    let mut pages = GridPages::new(columns());
+    pages.start_fetch();
+    pages.page_loaded(page(0, 500), false);
+    pages.start_fetch();
+    pages.page_loaded(Vec::new(), false);
+    assert!(pages.is_done());
+    assert!(!pages.needs_more(500));
+    assert_eq!(pages.status(1), "500 rows fetched in 1 ms");
+}
