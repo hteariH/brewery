@@ -2366,6 +2366,8 @@
     "html": true,
     // brewery: Java support out of the box (zed-extensions/java, Apache 2.0)
     "java": true,
+    // brewery: SQL highlighting for the query console of the Database tool window
+    "sql": true,
   },
   // Whether to suggest installing extensions based on the files you open.
   "suggest_extensions": true,

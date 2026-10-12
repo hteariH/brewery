@@ -57,4 +57,26 @@
       "shift-tab": "brewery::PreviousSearchTab",
     },
   },
+  // brewery: query console keys, as in IntelliJ. They live here because they must beat the
+  // `Editor` bindings of the base keymaps (ctrl-enter NewlineBelow, ctrl-f2 SelectAllMatches)
+  // inside the console's editor.
+  {
+    "context": "QueryConsole > Editor",
+    "bindings": {
+      "ctrl-enter": "brewery::RunStatement",
+      "ctrl-f2": "brewery::CancelStatement",
+    },
+  },
+  {
+    "context": "QueryConsole",
+    "bindings": {
+      "ctrl-f2": "brewery::CancelStatement",
+    },
+  },
+  {
+    "context": "QueryResultGrid",
+    "bindings": {
+      "ctrl-c": "brewery::CopyResultCell",
+    },
+  },
 ]

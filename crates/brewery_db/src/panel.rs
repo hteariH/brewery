@@ -1,9 +1,11 @@
 //! The Database tool window: one row per data source, its schema below it, loaded lazily from
 //! `db/introspect`, and a toolbar to add, edit, delete and refresh data sources.
 
+use crate::ToggleDatabasePanel;
+use crate::console::open_console;
 use crate::data_source_modal::DataSourceModal;
+use crate::statements::select_all_from;
 use crate::tree::{DbTree, Fetch, Row, RowKey, node_label};
-use crate::{NewQueryConsole, ToggleDatabasePanel};
 use anyhow::Result;
 use brewery_daemon_client::{
     ConnectionInfo, DaemonState, DbNodeKind, IntrospectParams, ProjectDaemon, ProjectDaemonEvent,
@@ -367,10 +369,56 @@ impl DatabasePanel {
         .detach();
     }
 
-    /// Task 3 implements the console; the action is dispatched so that its handler can read the
-    /// selected data source from the panel.
-    fn new_query_console(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.dispatch_action(NewQueryConsole.boxed_clone(), cx);
+    /// Opens a query console for the selected data source.
+    pub fn new_query_console(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(connection) = self.selected_connection().cloned() {
+            self.open_console(connection, None, window, cx);
+        }
+    }
+
+    fn open_console(
+        &mut self,
+        connection: ConnectionInfo,
+        run: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        let daemon = self.daemon.clone();
+        // Adding the tab moves focus and may call back into the dock, so not while the panel is
+        // being updated.
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    open_console(workspace, connection, daemon, run, window, cx);
+                })
+                .ok();
+        });
+    }
+
+    /// A double click: tables and views open a console showing their rows, other rows expand or
+    /// collapse.
+    pub fn open_row(&mut self, key: RowKey, window: &mut Window, cx: &mut Context<Self>) {
+        let table = self.rows().into_iter().find_map(|row| match row {
+            Row::Node {
+                connection_id,
+                node,
+                ..
+            } if connection_id == key.connection_id
+                && node.path == key.path
+                && matches!(node.kind, DbNodeKind::Table | DbNodeKind::View) =>
+            {
+                Some(node.path)
+            }
+            _ => None,
+        });
+        match (table, self.tree.source(&key.connection_id).cloned()) {
+            (Some(path), Some(connection)) => {
+                let sql = select_all_from(&connection.driver_id, &path);
+                self.open_console(connection, Some(sql), window, cx);
+            }
+            _ => self.activate(key, cx),
+        }
     }
 
     fn rows(&self) -> Vec<Row> {
@@ -452,9 +500,9 @@ impl DatabasePanel {
     ) {
         window.focus(&self.focus_handle, cx);
         self.selected = Some(key.clone());
-        // A double click toggles once, not twice.
+        // A double click acts once, not twice.
         if event.click_count() == 2 {
-            self.activate(key, cx);
+            self.open_row(key, window, cx);
         }
         cx.notify();
     }

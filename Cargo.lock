@@ -2455,6 +2455,8 @@ dependencies = [
  "editor",
  "futures 0.3.34",
  "gpui",
+ "language",
+ "lsp",
  "menu",
  "project",
  "serde_json",

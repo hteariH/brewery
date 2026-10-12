@@ -92,3 +92,10 @@ fn test_java_support_is_preinstalled() {
     assert_eq!(d["auto_install_extensions"]["java"], Value::Bool(true));
     assert_eq!(d["lsp"]["jdtls"]["settings"]["jdk_auto_download"], Value::Bool(true));
 }
+
+#[test]
+fn test_sql_highlighting_is_preinstalled() {
+    // The query console of the Database tool window takes its "SQL" language from this extension.
+    let d = defaults();
+    assert_eq!(d["auto_install_extensions"]["sql"], Value::Bool(true));
+}
