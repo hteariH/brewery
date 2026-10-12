@@ -58,11 +58,22 @@ class Introspector(private val connection: Connection, private val includeSystem
     private fun catalogOf(ns: List<String>): String? = if (dialect.namespace == Dialect.Namespace.CATALOG) ns.firstOrNull() else null
     private fun schemaOf(ns: List<String>): String? = if (dialect.namespace == Dialect.Namespace.SCHEMA) ns.firstOrNull() else null
 
+    /** `schemaPattern` of getTables/getColumns is a LIKE pattern (`my_app` would also match `myXapp`). */
+    private fun schemaPatternOf(ns: List<String>): String? = schemaOf(ns)?.let(::escape)
+
+    /** Rows of a pattern-matched call that belong to another schema/catalog than [ns] are dropped. */
+    private fun java.sql.ResultSet.inNamespace(ns: List<String>): Boolean {
+        schemaOf(ns)?.let { if (getString("TABLE_SCHEM") != it) return false }
+        catalogOf(ns)?.let { if (getString("TABLE_CAT") != it) return false }
+        return true
+    }
+
     private fun objects(ns: List<String>): List<DbNode> {
         val tables = mutableListOf<DbNode>()
         val views = mutableListOf<DbNode>()
-        meta.getTables(catalogOf(ns), schemaOf(ns), null, tableTypes()).use { rs ->
+        meta.getTables(catalogOf(ns), schemaPatternOf(ns), null, tableTypes()).use { rs ->
             while (rs.next()) {
+                if (!rs.inNamespace(ns)) continue
                 val name = rs.getString("TABLE_NAME") ?: continue
                 if (!includeSystem && dialect.isSystemTable(name)) continue
                 val remarks = rs.getString("REMARKS")?.takeIf { it.isNotBlank() }
@@ -73,12 +84,18 @@ class Introspector(private val connection: Connection, private val includeSystem
         val out = mutableListOf<DbNode>()
         out += tables.sortedBy { it.name.lowercase() }
         out += views.sortedBy { it.name.lowercase() }
-        if (dialect == Dialect.POSTGRESQL && ns.isNotEmpty()) out += sequences(ns[0])
+        // pg_sequences needs PostgreSQL 10; losing the sequences must not lose the tables.
+        if (dialect == Dialect.POSTGRESQL && ns.isNotEmpty()) out += runCatching { sequences(ns[0]) }.getOrDefault(emptyList())
         return out
     }
 
-    private fun tableTypes(): Array<String> =
-        if (includeSystem) arrayOf("TABLE", "VIEW", "SYSTEM TABLE", "SYSTEM VIEW") else arrayOf("TABLE", "VIEW")
+    private fun tableTypes(): Array<String> {
+        val types = mutableListOf("TABLE", "VIEW")
+        // pgjdbc reports these as types of their own.
+        if (dialect == Dialect.POSTGRESQL) types += listOf("PARTITIONED TABLE", "MATERIALIZED VIEW", "FOREIGN TABLE")
+        if (includeSystem) types += listOf("SYSTEM TABLE", "SYSTEM VIEW")
+        return types.toTypedArray()
+    }
 
     private fun sequences(schema: String): List<DbNode> {
         val out = mutableListOf<DbNode>()
@@ -92,8 +109,9 @@ class Introspector(private val connection: Connection, private val includeSystem
     }
 
     private fun isView(ns: List<String>, table: String): Boolean? {
-        meta.getTables(catalogOf(ns), schemaOf(ns), escape(table), tableTypes()).use { rs ->
+        meta.getTables(catalogOf(ns), schemaPatternOf(ns), escape(table), tableTypes()).use { rs ->
             while (rs.next()) {
+                if (!rs.inNamespace(ns)) continue
                 if (rs.getString("TABLE_NAME") == table) return rs.getString("TABLE_TYPE").orEmpty().endsWith("VIEW", ignoreCase = true)
             }
         }
@@ -120,8 +138,9 @@ class Introspector(private val connection: Connection, private val includeSystem
             }
         }
         val cols = mutableListOf<Pair<Int, DbNode>>()
-        meta.getColumns(catalogOf(ns), schemaOf(ns), escape(table), null).use { rs ->
+        meta.getColumns(catalogOf(ns), schemaPatternOf(ns), escape(table), null).use { rs ->
             while (rs.next()) {
+                if (!rs.inNamespace(ns)) continue
                 if (rs.getString("TABLE_NAME") != table) continue
                 val name = rs.getString("COLUMN_NAME") ?: continue
                 val nullable = rs.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls
@@ -151,7 +170,7 @@ class Introspector(private val connection: Connection, private val includeSystem
             while (rs.next()) {
                 if (rs.getShort("TYPE") == DatabaseMetaData.tableIndexStatistic) continue
                 val name = rs.getString("INDEX_NAME") ?: continue
-                val col = rs.getString("COLUMN_NAME") ?: continue
+                val col = rs.getString("COLUMN_NAME") ?: "expr"
                 byName.getOrPut(name) { Idx(!rs.getBoolean("NON_UNIQUE")) }.columns += rs.getInt("ORDINAL_POSITION") to col
             }
         }

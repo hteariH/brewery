@@ -2,6 +2,7 @@ package dev.brewery.daemon.db
 
 import java.sql.Connection
 import java.sql.SQLException
+import java.sql.Statement
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -41,6 +42,10 @@ class Session(
     private val closeListeners = CopyOnWriteArrayList<() -> Unit>()
 
     @Volatile private var connection: Connection? = null
+    @Volatile private var sessionThread: Thread? = null
+
+    /** Task 3 sets this around each execute so that [cancelRunning] (any thread) can reach the statement. */
+    @Volatile var runningStatement: Statement? = null
     @Volatile private var lastUsed: Long = clock()
     @Volatile var closed: Boolean = false
         private set
@@ -48,18 +53,30 @@ class Session(
     /** The open connection, or null before the first use and after close. Safe to read from any thread. */
     val currentConnection: Connection? get() = connection
 
-    /** Runs [block] on the session thread with the (lazily opened) connection and returns its result. */
+    /**
+     * Runs [block] on the session thread with the (lazily opened) connection and returns its result. Called from
+     * the session thread itself (a nested call) it runs inline instead of deadlocking on its own queue. A
+     * connection error (SQLState `08*`) drops the connection, so the next call reconnects.
+     */
     fun <T> run(block: (Connection) -> T): T {
+        if (Thread.currentThread() === sessionThread) return block(connection ?: throw SessionClosedException())
         val future = gate.withLock {
             if (closed) throw SessionClosedException()
             busy.incrementAndGet()
             try {
                 executor.submit(Callable {
+                    sessionThread = Thread.currentThread()
                     try {
-                        val c = connection?.takeUnless { it.isClosed } ?: opener().also { connection = it }
-                        block(c)
+                        val c = connection?.takeUnless { it.isClosed } ?: openNew()
+                        try {
+                            block(c)
+                        } catch (e: SQLException) {
+                            if (e.sqlState?.startsWith("08") == true) dropConnection()
+                            throw e
+                        }
                     } finally {
                         lastUsed = clock()
+                        busy.decrementAndGet()
                     }
                 })
             } catch (e: RejectedExecutionException) {
@@ -71,10 +88,30 @@ class Session(
             return future.get()
         } catch (e: ExecutionException) {
             throw e.cause ?: e
-        } finally {
-            busy.decrementAndGet()
-            lastUsed = clock()
         }
+    }
+
+    private fun openNew(): Connection {
+        val c = opener()
+        if (closed) {
+            // Closed while the (slow) open was in flight: nobody will ever use or close this connection.
+            runCatching { c.close() }
+            throw SessionClosedException()
+        }
+        connection = c
+        return c
+    }
+
+    private fun dropConnection() {
+        closeListeners.forEach { runCatching(it) }
+        runningStatement = null
+        runCatching { connection?.close() }
+        connection = null
+    }
+
+    /** Aborts the statement that [runningStatement] points at, if any. Safe to call from any thread. */
+    fun cancelRunning() {
+        runCatching { runningStatement?.cancel() }
     }
 
     /** [listener] runs on the session thread just before the connection is closed (cursors release their statements here). */
@@ -109,6 +146,7 @@ class Session(
         } catch (_: RejectedExecutionException) {
         }
         executor.shutdown()
+        cancelRunning()
         if (!executor.awaitTermination(CLOSE_WAIT_SECONDS, TimeUnit.SECONDS)) {
             // A statement is still running: closing the connection from here aborts it.
             executor.shutdownNow()
@@ -145,7 +183,13 @@ class SessionManager(
         sessions[id]?.takeUnless { it.closed }?.let { return it }
         if (!exists(id)) throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
         ensureSweeper()
-        return sessions.compute(id) { _, old -> old?.takeUnless { it.closed } ?: Session(id, { opener(id) }, clock) }!!
+        val created = sessions.compute(id) { _, old -> old?.takeUnless { it.closed } ?: Session(id, { opener(id) }, clock) }!!
+        if (shut) {
+            // close() ran between the check above and the compute: do not leave a session behind.
+            close(id)
+            throw DbException(DbErrorCodes.CONNECTION_FAILED, "The database service is shutting down")
+        }
+        return created
     }
 
     fun <T> run(id: String, block: (Connection) -> T): T {

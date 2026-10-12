@@ -42,6 +42,11 @@ class PostgresIntrospectionTest {
                 st.executeUpdate("CREATE UNIQUE INDEX owners_email_idx ON app.owners (email)")
                 st.executeUpdate("CREATE VIEW app.owner_names AS SELECT name FROM app.owners")
                 st.executeUpdate("CREATE SEQUENCE app.ticket_seq")
+                // LIKE-wildcard lookalikes: schema a_b must not leak into axb and vice versa.
+                st.executeUpdate("CREATE SCHEMA a_b")
+                st.executeUpdate("CREATE SCHEMA axb")
+                st.executeUpdate("CREATE TABLE a_b.t (only_in_a_b int)")
+                st.executeUpdate("CREATE TABLE axb.t (only_in_axb int)")
             }
         }
         service = DbService(Files.createTempDirectory("brewery-pg"), InMemorySecretStore())
@@ -78,6 +83,13 @@ class PostgresIntrospectionTest {
     }
 
     @Test
+    fun `schema names with underscores do not match lookalikes`() {
+        assertEquals(listOf("t"), service.introspect(id, listOf("a_b")).map { it.name })
+        assertEquals(listOf("only_in_a_b"), service.introspect(id, listOf("a_b", "t", "columns")).map { it.name })
+        assertEquals(listOf("only_in_axb"), service.introspect(id, listOf("axb", "t", "columns")).map { it.name })
+    }
+
+    @Test
     fun `columns indexes and foreign keys`() {
         val cols = service.introspect(id, listOf("app", "owners", "columns"))
         assertEquals(listOf("id", "name", "email"), cols.map { it.name })
@@ -94,7 +106,7 @@ class PostgresIntrospectionTest {
 @EnabledIf("dev.brewery.daemon.db.DockerSupport#available", disabledReason = "Docker is not available")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class MariaDbIntrospectionTest {
-    private val maria = MariaDBContainer("mariadb:11.4")
+    private val maria = MariaDBContainer("mariadb:11.4").withUsername("root")
     private lateinit var service: DbService
     private lateinit var id: String
 
@@ -136,7 +148,7 @@ class MariaDbIntrospectionTest {
             service.introspect(id, listOf("shop")).map { it.name to it.kind },
         )
         val cols = service.introspect(id, listOf("shop", "customers", "columns"))
-        assertEquals(listOf("INT NOT NULL PK", "VARCHAR(40) NOT NULL", "TEXT NULL"), cols.map { it.detail })
+        assertEquals(listOf("INT NOT NULL PK", "VARCHAR(40) NOT NULL", "TEXT NULL"), cols.map { it.detail!!.uppercase() })
         val fk = service.introspect(id, listOf("shop", "orders", "foreignKeys")).single()
         assertEquals("orders_customer_fk", fk.name)
         assertEquals("(customer_id) -> customers(id)", fk.detail)

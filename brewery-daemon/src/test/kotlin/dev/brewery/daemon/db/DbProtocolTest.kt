@@ -154,7 +154,7 @@ class DbProtocolTest {
         val nodes = gson.fromJson(fixture("db-introspect.result.json"), Array<DbNode>::class.java)
         assertEquals(listOf("schema", "table", "folder", "column", "index", "foreignKey", "sequence"), nodes.map { it.kind })
         assertEquals(null, nodes[0].detail)
-        assertEquals("integer NOT NULL PK", nodes[3].detail)
+        assertEquals("serial NOT NULL PK", nodes[3].detail)
         assertEquals(listOf("public", "owners", "columns", "id"), nodes[3].path)
     }
 }

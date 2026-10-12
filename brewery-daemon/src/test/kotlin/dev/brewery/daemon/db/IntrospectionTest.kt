@@ -101,6 +101,19 @@ class IntrospectionTest {
     }
 
     @Test
+    fun `table names with LIKE wildcards do not match lookalikes`() {
+        DriverManager.getConnection("jdbc:sqlite:$db").use {
+            it.createStatement().executeUpdate("CREATE TABLE a_b (only_in_a_b INTEGER)")
+            it.createStatement().executeUpdate("CREATE TABLE aXb (only_in_axb INTEGER)")
+            it.createStatement().executeUpdate("CREATE TABLE \"p%q\" (only_in_pq INTEGER)")
+        }
+        assertEquals(listOf("only_in_a_b"), ls("a_b", "columns").map { it.name })
+        assertEquals(listOf("only_in_axb"), ls("aXb", "columns").map { it.name })
+        assertEquals(listOf("only_in_pq"), ls("p%q", "columns").map { it.name })
+        assertEquals(3, ls("a_b").size)
+    }
+
+    @Test
     fun `introspection uses the shared session and unknown ids fail`() {
         ls()
         ls("owners")

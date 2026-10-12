@@ -164,4 +164,46 @@ class SessionTest {
             flaky.close()
         }
     }
+
+    @Test
+    fun `a dropped connection error reconnects on the next call`() {
+        val first = manager.run("a") { it }
+        assertFailsWith<java.sql.SQLException> { manager.run("a") { throw java.sql.SQLException("gone", "08006") } }
+        assertTrue(first.isClosed)
+        val second = manager.run("a") { it }
+        assertNotEquals<Connection>(first, second)
+        // Other errors keep the connection.
+        assertFailsWith<java.sql.SQLException> { manager.run("a") { throw java.sql.SQLException("syntax", "42000") } }
+        assertSame(second, manager.run("a") { it })
+    }
+
+    @Test
+    fun `a nested call on the session thread runs inline`() {
+        val session = manager.session("a")
+        assertEquals(5, session.run { c -> session.run { c2 -> assertSame(c, c2); 5 } })
+    }
+
+    @Test
+    fun `a connection opened while the session closes is closed again`() {
+        val opening = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        val opened = java.util.concurrent.CopyOnWriteArrayList<Connection>()
+        val slow = SessionManager(
+            exists = { true },
+            opener = { opening.countDown(); proceed.await(10, TimeUnit.SECONDS); DriverManager.getConnection("jdbc:sqlite:$file").also { opened += it } },
+            clock = { now },
+        )
+        val caller = Thread { runCatching { slow.run("x") { 1 } } }
+        caller.start()
+        assertTrue(opening.await(10, TimeUnit.SECONDS))
+        val closer = Thread { slow.close("x") }
+        closer.start()
+        Thread.sleep(200)
+        proceed.countDown()
+        caller.join(10_000)
+        closer.join(10_000)
+        // The retry after the closed session opens a second connection; the first, late one must be closed.
+        assertTrue(opened.first().isClosed)
+        slow.close()
+    }
 }
