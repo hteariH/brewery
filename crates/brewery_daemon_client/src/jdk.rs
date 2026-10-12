@@ -1,6 +1,8 @@
 //! Finding a JDK (21+) to run the daemon with, and the daemon jar itself.
 
 use anyhow::{Context as _, Result, bail};
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +111,27 @@ fn children(dir: &Path) -> Vec<PathBuf> {
 /// PATH, `~/.jdks/*`, then the platform's usual install directories. Lazy, so slower
 /// sources are only read when earlier ones did not qualify.
 pub fn find_java(min_major: u32) -> Result<PathBuf> {
+    find_java_in(min_major, |name| std::env::var_os(name))
+}
+
+/// Like `find_java`, but reads `BREWERY_DAEMON_JAVA`, `JAVA_HOME` and `PATH` from `env`
+/// (typically a worktree's login-shell environment, which sees SDKMAN/asdf setups that
+/// the process environment of a desktop launch does not).
+pub fn find_java_with_env(min_major: u32, env: &HashMap<String, String>) -> Result<PathBuf> {
+    find_java_in(min_major, |name| {
+        env.get(name)
+            .or_else(|| {
+                // Windows environment names are case-insensitive (`Path`).
+                cfg!(windows)
+                    .then(|| env.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)))
+                    .flatten()
+                    .map(|(_, value)| value)
+            })
+            .map(OsString::from)
+    })
+}
+
+fn find_java_in(min_major: u32, var: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf> {
     let mut rejected: Vec<JdkCandidate> = Vec::new();
     let mut consider = |candidate: Option<JdkCandidate>| -> Option<PathBuf> {
         let candidate = candidate?;
@@ -121,7 +144,7 @@ pub fn find_java(min_major: u32) -> Result<PathBuf> {
         }
     };
 
-    if let Some(value) = std::env::var_os("BREWERY_DAEMON_JAVA").filter(|v| !v.is_empty()) {
+    if let Some(value) = var("BREWERY_DAEMON_JAVA").filter(|v| !v.is_empty()) {
         let path = PathBuf::from(value);
         let candidate = if path.is_dir() {
             candidate_from_home(&path)
@@ -132,12 +155,12 @@ pub fn find_java(min_major: u32) -> Result<PathBuf> {
             return Ok(java);
         }
     }
-    if let Some(value) = std::env::var_os("JAVA_HOME").filter(|v| !v.is_empty())
+    if let Some(value) = var("JAVA_HOME").filter(|v| !v.is_empty())
         && let Some(java) = consider(candidate_from_home(Path::new(&value)))
     {
         return Ok(java);
     }
-    if let Some(path_var) = std::env::var_os("PATH") {
+    if let Some(path_var) = var("PATH") {
         // Only the first `java` on PATH is what a shell would run.
         let first = std::env::split_paths(&path_var)
             .map(|dir| dir.join(java_exe_name()))
@@ -259,6 +282,47 @@ mod tests {
         assert_eq!(picked, Some(candidate("b", 21)));
         assert_eq!(pick_jdk(vec![candidate("a", 17)], 21), None);
         assert_eq!(pick_jdk(Vec::new(), 21), None);
+    }
+
+    /// A fake JDK home: `release` makes `candidate_from_home` skip running `java`.
+    fn fake_jdk(root: &Path, name: &str, version: &str) -> PathBuf {
+        let home = root.join(name);
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::write(home.join("bin").join(java_exe_name()), b"").unwrap();
+        std::fs::write(
+            home.join("release"),
+            format!(
+                "JAVA_VERSION=\"{version}\"
+"
+            ),
+        )
+        .unwrap();
+        home
+    }
+
+    #[test]
+    fn explicit_environment_supplies_java_home() {
+        let root = std::env::temp_dir().join(format!("brewery-env-jdk-{}", std::process::id()));
+        let home = fake_jdk(&root, "jdk-21", "21.0.1");
+        let env = HashMap::from([("JAVA_HOME".to_string(), home.to_string_lossy().into_owned())]);
+        assert_eq!(
+            find_java_with_env(21, &env).unwrap(),
+            home.join("bin").join(java_exe_name())
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn explicit_environment_supplies_path() {
+        let root = std::env::temp_dir().join(format!("brewery-env-path-{}", std::process::id()));
+        let home = fake_jdk(&root, "jdk-22", "22.0.0");
+        let path = std::env::join_paths([home.join("bin")]).unwrap();
+        let env = HashMap::from([("PATH".to_string(), path.to_string_lossy().into_owned())]);
+        assert_eq!(
+            find_java_with_env(21, &env).unwrap(),
+            home.join("bin").join(java_exe_name())
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
