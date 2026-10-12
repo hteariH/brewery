@@ -197,13 +197,12 @@ class CursorTest {
         }
         val started = System.nanoTime()
         worker.start()
-        // Wait until the statement is registered, then keep cancelling (an interrupt that lands before the
-        // engine started stepping is lost) until the worker returns.
+        // Exactly one cancel, sent as soon as the statement is registered: the session re-sends it a few times
+        // itself, because an interrupt that lands before the engine started stepping would be lost.
         val deadline = started + 15_000_000_000L
-        while (service.sessions.session(id).runningStatement == null && System.nanoTime() < deadline) Thread.sleep(10)
-        while (!finished.await(100, TimeUnit.MILLISECONDS) && System.nanoTime() < deadline) {
-            service.cancel(id, null)
-        }
+        while (service.sessions.session(id).runningStatement == null && System.nanoTime() < deadline) Thread.sleep(1)
+        service.cancel(id, null)
+        finished.await(10, TimeUnit.SECONDS)
         assertEquals(0L, finished.count, "the query was not cancelled")
         val elapsedMs = (System.nanoTime() - started) / 1_000_000
         assertTrue(elapsedMs < 10_000, "cancel took $elapsedMs ms")
@@ -212,5 +211,99 @@ class CursorTest {
         assertEquals(1L, service.execute(id, "UPDATE t SET name = 'after' WHERE id = 2").updateCount)
         val r = service.execute(id, "SELECT name FROM t WHERE id = 2")
         assertEquals(listOf(listOf("after")), service.fetch(r.cursorId!!, 0, 1).rows)
+    }
+
+    // --- streaming transactions (what PostgreSQL needs for fetchSize), exercised on SQLite with the policy forced on ---
+
+    private fun streamingService(): Pair<DbService, String> {
+        val svc = DbService(Files.createTempDirectory("brewery-stream"), InMemorySecretStore(), manageTransactions = { true })
+        val sid = svc.save(ConnectionInfo("", "lite", "sqlite", "jdbc:sqlite:$db", null, false, emptyMap()), null).id
+        return svc to sid
+    }
+
+    private fun autoCommit(svc: DbService, sid: String) = svc.sessions.run(sid) { it.autoCommit }
+
+    @Test
+    fun `a streaming cursor holds autocommit off until the last one is gone`() {
+        val (svc, sid) = streamingService()
+        try {
+            assertTrue(autoCommit(svc, sid))
+            val a = svc.execute(sid, "SELECT id FROM t").cursorId!!
+            assertEquals(false, autoCommit(svc, sid))
+            val b = svc.execute(sid, "SELECT id FROM t").cursorId!!
+            svc.closeCursor(a)
+            assertEquals(false, autoCommit(svc, sid))
+            // Reading b to its end releases it, too.
+            assertTrue(svc.fetch(b, 0, 100).done)
+            assertTrue(autoCommit(svc, sid))
+        } finally {
+            svc.close()
+        }
+    }
+
+    @Test
+    fun `a closed cursor and evicted cursors restore autocommit`() {
+        val (svc, sid) = streamingService()
+        try {
+            val a = svc.execute(sid, "SELECT id FROM t").cursorId!!
+            svc.closeCursor(a)
+            assertTrue(autoCommit(svc, sid))
+            val cursors = (1..21).map { svc.execute(sid, "SELECT $it").cursorId!! }
+            assertEquals(false, autoCommit(svc, sid))
+            cursors.drop(1).forEach { svc.closeCursor(it) }
+            assertTrue(autoCommit(svc, sid))
+        } finally {
+            svc.close()
+        }
+    }
+
+    @Test
+    fun `an update commits and stays autocommit`() {
+        val (svc, sid) = streamingService()
+        try {
+            assertEquals(1L, svc.execute(sid, "UPDATE t SET name = 'committed' WHERE id = 1").updateCount)
+            assertTrue(autoCommit(svc, sid))
+            DriverManager.getConnection("jdbc:sqlite:$db").use { other ->
+                other.createStatement().use { st ->
+                    st.executeQuery("SELECT name FROM t WHERE id = 1").use { rs ->
+                        rs.next()
+                        assertEquals("committed", rs.getString(1))
+                    }
+                }
+            }
+        } finally {
+            svc.close()
+        }
+    }
+
+    @Test
+    fun `an update while a cursor streams commits and drops the streaming cursors`() {
+        val (svc, sid) = streamingService()
+        try {
+            val a = svc.execute(sid, "SELECT id FROM t").cursorId!!
+            assertEquals(1L, svc.execute(sid, "UPDATE t SET name = 'x' WHERE id = 2").updateCount)
+            assertTrue(autoCommit(svc, sid))
+            assertEquals(-32013, assertFailsWith<DbException> { svc.fetch(a, 0, 1) }.code)
+            // The session is still fine.
+            assertEquals(5, svc.fetch(svc.execute(sid, "SELECT id FROM t").cursorId!!, 0, 10).rows.size)
+        } finally {
+            svc.close()
+        }
+    }
+
+    @Test
+    fun `a failing statement rolls back and keeps other cursors alive`() {
+        val (svc, sid) = streamingService()
+        try {
+            assertEquals(-32012, assertFailsWith<DbException> { svc.execute(sid, "SELECT * FROM missing_table") }.code)
+            assertTrue(autoCommit(svc, sid))
+            val a = svc.execute(sid, "SELECT id FROM t ORDER BY id").cursorId!!
+            assertEquals(listOf(listOf("1")), svc.fetch(a, 0, 1).rows)
+            assertEquals(-32012, assertFailsWith<DbException> { svc.execute(sid, "SELECT * FROM missing_table") }.code)
+            assertEquals(false, autoCommit(svc, sid))
+            assertEquals(listOf(listOf("2")), svc.fetch(a, 1, 1).rows)
+        } finally {
+            svc.close()
+        }
     }
 }

@@ -12,6 +12,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -44,8 +45,19 @@ class Session(
     @Volatile private var connection: Connection? = null
     @Volatile private var sessionThread: Thread? = null
 
-    /** Task 3 sets this around each execute so that [cancelRunning] (any thread) can reach the statement. */
-    @Volatile var runningStatement: Statement? = null
+    @Volatile private var running: Statement? = null
+    private val runGeneration = AtomicLong()
+
+    /**
+     * Set around each execute and fetch so that [cancelRunning] (any thread) can reach the statement. Every
+     * assignment starts a new "run", so a delayed cancel retry never hits a later operation on the same statement.
+     */
+    var runningStatement: Statement?
+        get() = running
+        set(value) {
+            runGeneration.incrementAndGet()
+            running = value
+        }
     @Volatile private var lastUsed: Long = clock()
     @Volatile var closed: Boolean = false
         private set
@@ -109,9 +121,25 @@ class Session(
         connection = null
     }
 
-    /** Aborts the statement that [runningStatement] points at, if any. Safe to call from any thread. */
+    /**
+     * Aborts the statement that [runningStatement] points at, if any. Safe to call from any thread. A cancel that
+     * reaches the driver before it started working on the statement is ignored (SQLite, PostgreSQL), so the cancel
+     * is re-sent a few times, as long as the same run is still going. There is deliberately no sticky "cancel
+     * pending" flag: with nothing running it would kill the next, unrelated statement.
+     */
     fun cancelRunning() {
-        runCatching { runningStatement?.cancel() }
+        val target = running ?: return
+        val generation = runGeneration.get()
+        runCatching { target.cancel() }
+        for (delay in CANCEL_RETRY_MS) {
+            try {
+                retryScheduler.schedule({
+                    if (running === target && runGeneration.get() == generation) runCatching { target.cancel() }
+                }, delay, TimeUnit.MILLISECONDS)
+            } catch (_: RejectedExecutionException) {
+                return
+            }
+        }
     }
 
     /** [listener] runs on the session thread just before the connection is closed (cursors release their statements here). */
@@ -156,6 +184,10 @@ class Session(
 
     private companion object {
         const val CLOSE_WAIT_SECONDS = 5L
+        val CANCEL_RETRY_MS = longArrayOf(50, 250, 1000)
+        val retryScheduler: ScheduledExecutorService by lazy {
+            Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "brewery-db-cancel").apply { isDaemon = true } }
+        }
     }
 }
 

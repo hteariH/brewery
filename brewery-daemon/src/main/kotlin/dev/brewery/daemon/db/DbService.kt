@@ -17,6 +17,8 @@ class DbService(
     private val secrets: SecretStore,
     clock: () -> Long = System::currentTimeMillis,
     idleTimeoutMs: Long = SessionManager.DEFAULT_IDLE_TIMEOUT_MS,
+    /** Whether a connection needs autocommit off to stream result sets; PostgreSQL does. Tests force it on. */
+    private val manageTransactions: (Connection) -> Boolean = ::isPostgres,
 ) : AutoCloseable {
     private val projectKey: String = try {
         root.toRealPath().toString()
@@ -139,7 +141,12 @@ class DbService(
     private val cursorManagers = ConcurrentHashMap<String, CursorManager>()
 
     private fun cursorsOf(connectionId: String, session: Session): CursorManager =
-        cursorManagers.compute(connectionId) { _, old -> old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex) }!!
+        cursorManagers.compute(connectionId) { _, old ->
+            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions).also { manager ->
+                // A manager of a closed session would otherwise stay in the map (and keep the session alive).
+                session.onClose { if (session.closed) cursorManagers.remove(connectionId, manager) }
+            }
+        }!!
 
     /** Runs [sql] on the session of [connectionId] and returns after the first result; see [CursorManager.execute]. */
     fun execute(connectionId: String, sql: String): DbExecuteResult = try {
@@ -201,3 +208,6 @@ fun connectionFailure(error: Throwable): DbException {
     val code = if (state != null && state.startsWith("28")) DbErrorCodes.AUTH_FAILED else DbErrorCodes.CONNECTION_FAILED
     return DbException(code, error.message ?: error.javaClass.simpleName)
 }
+
+/** PostgreSQL only streams a result set (fetch size) inside a transaction. */
+fun isPostgres(connection: Connection): Boolean = connection.metaData.url?.startsWith("jdbc:postgresql:") == true

@@ -68,12 +68,42 @@ class PostgresCursorTest {
         val started = System.nanoTime()
         worker.start()
         while (service.sessions.session(id).runningStatement == null && System.nanoTime() - started < 15_000_000_000L) Thread.sleep(10)
-        Thread.sleep(300)
         service.cancel(id, null)
         assertTrue(finished.await(10, TimeUnit.SECONDS), "pg_sleep was not cancelled")
         val error = failure.get()
         assertTrue(error is DbException && error.code == -32012, "unexpected: $error")
         assertTrue(error.message!!.contains("57014"), error.message)
         assertEquals(listOf(listOf("1")), service.fetch(service.execute(id, "SELECT 1").cursorId!!, 0, 1).rows)
+    }
+
+    @Test
+    fun `a huge result is streamed not buffered`() {
+        val started = System.nanoTime()
+        val r = service.execute(id, "SELECT g FROM generate_series(1, 50000000) g")
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+        assertTrue(elapsedMs < 5_000, "execute took $elapsedMs ms: the result set was buffered")
+        assertEquals(false, service.sessions.run(id) { it.autoCommit })
+        val page = service.fetch(r.cursorId!!, 0, 3)
+        assertEquals(listOf(listOf("1"), listOf("2"), listOf("3")), page.rows)
+        assertEquals(false, page.done)
+        service.closeCursor(r.cursorId!!)
+        assertEquals(true, service.sessions.run(id) { it.autoCommit })
+    }
+
+    @Test
+    fun `statements that cannot run in a transaction still work`() {
+        service.execute(id, "VACUUM")
+        assertEquals(true, service.sessions.run(id) { it.autoCommit })
+    }
+
+    @Test
+    fun `an update commits even while a cursor streams and a typo keeps the cursor`() {
+        service.execute(id, "CREATE TABLE IF NOT EXISTS stream_t (a int)")
+        val cursor = service.execute(id, "SELECT g FROM generate_series(1, 5000000) g").cursorId!!
+        assertEquals(-32012, assertFailsWith<DbException> { service.execute(id, "SELECT * FROM no_such_table") }.code)
+        assertEquals(listOf(listOf("1")), service.fetch(cursor, 0, 1).rows)
+        assertEquals(1L, service.execute(id, "INSERT INTO stream_t VALUES (1)").updateCount)
+        assertEquals(true, service.sessions.run(id) { it.autoCommit })
+        assertEquals(-32013, assertFailsWith<DbException> { service.fetch(cursor, 1, 1) }.code)
     }
 }

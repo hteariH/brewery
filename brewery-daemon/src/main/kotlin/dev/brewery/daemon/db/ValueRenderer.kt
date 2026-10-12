@@ -20,19 +20,31 @@ object ValueRenderer {
     private const val ELLIPSIS = "…"
     private val HEX = "0123456789abcdef".toCharArray()
 
-    /** Reads column [index] (1-based) of the current row of [rs] and renders it. */
-    fun read(rs: ResultSet, index: Int): String? {
-        val meta = rs.metaData
-        val type = meta.getColumnType(index)
-        val typeName = meta.getColumnTypeName(index)?.lowercase() ?: ""
+    /** How a column has to be read; worked out once per result set from its metadata, not per cell. */
+    enum class Kind { TIMESTAMP_TZ, TIMESTAMP, DATE, TIME, OTHER }
+
+    fun kinds(meta: java.sql.ResultSetMetaData): List<Kind> = (1..meta.columnCount).map { i ->
+        val type = meta.getColumnType(i)
+        val name = meta.getColumnTypeName(i)?.lowercase() ?: ""
+        when {
+            type == Types.TIMESTAMP_WITH_TIMEZONE || name == "timestamptz" -> Kind.TIMESTAMP_TZ
+            type == Types.TIMESTAMP || name == "timestamp" || name == "datetime" -> Kind.TIMESTAMP
+            type == Types.DATE || name == "date" -> Kind.DATE
+            type == Types.TIME || name == "time" -> Kind.TIME
+            else -> Kind.OTHER
+        }
+    }
+
+    /** Reads column [index] (1-based, of [kind]) of the current row of [rs] and renders it. */
+    fun read(rs: ResultSet, index: Int, kind: Kind): String? {
         val value: Any? = try {
-            when {
-                type == Types.TIMESTAMP_WITH_TIMEZONE || typeName == "timestamptz" -> rs.getObject(index, OffsetDateTime::class.java)
+            when (kind) {
+                Kind.TIMESTAMP_TZ -> rs.getObject(index, OffsetDateTime::class.java)
                 // SQLite hands back the raw stored number from getObject for a TIMESTAMP column; the typed getters convert.
-                type == Types.TIMESTAMP || typeName == "timestamp" || typeName == "datetime" -> rs.getTimestamp(index)
-                type == Types.DATE || typeName == "date" -> rs.getDate(index)
-                type == Types.TIME || typeName == "time" -> rs.getTime(index)
-                else -> rs.getObject(index)
+                Kind.TIMESTAMP -> rs.getTimestamp(index)
+                Kind.DATE -> rs.getDate(index)
+                Kind.TIME -> rs.getTime(index)
+                Kind.OTHER -> rs.getObject(index)
             }
         } catch (_: SQLException) {
             // Values the driver cannot map (odd date formats in SQLite, say) are shown as the raw text.
@@ -54,7 +66,7 @@ object ValueRenderer {
         is ByteArray -> hex(value)
         is java.sql.Timestamp -> value.toLocalDateTime().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
         is java.sql.Date -> value.toLocalDate().format(DateTimeFormatter.ISO_LOCAL_DATE)
-        is java.sql.Time -> value.toLocalTime().format(DateTimeFormatter.ISO_LOCAL_TIME)
+        is java.sql.Time -> value.toLocalTime().withNano(Math.floorMod(value.time, 1000L).toInt() * 1_000_000).format(DateTimeFormatter.ISO_LOCAL_TIME)
         is LocalDateTime -> value.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME)
         is LocalDate -> value.format(DateTimeFormatter.ISO_LOCAL_DATE)
         is LocalTime -> value.format(DateTimeFormatter.ISO_LOCAL_TIME)
@@ -63,12 +75,22 @@ object ValueRenderer {
         is ZonedDateTime -> value.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
         is java.math.BigDecimal -> text(value.toPlainString())
         is java.sql.Array -> render(runCatching { value.array }.getOrNull() ?: value.toString())
-        is Array<*> -> value.joinToString(prefix = "[", postfix = "]") { render(it) ?: "null" }.let(::text)
-        is Iterable<*> -> value.joinToString(prefix = "[", postfix = "]") { render(it) ?: "null" }.let(::text)
-        else -> text(value.toString())
+        is Iterable<*> -> text(value.joinToString(prefix = "[", postfix = "]") { render(it) ?: "null" })
+        else -> if (value.javaClass.isArray) {
+            text((0 until java.lang.reflect.Array.getLength(value)).joinToString(prefix = "[", postfix = "]") {
+                render(java.lang.reflect.Array.get(value, it)) ?: "null"
+            })
+        } else {
+            text(value.toString())
+        }
     }
 
-    private fun text(s: String): String = if (s.length > MAX_TEXT_CHARS) s.substring(0, MAX_TEXT_CHARS) + ELLIPSIS else s
+    private fun text(s: String): String {
+        if (s.length <= MAX_TEXT_CHARS) return s
+        // Do not cut between the two halves of a surrogate pair.
+        val end = if (s[MAX_TEXT_CHARS - 1].isHighSurrogate()) MAX_TEXT_CHARS - 1 else MAX_TEXT_CHARS
+        return s.substring(0, end) + ELLIPSIS
+    }
 
     private fun hex(bytes: ByteArray): String {
         val n = minOf(bytes.size, MAX_BINARY_BYTES)

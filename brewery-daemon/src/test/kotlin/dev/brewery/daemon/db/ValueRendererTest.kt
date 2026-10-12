@@ -56,4 +56,21 @@ class ValueRendererTest {
         assertEquals("[1, 2, null]", ValueRenderer.render(arrayOf<Any?>(1, 2, null)))
         assertTrue(ValueRenderer.render(listOf("x"))!!.contains("x"))
     }
+
+    @Test
+    fun `time keeps its fractional seconds`() {
+        assertEquals("10:20:30.123", ValueRenderer.render(java.sql.Time(java.sql.Time.valueOf("10:20:30").time + 123)))
+    }
+
+    @Test
+    fun `truncation does not split a surrogate pair`() {
+        val text = "a".repeat(9_999) + "😀" + "tail"
+        assertEquals("a".repeat(9_999) + "…", ValueRenderer.render(text))
+    }
+
+    @Test
+    fun `primitive arrays render their elements`() {
+        assertEquals("[1, 2]", ValueRenderer.render(intArrayOf(1, 2)))
+        assertEquals("[1.5]", ValueRenderer.render(doubleArrayOf(1.5)))
+    }
 }
