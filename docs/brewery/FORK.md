@@ -21,7 +21,7 @@
 
     git checkout main
     script/brewery/merge-upstream
-    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
+    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
     cargo test -p workspace --lib
     script/brewery/list-hooks   # every hook still present?
 
@@ -60,3 +60,19 @@ integration test (it skips when unset, as in CI's Rust job).
 
     python script/brewery/gen_themes.py            # after Zed changes assets/themes/one/one.json
     python script/brewery/fetch_intellij_icons.py  # after Zed adds icon keys
+
+## Brewery version and Zed version
+
+Brewery has its own version in `crates/zed/BREWERY_VERSION` (read through
+`brewery_core::BREWERY_VERSION`). It is shown in About, written into the Windows exe
+metadata and used for packages and auto-update. Zed's own version (the `zed` crate's
+`CARGO_PKG_VERSION`) stays as it is: the SSH remote server, extensions and the LSP
+client info depend on it.
+
+## Bundle layout
+
+`brewery_bundle` finds the files shipped next to the app: `jre/`, `brewery-daemon/
+brewery-daemon.jar`, `jdtls/` and `extensions/<id>`. The root is the exe's folder on
+Windows, the parent of `libexec/` on Linux (`/opt/brewery/libexec/brewery-editor`) and
+`Contents/Resources` in a macOS app. A bundled JRE is used for the daemon before
+`JAVA_HOME` and `PATH`.
