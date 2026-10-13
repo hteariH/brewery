@@ -25,6 +25,7 @@ use gpui::{
     App, AsyncWindowContext, Context, Entity, FocusHandle, Focusable, PromptLevel, Render,
     Subscription, Task, WeakEntity, Window, actions,
 };
+use language::LineEnding;
 use project::ProjectPath;
 use project::git_store::{GitStore, Repository, RepositoryId};
 use std::time::Duration;
@@ -72,10 +73,15 @@ pub fn init(cx: &mut App) {
             div.capture_action(move |_: &git::FileHistory, window, cx| {
                 let handled = workspace
                     .update(cx, |workspace, cx| {
-                        let Some((repo_id, path)) = focused_target(workspace, window, cx) else {
+                        let Some((repo_id, paths)) = focused_targets(workspace, window, cx) else {
                             return false;
                         };
-                        LogPanel::show_file_history(workspace, repo_id, path, window, cx)
+                        let mut handled = false;
+                        for path in paths {
+                            handled |=
+                                LogPanel::show_file_history(workspace, repo_id, path, window, cx);
+                        }
+                        handled
                     })
                     .unwrap_or(false);
                 if handled {
@@ -126,20 +132,23 @@ fn open_in_center(
     git_ui::git_graph::open_or_reuse_graph(workspace, repo_id, git_store, source, None, window, cx);
 }
 
-/// The file `git::FileHistory` is about, as `git_ui` resolves it: the Git panel's selected
-/// entry when the panel has focus, else the active editor's file. The Project panel handles
-/// the action itself (through the opener) before this runs.
-fn focused_target(
+/// The files `git::FileHistory` is about, as `git_ui` resolves them: the Git panel's marked
+/// files (or its selected entry) when the panel has focus, one tab each, else the active
+/// editor's file.
+///
+/// The Project panel handles the action itself (through the opener) before this runs: both are
+/// capture listeners on the workspace root, which run in registration order, and
+/// `project_panel::init` runs before `brewery_git::init` (zed's `main.rs`).
+fn focused_targets(
     workspace: &Workspace,
     window: &Window,
     cx: &App,
-) -> Option<(RepositoryId, RepoPath)> {
+) -> Option<(RepositoryId, Vec<RepoPath>)> {
     if let Some(panel) = workspace.panel::<GitPanel>(cx)
         && panel.read(cx).focus_handle(cx).contains_focused(window, cx)
     {
-        // A multi-selection keeps `git_ui`'s behaviour (a graph per file in the center pane).
-        let (repo, path) = panel.read(cx).selected_file_history_target()?;
-        return Some((repo.read(cx).id, path));
+        let (repo, paths) = panel.read(cx).file_history_targets()?;
+        return Some((repo.read(cx).id, paths));
     }
     let editor = workspace.active_item_as::<Editor>(cx)?;
     let editor = editor.read(cx);
@@ -154,7 +163,7 @@ fn focused_target(
         .git_store()
         .read(cx)
         .repository_and_path_for_project_path(&project_path, cx)?;
-    Some((repo.read(cx).id, path))
+    Some((repo.read(cx).id, vec![path]))
 }
 
 /// The file's paths around a commit of its (rename-following) history.
@@ -433,9 +442,10 @@ impl FileHistoryView {
     }
 
     /// Replaces the working copy of the file with the selected commit's version, after the
-    /// user confirms. The same path is restored with `git checkout <sha> -- <path>` (index and
-    /// working tree, as `Repository::checkout_files` does); across a rename the old version's
-    /// content is written to the file's current path (working tree only).
+    /// user confirms, as IntelliJ's Get does: only the working copy changes, never the index.
+    /// An open buffer is edited and saved; otherwise the same path is restored with
+    /// `git restore --source=<sha> --worktree`, and across a rename the old version (filtered
+    /// as `git cat-file --filters`) is written to the file's current path.
     pub fn get(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<()>> {
         self.run(GET, window, cx, async |this, repo, sha, cx| {
             let (path, message) = this.read_with(cx, |this, _| {
@@ -455,17 +465,49 @@ impl FileHistoryView {
             let paths = cx
                 .update(|_, cx| revision_paths(&repo, &path, sha, cx))?
                 .await?;
-            if paths.path == path {
-                repo.update(cx, |repo, cx| {
-                    repo.checkout_files(&sha.to_string(), vec![path], cx)
-                })
-                .await?;
+            // In its checked-out form (eol and smudge filters, with the current path's
+            // attributes), even across a rename.
+            let content = cx
+                .update(|_, cx| {
+                    GitCli::checked_out_bytes_at(
+                        &repo,
+                        &sha.to_string(),
+                        paths.path.clone(),
+                        path.clone(),
+                        cx,
+                    )
+                })?
+                .await?
+                .ok_or_else(|| anyhow!("{} does not exist at {sha}", paths.path.as_unix_str()))?;
+
+            // An open buffer gets the content as an (undoable) edit and is saved, so no
+            // editor shows a stale or conflicting copy.
+            let open = this.update(cx, |this, cx| {
+                let project = this.workspace.upgrade()?.read(cx).project().clone();
+                let project_path = repo.read(cx).repo_path_to_project_path(&path, cx)?;
+                let buffer = project.read(cx).get_open_buffer(&project_path, cx)?;
+                Some((project, buffer))
+            })?;
+            if let Some((project, buffer)) = open
+                && let Ok(text) = String::from_utf8(content.clone())
+            {
+                buffer.update(cx, |buffer, cx| {
+                    if text.contains('\n') {
+                        buffer.set_line_ending(LineEnding::detect(&text), cx);
+                    }
+                    buffer.set_text(text, cx);
+                });
+                project
+                    .update(cx, |project, cx| project.save_buffer(buffer, cx))
+                    .await?;
                 return Ok(());
             }
-            let content = cx
-                .update(|_, cx| GitCli::show_bytes_at(&repo, &sha.to_string(), paths.path, cx))?
-                .await?
-                .ok_or_else(|| anyhow!("{} does not exist at {sha}", path.as_unix_str()))?;
+
+            if paths.path == path {
+                cx.update(|_, cx| GitCli::restore_worktree(&repo, &sha.to_string(), path, cx))?
+                    .await?;
+                return Ok(());
+            }
             let (fs, abs_path) = this.update(cx, |this, cx| {
                 let fs = this
                     .workspace

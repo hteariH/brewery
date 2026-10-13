@@ -9293,6 +9293,16 @@ impl GitPanel {
         }
         Some((repository, entry.repo_path.clone()))
     }
+
+    // brewery: the Log tool window opens a history tab per marked file (as `view_file_history`)
+    pub fn file_history_targets(&self) -> Option<(Entity<Repository>, Vec<RepoPath>)> {
+        let entries = self.effective_status_entries().into_iter();
+        let paths: Vec<_> = entries
+            .filter(|e| !e.status.is_created())
+            .map(|e| e.repo_path)
+            .collect();
+        Some((self.active_repository.clone()?, paths)).filter(|(_, paths)| !paths.is_empty())
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -9307,6 +9317,12 @@ impl GitPanel {
 
     pub fn active_repository(&self) -> Option<&Entity<Repository>> {
         self.active_repository.as_ref()
+    }
+
+    // brewery: marks files as a ctrl-click would, for brewery_git's file-history tests
+    pub fn mark_paths_for_test(&mut self, paths: &[RepoPath], cx: &mut Context<Self>) {
+        self.marked_entries.extend(paths.iter().cloned());
+        cx.notify();
     }
 }
 

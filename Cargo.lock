@@ -2484,6 +2484,7 @@ dependencies = [
  "git_ui_core",
  "gpui",
  "language",
+ "language_model",
  "log",
  "menu",
  "picker",

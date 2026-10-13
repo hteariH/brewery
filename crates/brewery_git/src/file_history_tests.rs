@@ -1,5 +1,6 @@
 use super::*;
 use crate::revision_diff_view::ResolvedSide;
+use editor::Editor;
 use fs::RealFs;
 use gpui::{TestAppContext, VisualTestContext};
 use project::Project;
@@ -96,7 +97,8 @@ fn init_test(cx: &mut TestAppContext) {
         release_channel::init(semver::Version::new(0, 0, 0), cx);
         editor::init(cx);
         // Upstream's handlers and opener, which Brewery's must win over.
-        git_ui::git_graph::init(cx);
+        language_model::init(cx);
+        git_ui::init(cx);
         git_ui_core::set_file_history_opener(|_, _, _, _| panic!("git_ui's opener ran"), cx);
         crate::log_panel::init(cx);
         super::init(cx);
@@ -571,4 +573,154 @@ async fn get_restores_the_revision_after_confirming(cx: &mut TestAppContext) {
             .repository
             .read_with(cx, |repo, _| repo.status_for_path(&path).is_some())
     });
+}
+
+async fn get_confirmed(history: &Entity<FileHistoryView>, cx: &mut VisualTestContext) {
+    let get = history.update_in(cx, |history, window, cx| history.get(window, cx));
+    cx.run_until_parked();
+    cx.simulate_prompt_answer(REPLACE);
+    get.await.expect("get");
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn get_changes_only_the_working_copy(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    let first = repo.commit("a.txt", "one\n", "first");
+    repo.commit("a.txt", "two\n", "second");
+    repo.write("a.txt", "staged\n");
+    repo.git(&["add", "--", "a.txt"]);
+    repo.write("a.txt", "local\n");
+    let (fixture, cx) = open_real(&repo, cx).await;
+    open_history(&fixture, "a.txt", cx);
+    let history = active_history(&fixture, cx);
+    wait_for_commits(&history, 2, cx);
+    select(&history, &first, cx);
+
+    get_confirmed(&history, cx).await;
+    assert_eq!(repo.read("a.txt"), "one\n");
+    assert_eq!(
+        repo.git(&["show", ":a.txt"]),
+        "staged",
+        "the index is untouched"
+    );
+}
+
+#[gpui::test]
+async fn get_edits_an_open_buffer(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    let first = repo.commit("a.txt", "one\n", "first");
+    repo.commit("a.txt", "two\n", "second");
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let path = project_path(&fixture, "a.txt", cx);
+    let editor = fixture
+        .workspace
+        .update_in(cx, |workspace, window, cx| {
+            workspace.open_path(path, None, true, window, cx)
+        })
+        .await
+        .expect("open editor")
+        .downcast::<Editor>()
+        .expect("an editor");
+    editor.update_in(cx, |editor, window, cx| {
+        editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+        editor.insert("unsaved\n", window, cx);
+    });
+    open_history(&fixture, "a.txt", cx);
+    let history = active_history(&fixture, cx);
+    wait_for_commits(&history, 2, cx);
+    select(&history, &first, cx);
+
+    get_confirmed(&history, cx).await;
+    assert_eq!(repo.read("a.txt"), "one\n");
+    let buffer = editor.read_with(cx, |editor, cx| {
+        editor.buffer().read(cx).as_singleton().expect("a buffer")
+    });
+    buffer.read_with(cx, |buffer, _| {
+        assert_eq!(buffer.text(), "one\n");
+        assert!(!buffer.is_dirty(), "saved");
+        assert!(!buffer.has_conflict());
+    });
+    // The replacement is an edit: undo brings the unsaved text back.
+    editor.update_in(cx, |editor, window, cx| {
+        editor.undo(&editor::actions::Undo, window, cx)
+    });
+    buffer.read_with(cx, |buffer, _| assert_eq!(buffer.text(), "two\nunsaved\n"));
+}
+
+#[gpui::test]
+async fn get_across_a_rename_applies_checkout_filters(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.commit(".gitattributes", "*.txt text eol=crlf\n", "attributes");
+    let first = repo.commit("old.txt", "one\r\ntwo\r\n", "first");
+    repo.git(&["mv", "old.txt", "new.txt"]);
+    repo.git(&["commit", "--quiet", "-m", "rename"]);
+    repo.write("new.txt", "local\r\n");
+    let (fixture, cx) = open_real(&repo, cx).await;
+    open_history(&fixture, "new.txt", cx);
+    let history = active_history(&fixture, cx);
+    wait_for_commits(&history, 2, cx);
+    select(&history, &first, cx);
+
+    get_confirmed(&history, cx).await;
+    // Stored with LF; checked out with CRLF.
+    assert_eq!(repo.read("new.txt"), "one\r\ntwo\r\n");
+    assert!(!repo.work.join("old.txt").exists());
+    assert_eq!(
+        repo.git(&["status", "--porcelain"]),
+        "",
+        "matches HEAD's checkout"
+    );
+}
+
+#[gpui::test]
+async fn git_panel_marked_files_open_a_tab_each(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.commit("a.txt", "one\n", "first");
+    repo.commit("b.txt", "two\n", "second");
+    repo.commit("c.txt", "three\n", "third");
+    for file in ["a.txt", "b.txt", "c.txt"] {
+        repo.write(file, "changed\n");
+    }
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let (weak, async_cx) = fixture.workspace.update_in(cx, |workspace, window, cx| {
+        (workspace.weak_handle(), window.to_async(cx))
+    });
+    let git_panel = GitPanel::load(weak, async_cx).await.expect("git panel");
+    fixture.workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_panel(git_panel.clone(), window, cx)
+    });
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+    fixture.workspace.update_in(cx, |workspace, window, cx| {
+        workspace.focus_panel::<GitPanel>(window, cx);
+    });
+    cx.run_until_parked();
+    let c = project_path(&fixture, "c.txt", cx);
+    git_panel.update_in(cx, |panel, window, cx| {
+        panel.select_entry_by_path(c, window, cx);
+        panel.mark_paths_for_test(&[repo_path("a.txt"), repo_path("b.txt")], cx);
+    });
+    let focused = cx.update(|window, cx| git_panel.focus_handle(cx).contains_focused(window, cx));
+    assert!(focused, "the Git panel has focus");
+    cx.run_until_parked();
+
+    cx.update(|window, cx| window.dispatch_action(Box::new(git::FileHistory), cx));
+    cx.run_until_parked();
+
+    fixture.panel.read_with(cx, |panel, cx| {
+        assert_eq!(
+            panel.tab_titles(cx),
+            vec!["Log", "History: a.txt", "History: b.txt"]
+        );
+    });
+    assert_eq!(
+        center_graphs(&fixture, cx),
+        0,
+        "git_ui's graphs did not open"
+    );
 }

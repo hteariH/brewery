@@ -246,6 +246,55 @@ impl GitCli {
         )
     }
 
+    /// The bytes of `old_path` at `rev` as git would check them out at `path` (eol, `ident`,
+    /// LFS and other smudge filters applied, with `path`'s attributes):
+    /// `git cat-file --filters --path=<path> <rev>:<old_path>`. `None` when the file does not
+    /// exist at `rev`.
+    pub fn checked_out_bytes_at(
+        repo: &Entity<Repository>,
+        rev: &str,
+        old_path: RepoPath,
+        path: RepoPath,
+        cx: &mut App,
+    ) -> Task<Result<Option<Vec<u8>>>> {
+        let rev = rev.to_string();
+        Self::job(
+            repo,
+            "brewery git cat-file",
+            None,
+            cx,
+            async move |runner, _| runner.checked_out_bytes_at(&rev, &old_path, &path).await,
+        )
+    }
+
+    /// Replaces the working tree copy of `path` with its version at `rev`, leaving the index
+    /// alone: `git restore --source=<rev> --worktree -- <path>`.
+    pub fn restore_worktree(
+        repo: &Entity<Repository>,
+        rev: &str,
+        path: RepoPath,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let rev = rev.to_string();
+        Self::job(
+            repo,
+            "brewery git restore",
+            Some("git restore".into()),
+            cx,
+            async move |runner, _| {
+                check_revision(&rev, "revision")?;
+                let source = format!("--source={rev}");
+                let output = runner
+                    .run(&["restore", &source, "--worktree", "--", path.as_unix_str()])
+                    .await?;
+                if !output.success() {
+                    bail!("{}", output.message());
+                }
+                Ok(())
+            },
+        )
+    }
+
     /// The commit `rev` names (`git rev-parse --verify --quiet <rev>^{commit}`); `None` when
     /// it names no commit. `-`-prefixed input is an error.
     pub fn resolve_commit(
@@ -623,6 +672,31 @@ impl GitRunner {
             bail!("{}", size.message());
         }
         Ok(Some(size.stdout.trim().parse()?))
+    }
+
+    pub(crate) async fn checked_out_bytes_at(
+        &self,
+        rev: &str,
+        old_path: &RepoPath,
+        path: &RepoPath,
+    ) -> Result<Option<Vec<u8>>> {
+        check_revision(rev, "revision")?;
+        let object = format!("{rev}:{}", old_path.as_unix_str());
+        if !self.run(&["cat-file", "-e", &object]).await?.success() {
+            return Ok(None);
+        }
+        let attributes_path = format!("--path={}", path.as_unix_str());
+        let blob = self
+            .run_raw(
+                &["cat-file", "--filters", &attributes_path, &object],
+                &[],
+                future::pending(),
+            )
+            .await?;
+        if blob.status != 0 {
+            bail!("{}", blob.text().message());
+        }
+        Ok(Some(blob.stdout))
     }
 
     pub(crate) async fn resolve_commit(&self, rev: &str) -> Result<Option<Oid>> {
