@@ -25,6 +25,17 @@ pub(super) struct StripeButton {
     pub panel: Arc<dyn PanelHandle>,
 }
 
+/// IntelliJ names some tool windows differently from Zed's panels. The stripe
+/// shows these titles and icons instead of the panel's own, so the panels
+/// (many of them upstream code) stay untouched.
+fn tool_window_override(persistent_name: &str) -> Option<(&'static str, IconName)> {
+    match persistent_name {
+        // The git panel is IntelliJ's Commit tool window.
+        "GitPanel" => Some(("Commit", IconName::GitCommit)),
+        _ => None,
+    }
+}
+
 /// One button per panel that has an icon, in dock order. A button is active
 /// when its panel is the dock's visible panel; clicking an active button
 /// closes the dock, any other button opens its panel.
@@ -35,6 +46,11 @@ pub(super) fn stripe_buttons(dock: &Dock, window: &Window, cx: &App) -> Vec<Stri
         .filter_map(|(ix, entry)| {
             let icon = entry.panel.icon(window, cx)?;
             let tooltip = entry.panel.icon_tooltip(window, cx)?;
+            let name = entry.panel.persistent_name();
+            let (tooltip, icon) = match tool_window_override(name) {
+                Some((title, override_icon)) => (title, override_icon),
+                None => (tooltip, icon),
+            };
             let active = dock.is_open && dock.active_panel_index == Some(ix);
             let action = if active {
                 dock.toggle_action()
@@ -42,7 +58,7 @@ pub(super) fn stripe_buttons(dock: &Dock, window: &Window, cx: &App) -> Vec<Stri
                 entry.panel.toggle_action(window, cx)
             };
             Some(StripeButton {
-                name: entry.panel.persistent_name(),
+                name,
                 icon,
                 tooltip: tooltip.into(),
                 active,
@@ -268,6 +284,7 @@ mod tests {
             match N {
                 1 => "StripeFirst",
                 2 => "StripeSecond",
+                4 => "GitPanel",
                 _ => "StripeThird",
             }
         }
@@ -285,16 +302,30 @@ mod tests {
             px(300.)
         }
         fn icon(&self, _: &Window, _: &App) -> Option<IconName> {
-            Some(IconName::FileTree)
+            Some(if Self::is_git_panel() {
+                IconName::GitBranch
+            } else {
+                IconName::FileTree
+            })
         }
         fn icon_tooltip(&self, _: &Window, _: &App) -> Option<&'static str> {
-            Some(Self::persistent_name())
+            Some(if Self::is_git_panel() {
+                "Git Panel"
+            } else {
+                Self::persistent_name()
+            })
         }
         fn toggle_action(&self) -> Box<dyn Action> {
             ToggleStripeTestPanel.boxed_clone()
         }
         fn activation_priority(&self) -> u32 {
             N
+        }
+    }
+
+    impl<const N: u32> StripeTestPanel<N> {
+        fn is_git_panel() -> bool {
+            N == 4
         }
     }
 
@@ -393,6 +424,38 @@ mod tests {
                 summary(&stripe_buttons(left_dock, window, cx)),
                 vec![("StripeFirst", false)]
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_git_panel_is_the_commit_tool_window(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let git = cx.new(|cx| StripeTestPanel::<4> {
+                focus_handle: cx.focus_handle(),
+                position: DockPosition::Left,
+            });
+            let other = cx.new(|cx| StripeTestPanel::<1> {
+                focus_handle: cx.focus_handle(),
+                position: DockPosition::Left,
+            });
+            workspace.add_panel(git, window, cx);
+            workspace.add_panel(other, window, cx);
+
+            let dock = workspace.left_dock().read(cx);
+            let buttons = stripe_buttons(dock, window, cx);
+            let git = buttons.iter().find(|b| b.name == "GitPanel").unwrap();
+            assert_eq!(git.tooltip.as_ref(), "Commit");
+            assert_eq!(git.icon, IconName::GitCommit);
+            let other = buttons.iter().find(|b| b.name == "StripeFirst").unwrap();
+            assert_eq!(other.tooltip.as_ref(), "StripeFirst");
+            assert_eq!(other.icon, IconName::FileTree);
         });
     }
 }

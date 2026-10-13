@@ -123,7 +123,7 @@
       "shift-f10": "task::Spawn",
       "ctrl-f5": "task::Rerun",
       "ctrl-e": "file_finder::Toggle",
-      "ctrl-k": "git_panel::ToggleFocus", // bug: This should also focus commit editor
+      "ctrl-k": "git_panel::ToggleFocus", // opens the Commit tool window; inside it, see the GitPanel block below
       "ctrl-shift-n": "file_finder::Toggle",
       "ctrl-alt-n": "file_finder::Toggle",
       "ctrl-n": "project_symbols::Toggle",
@@ -191,7 +191,14 @@
       "shift-pagedown": "terminal::ScrollPageDown",
     },
   },
-  { "context": "GitPanel", "bindings": { "alt-0": "workspace::CloseActiveDock" } },
+  // brewery: the Commit tool window. ctrl-k again, once it is open, focuses the commit message.
+  {
+    "context": "GitPanel",
+    "bindings": {
+      "alt-0": "workspace::CloseActiveDock",
+      "ctrl-k": "git_panel::FocusEditor",
+    },
+  },
   { "context": "ProjectPanel", "bindings": { "alt-1": "workspace::CloseActiveDock" } },
   { "context": "DebugPanel", "bindings": { "alt-5": "workspace::CloseActiveDock" } },
   { "context": "Diagnostics > Editor", "bindings": { "alt-6": "pane::CloseActiveItem" } },
