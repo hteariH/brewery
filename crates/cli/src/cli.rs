@@ -103,3 +103,99 @@ impl CliResponseSink for ipc::IpcSender<CliResponse> {
         ipc::IpcSender::send(self, response).map_err(|error| anyhow::anyhow!("{error}"))
     }
 }
+
+// brewery: CLI and app lookup names live here as pure data so they are unit-testable
+// and shared by the `cli` binary and the app's open listener.
+
+/// Linux app lookup, relative to the CLI's directory. libexec is the standard,
+/// lib/brewery is for Arch (and other non-libexec distros), ./brewery is for the
+/// target directory in development builds.
+pub const LINUX_APP_LOCATIONS: [&str; 3] = [
+    "../libexec/brewery-editor",
+    "../lib/brewery/brewery-editor",
+    "./brewery",
+];
+
+/// Windows app lookup, relative to the CLI's directory. ../Brewery.exe is the
+/// standard, lib/brewery is for MSYS2, ./brewery.exe is for development builds.
+pub const WINDOWS_APP_LOCATIONS: [&str; 3] = [
+    "../Brewery.exe",
+    "../lib/brewery/brewery-editor.exe",
+    "./brewery.exe",
+];
+
+/// File name of the datagram socket the running app listens on for CLI requests.
+/// Distinct from Zed's `zed-<channel>.sock` so Brewery never talks to a running Zed.
+pub fn socket_file_name(channel: &str) -> String {
+    format!("brewery-{channel}.sock")
+}
+
+/// `--version` output for the Linux and Windows apps.
+pub fn app_version_string(
+    channel: &str,
+    release_version: &str,
+    commit_sha: Option<&str>,
+    path: &std::path::Path,
+) -> String {
+    format!(
+        "Brewery {}{}{} – {}",
+        if channel == "stable" {
+            "".to_string()
+        } else {
+            format!("{channel} ")
+        },
+        release_version,
+        match commit_sha {
+            Some(commit_sha) => format!(" {commit_sha} "),
+            None => "".to_string(),
+        },
+        path.display(),
+    )
+}
+
+/// `--version` output for a macOS bundle.
+pub fn bundle_version_string(version: &str, path: &std::path::Path) -> String {
+    format!("Brewery {version} – {}", path.display())
+}
+
+#[cfg(test)]
+mod brewery_name_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn linux_lookup_order_has_brewery_names() {
+        assert_eq!(LINUX_APP_LOCATIONS[0], "../libexec/brewery-editor");
+        assert_eq!(LINUX_APP_LOCATIONS[2], "./brewery");
+    }
+
+    #[test]
+    fn windows_lookup_order_has_brewery_names() {
+        assert_eq!(WINDOWS_APP_LOCATIONS[0], "../Brewery.exe");
+        assert_eq!(WINDOWS_APP_LOCATIONS[2], "./brewery.exe");
+    }
+
+    #[test]
+    fn no_zed_names_left() {
+        for name in LINUX_APP_LOCATIONS.iter().chain(WINDOWS_APP_LOCATIONS.iter()) {
+            assert!(!name.to_lowercase().contains("zed"), "{name}");
+        }
+        assert!(!socket_file_name("stable").contains("zed"));
+    }
+
+    #[test]
+    fn socket_name() {
+        assert_eq!(socket_file_name("nightly"), "brewery-nightly.sock");
+    }
+
+    #[test]
+    fn version_strings() {
+        let p = Path::new("/x/brewery-editor");
+        assert_eq!(
+            app_version_string("stable", "0.1.0", None, p),
+            format!("Brewery 0.1.0 – {}", p.display())
+        );
+        assert!(app_version_string("dev", "", Some("abc"), p).starts_with("Brewery dev  abc "));
+        assert!(bundle_version_string("0.1.0", p).starts_with("Brewery 0.1.0 – "));
+    }
+}

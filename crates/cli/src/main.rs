@@ -48,21 +48,21 @@ trait InstalledApp {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "zed",
+    name = "brewery", // brewery:
     disable_version_flag = true,
-    before_help = "The Zed CLI binary.
-This CLI is a separate binary that invokes Zed.
+    before_help = "The Brewery CLI binary.
+This CLI is a separate binary that invokes Brewery.
 
 Examples:
-    `zed`
-          Simply opens Zed
-    `zed --foreground`
+    `brewery`
+          Simply opens Brewery
+    `brewery --foreground`
           Runs in foreground (shows all logs)
-    `zed path-to-your-project`
-          Open your project in Zed
-    `zed -n path-to-file `
+    `brewery path-to-your-project`
+          Open your project in Brewery
+    `brewery -n path-to-file `
           Open file/folder in a new window",
-    after_help = "To read from stdin, append '-', e.g. 'ps axf | zed -'"
+    after_help = "To read from stdin, append '-', e.g. 'ps axf | brewery -'"
 )]
 struct Args {
     /// Wait for all of the given paths to be opened/closed before exiting.
@@ -851,16 +851,16 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let blue = console::Style::new().blue();
     let items = [
         format!(
-            "Add to existing Zed window ({})",
-            blue.apply_to("zed --existing")
+            "Add to existing Brewery window ({})",
+            blue.apply_to("brewery --existing")
         ),
-        format!("Open a new window ({})", blue.apply_to("zed --classic")),
+        format!("Open a new window ({})", blue.apply_to("brewery --classic")),
     ];
 
     let prompt = format!(
         "Configure default behavior for {}\n{}",
-        blue.apply_to("zed <path>"),
-        console::style("You can change this later in Zed settings"),
+        blue.apply_to("brewery <path>"),
+        console::style("You can change this later in Brewery settings"),
     );
 
     let selection = dialoguer::Select::new()
@@ -906,10 +906,8 @@ mod linux {
                 let cli = env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
-                // ./zed is for the target directory in development builds.
-                let possible_locations =
-                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
+                // brewery: lookup list lives in the cli lib (cli::LINUX_APP_LOCATIONS).
+                let possible_locations = cli::LINUX_APP_LOCATIONS;
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -924,19 +922,12 @@ mod linux {
 
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
-            format!(
-                "Zed {}{}{} – {}",
-                if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
-                    "".to_string()
-                } else {
-                    format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
-                },
+            // brewery:
+            cli::app_version_string(
+                &release_channel::RELEASE_CHANNEL_NAME,
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
-                match option_env!("ZED_COMMIT_SHA") {
-                    Some(commit_sha) => format!(" {commit_sha} "),
-                    None => "".to_string(),
-                },
-                self.0.display(),
+                option_env!("ZED_COMMIT_SHA"),
+                &self.0,
             )
         }
 
@@ -945,9 +936,9 @@ mod linux {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| paths::data_dir().clone());
 
-            let sock_path = data_dir.join(format!(
-                "zed-{}.sock",
-                *release_channel::RELEASE_CHANNEL_NAME
+            // brewery: must match the app's open listener.
+            let sock_path = data_dir.join(cli::socket_file_name(
+                &release_channel::RELEASE_CHANNEL_NAME,
             ));
             let sock = UnixDatagram::unbound()?;
             if sock.connect(&sock_path).is_err() {
@@ -1201,19 +1192,12 @@ mod windows {
 
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
-            format!(
-                "Zed {}{}{} – {}",
-                if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
-                    "".to_string()
-                } else {
-                    format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
-                },
+            // brewery:
+            cli::app_version_string(
+                &release_channel::RELEASE_CHANNEL_NAME,
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
-                match option_env!("ZED_COMMIT_SHA") {
-                    Some(commit_sha) => format!(" {commit_sha} "),
-                    None => "".to_string(),
-                },
-                self.0.display(),
+                option_env!("ZED_COMMIT_SHA"),
+                &self.0,
             )
         }
 
@@ -1274,9 +1258,8 @@ mod windows {
                 let cli = std::env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
-                // directory in development builds.
-                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
+                // brewery: lookup list lives in the cli lib (cli::WINDOWS_APP_LOCATIONS).
+                let possible_locations = cli::WINDOWS_APP_LOCATIONS;
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1375,7 +1358,7 @@ mod mac_os {
 
     impl InstalledApp for Bundle {
         fn zed_version_string(&self) -> String {
-            format!("Zed {} – {}", self.version(), self.path().display(),)
+            cli::bundle_version_string(&self.version(), &self.path()) // brewery:
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {

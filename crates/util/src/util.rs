@@ -352,6 +352,14 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
         .context("Failed to shell-escape Zed executable path.")
 }
 
+// brewery: app -> CLI lookup, relative to the app executable's directory.
+// On macOS the app and CLI are both inside the bundle, so ./cli covers installed and dev builds.
+const CLI_LOCATIONS_MACOS: [&str; 1] = ["./cli"];
+// bin/brewery.exe is for installed builds, ./cli.exe is for development builds.
+const CLI_LOCATIONS_WINDOWS: [&str; 2] = ["bin/brewery.exe", "./cli.exe"];
+// bin is the standard, ./cli is for the target directory in development builds.
+const CLI_LOCATIONS_UNIX: [&str; 2] = ["../bin/brewery", "./cli"];
+
 /// Returns a path for the zed cli executable, this function
 /// should be called from the zed executable, not zed-cli.
 pub fn get_zed_cli_path() -> Result<PathBuf> {
@@ -362,16 +370,13 @@ pub fn get_zed_cli_path() -> Result<PathBuf> {
         .parent()
         .context("Failed to determine parent directory of zed executable path.")?;
 
+    // brewery: names come from the CLI_LOCATIONS_* consts below.
     let possible_locations: &[&str] = if cfg!(target_os = "macos") {
-        // On macOS, the zed executable and zed-cli are inside the app bundle,
-        // so here ./cli is for both installed and development builds.
-        &["./cli"]
+        &CLI_LOCATIONS_MACOS
     } else if cfg!(target_os = "windows") {
-        // bin/zed.exe is for installed builds, ./cli.exe is for development builds.
-        &["bin/zed.exe", "./cli.exe"]
+        &CLI_LOCATIONS_WINDOWS
     } else if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
-        // bin is the standard, ./cli is for the target directory in development builds.
-        &["../bin/zed", "./cli"]
+        &CLI_LOCATIONS_UNIX
     } else {
         anyhow::bail!("unsupported platform for determining zed-cli path");
     };
@@ -1049,6 +1054,14 @@ impl<O> From<anyhow::Result<O>> for ConnectionResult<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // brewery: app -> CLI lookup names
+    #[test]
+    fn cli_lookup_names_are_brewery() {
+        assert_eq!(CLI_LOCATIONS_MACOS, ["./cli"]);
+        assert_eq!(CLI_LOCATIONS_WINDOWS, ["bin/brewery.exe", "./cli.exe"]);
+        assert_eq!(CLI_LOCATIONS_UNIX, ["../bin/brewery", "./cli"]);
+    }
 
     #[test]
     fn test_fs_embed_iter_and_get() {
