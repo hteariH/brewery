@@ -88,6 +88,17 @@ pub const SHOW_ZED_ANNOUNCEMENTS: bool = false;
 /// Release notes open the GitHub release page; Zed's notes API is not used.
 pub const RELEASE_NOTES_IN_BROWSER: bool = true;
 
+/// What a manual "Check for Updates" says on a channel that never updates:
+/// `(message, detail)`, or `None` when the channel checks for updates.
+pub fn updates_off_prompt(channel: ReleaseChannel) -> Option<(&'static str, &'static str)> {
+    const DETAIL: &str = "Download Brewery from GitHub Releases.";
+    match channel {
+        ReleaseChannel::Dev => Some(("Updates are off in development builds", DETAIL)),
+        ReleaseChannel::Nightly => Some(("Updates are off in nightly builds", DETAIL)),
+        ReleaseChannel::Stable | ReleaseChannel::Preview => None,
+    }
+}
+
 /// Linux builds point at the package manager first.
 pub const LINUX_UPDATE_HINT: &str =
     "Update Brewery with your package manager or from GitHub Releases.";
@@ -332,6 +343,26 @@ mod tests {
             release.notes_url.as_deref(),
             Some("https://github.com/hteariH/brewery/releases/tag/v0.1.1")
         );
+    }
+
+    #[test]
+    fn test_updates_off_prompt() {
+        assert_eq!(
+            updates_off_prompt(ReleaseChannel::Dev),
+            Some((
+                "Updates are off in development builds",
+                "Download Brewery from GitHub Releases."
+            ))
+        );
+        assert_eq!(
+            updates_off_prompt(ReleaseChannel::Nightly),
+            Some((
+                "Updates are off in nightly builds",
+                "Download Brewery from GitHub Releases."
+            ))
+        );
+        assert_eq!(updates_off_prompt(ReleaseChannel::Stable), None);
+        assert_eq!(updates_off_prompt(ReleaseChannel::Preview), None);
     }
 
     #[test]

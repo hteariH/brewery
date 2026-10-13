@@ -6,7 +6,8 @@ use gpui::{App, Menu, MenuItem};
 pub use brewery_cloud::ZED_CLOUD_ENABLED;
 
 /// Command palette namespaces whose actions only work with a Zed account.
-pub const HIDDEN_CLOUD_NAMESPACES: &[&str] = &["client", "collab", "collab_panel", "auto_update"];
+/// `auto_update` is not one: Brewery updates from its own GitHub Releases.
+pub const HIDDEN_CLOUD_NAMESPACES: &[&str] = &["client", "collab", "collab_panel"];
 
 /// Hides Zed-cloud actions. Call after `command_palette::init`.
 pub fn init(cx: &mut App) {
@@ -39,7 +40,6 @@ pub fn based_on_zed(zed_version: &str) -> String {
 pub const REPOSITORY_URL: &str = "https://github.com/hteariH/brewery";
 
 const REMOVED_MENU_ITEMS: &[&str] = &[
-    "Check for Updates",
     "View Release Notes Locally",
     "Email Us...",
     "Zed Twitter",
@@ -144,6 +144,12 @@ mod tests {
         assert_eq!(based_on_zed("1.25.0"), "based on Zed 1.25.0");
     }
 
+    /// Stand-in for `auto_update::Check` (brewery_core cannot depend on
+    /// auto_update, which depends on it); the filter works by namespace.
+    mod update_actions {
+        gpui::actions!(auto_update, [Check]);
+    }
+
     fn action(name: &str) -> MenuItem {
         MenuItem::action(name.to_string(), NoAction)
     }
@@ -185,9 +191,10 @@ mod tests {
         ];
         let menus = rebrand_menus(menus);
         assert_eq!(menus[0].name.as_ref(), "Brewery");
+        // Check for Updates stays: Brewery updates from its own GitHub Releases.
         assert_eq!(
             names(&menus[0]),
-            vec!["About Brewery", "---", "Quit Brewery"]
+            vec!["About Brewery", "Check for Updates", "---", "Quit Brewery"]
         );
         assert_eq!(
             names(&menus[1]),
@@ -219,6 +226,9 @@ mod tests {
             assert!(filter.is_hidden(&client::SignIn));
             assert!(filter.is_hidden(&client::SignOut));
             assert!(!filter.is_hidden(&menu::Confirm));
+            // Updates come from Brewery's GitHub Releases, so `auto_update: check` stays.
+            assert!(!filter.is_hidden(&update_actions::Check));
+            assert!(!HIDDEN_CLOUD_NAMESPACES.contains(&"auto_update"));
         });
     }
 

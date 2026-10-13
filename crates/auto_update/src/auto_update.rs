@@ -339,6 +339,14 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
         return;
     }
 
+    // brewery: say why a Dev or Nightly build does not check, instead of nothing
+    if let Some((message, detail)) =
+        ReleaseChannel::try_global(cx).and_then(brewery_update::updates_off_prompt)
+    {
+        drop(window.prompt(gpui::PromptLevel::Info, message, Some(detail), &["OK"], cx));
+        return;
+    }
+
     if !ReleaseChannel::try_global(cx)
         .map(|channel| channel.poll_for_updates())
         .unwrap_or(false)
@@ -1947,6 +1955,24 @@ mod tests {
             Some(format!(
                 "https://github.com/hteariH/brewery/releases/tag/v{}",
                 brewery_core::BREWERY_VERSION
+            ))
+        );
+    }
+
+    // brewery: a manual check on a Dev build explains itself instead of doing nothing
+    #[gpui::test]
+    fn test_manual_check_on_dev_says_updates_are_off(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            settings::init(cx);
+            release_channel::init_test(semver::Version::new(0, 100, 0), ReleaseChannel::Dev, cx);
+        });
+        let window = cx.add_empty_window();
+        window.update(|window, cx| check(&Check, window, cx));
+        assert_eq!(
+            window.pending_prompt(),
+            Some((
+                "Updates are off in development builds".to_string(),
+                "Download Brewery from GitHub Releases.".to_string()
             ))
         );
     }
