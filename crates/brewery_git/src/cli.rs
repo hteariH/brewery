@@ -246,6 +246,23 @@ impl GitCli {
         )
     }
 
+    /// The commit `rev` names (`git rev-parse --verify --quiet <rev>^{commit}`); `None` when
+    /// it names no commit. `-`-prefixed input is an error.
+    pub fn resolve_commit(
+        repo: &Entity<Repository>,
+        rev: &str,
+        cx: &mut App,
+    ) -> Task<Result<Option<Oid>>> {
+        let rev = rev.to_string();
+        Self::job(
+            repo,
+            "brewery git rev-parse",
+            None,
+            cx,
+            async move |runner, _| runner.resolve_commit(&rev).await,
+        )
+    }
+
     /// `git rev-list --max-count=<limit> <range>`, newest first.
     pub fn rev_list(
         repo: &Entity<Repository>,
@@ -563,6 +580,18 @@ impl GitRunner {
             bail!("{}", blob.text().message());
         }
         Ok(Some(blob.stdout))
+    }
+
+    pub(crate) async fn resolve_commit(&self, rev: &str) -> Result<Option<Oid>> {
+        check_revision(rev, "revision")?;
+        let commit = format!("{rev}^{{commit}}");
+        let output = self
+            .run(&["rev-parse", "--verify", "--quiet", &commit])
+            .await?;
+        if !output.success() {
+            return Ok(None);
+        }
+        output.stdout.trim().parse::<Oid>().map(Some)
     }
 
     pub(crate) async fn rev_list(&self, range: &str, limit: usize) -> Result<Vec<Oid>> {

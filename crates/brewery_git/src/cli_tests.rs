@@ -525,6 +525,51 @@ fn show_bytes_at_is_lossless_and_show_at_refuses_binary() {
 }
 
 #[test]
+fn resolve_commit_names_commits_only() {
+    let repo = TestRepo::new();
+    let first = repo.commit(
+        "a.txt", "1
+", "c1",
+    );
+    let second = repo.commit(
+        "a.txt", "2
+", "c2",
+    );
+    repo.git(&["tag", "-a", "v1", "-m", "v1", &first]);
+    let runner = repo.runner();
+    let oid = |sha: &str| Some(sha.parse::<Oid>().expect("oid"));
+
+    assert_eq!(
+        block(runner.resolve_commit("HEAD")).expect("head"),
+        oid(&second)
+    );
+    assert_eq!(
+        block(runner.resolve_commit("main~1")).expect("main~1"),
+        oid(&first)
+    );
+    assert_eq!(
+        block(runner.resolve_commit(&first[..7])).expect("short"),
+        oid(&first)
+    );
+    // An annotated tag peels to its commit.
+    assert_eq!(
+        block(runner.resolve_commit("v1")).expect("tag"),
+        oid(&first)
+    );
+    assert_eq!(
+        block(runner.resolve_commit("no-such-ref")).expect("unknown"),
+        None
+    );
+    // A tree is not a commit.
+    assert_eq!(
+        block(runner.resolve_commit("HEAD^{tree}")).expect("tree"),
+        None
+    );
+    assert!(block(runner.resolve_commit("--all")).is_err());
+    assert!(block(runner.resolve_commit("")).is_err());
+}
+
+#[test]
 fn rev_list_range_with_limit() {
     let repo = TestRepo::new();
     let base = repo.commit("a.txt", "0\n", "c0");

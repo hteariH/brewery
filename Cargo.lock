@@ -2474,6 +2474,7 @@ name = "brewery_git"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buffer_diff",
  "editor",
  "fs",
  "futures 0.3.34",
@@ -2482,6 +2483,7 @@ dependencies = [
  "git_ui",
  "git_ui_core",
  "gpui",
+ "language",
  "log",
  "menu",
  "picker",
@@ -2500,6 +2502,7 @@ dependencies = [
  "time",
  "ui",
  "util",
+ "watch",
  "which",
  "workspace",
  "worktree",
