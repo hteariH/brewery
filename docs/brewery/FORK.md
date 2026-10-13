@@ -9,6 +9,13 @@
 3. Never rename or delete Zed crates. Switch features off instead
    (`brewery_cloud::ZED_CLOUD_ENABLED`, default settings, command palette filter).
 4. Zed's GitHub workflows are deleted; Brewery's CI is `.github/workflows/brewery_ci.yml`.
+   It runs on every push. A branch push runs only what the changed paths need: the Linux
+   Rust check, the daemon tests, or nothing for docs-only changes. A newer push cancels the
+   older run. Pushes to main also run the Windows check and build `brewery.exe`. On a
+   branch, put `[win]` in the commit message for the same, or start the workflow manually.
+   A manual run does everything; its "all_platforms" input adds the Linux and macOS
+   release builds, which otherwise run only on `v*` tags. Rust caches are saved from main
+   and tags only, and branches reuse main's caches.
 
 ## Merging upstream (monthly)
 
