@@ -84,6 +84,12 @@ runs the selected text or the statement under the cursor, and Ctrl+F2 stops it.
 Results appear in a grid under the editor, and more rows load as you scroll.
 Double-click a table to open a console with `SELECT * FROM` that table.
 
+While you type in a console, Brewery suggests SQL keywords, the data source's schemas
+and tables after `FROM` or `JOIN`, and columns of the tables in the statement,
+including after an alias such as `o.`. Each column shows its type. The schema is
+loaded once per data source and reloaded after Refresh or after a `CREATE`, `ALTER` or
+`DROP` run from a console.
+
 Data sources are saved in `.brewery/db.json`, which you can commit. Passwords are
 never written there: they go to the operating system's secret store (Windows
 Credential Manager, Secret Service on Linux, macOS Keychain).
