@@ -32,6 +32,19 @@ Shift Shift (Search Everywhere) is bound only in the JetBrains base keymap.
 The script resolves Zed workflow changes (kept deleted) and `README.md` (ours).
 Everything else it leaves to you and lists.
 
+## Log scale check
+
+`brewery_git` has an ignored test that generates a 100k-commit repository with
+`git fast-import` in a temp dir and times the Log tool window on it: `git log`, Zed's graph
+loader, lane assignment, memory, and redraws scrolled to the top, middle and end, before and
+after `git commit-graph write --reachable`. Run it optimised, as debug numbers are several
+times slower:
+
+    cargo test --profile release-fast -p brewery_git -- --ignored log_scale --nocapture
+
+`BREWERY_LOG_SCALE_COMMITS=200000` changes the size. The last results are under
+"Measurements" in `docs/superpowers/plans/2026-10-13-m5b-log-tool-window.md`.
+
 ## Daemon (`brewery-daemon/`)
 
 Kotlin/JVM, Apache 2.0. Needs JDK 21 (`JAVA_HOME`).

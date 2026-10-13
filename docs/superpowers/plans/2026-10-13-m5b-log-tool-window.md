@@ -48,4 +48,72 @@
 
 ## Measurements
 
-(filled in by Task 3)
+Task 3, 2026-10-13. `log_panel::tests::scale::log_scale_100k_commits` (ignored; see
+`docs/brewery/FORK.md` "Log scale check"), built with `--profile release-fast`
+(opt-level 3, no LTO; run with `CARGO_PROFILE_RELEASE_FAST_DEBUG=0`). Machine: Windows 11,
+16 logical cores, git 2.54.0.windows.1.
+
+The test repository comes from `git fast-import`. It has `main` and three long-lived
+branches committed to in turn, each merged into `main` every 40 commits, `main` merged back
+into `develop` every 300, a slow `release` branch merged every 2000, and a tag every 5000.
+It has no commit-graph file until the test writes one.
+
+| 100k commits | no commit-graph | with commit-graph |
+|---|---|---|
+| raw `git log --date-order` (the Log's args): first 1000 lines / all | 618 / 916 ms | 141 / 406 ms |
+| raw `git log --topo-order` instead: first 1000 / all | 570 / 819 ms | 101 / 356 ms |
+| Zed's loader (`RealGitRepository::initial_graph_data`, real threads): first chunk / all | 646 / 933 ms | 148 / 407 ms |
+| Log panel in the gpui test harness: first chunk / full load | 1547 / 1547 ms | 187 / 1123 ms |
+| lane assignment (`GraphData::add_commits` over all 100k at once) | 66 ms | 39 ms |
+| resident memory before / after opening the Log | 40 / 80 MiB | 42 / 80 MiB |
+| window redraw, median of 100, scrolled to top / middle / end | 7.4 / 9.8 / 7.6 ms | 8.9 / 7.0 / 7.0 ms |
+| graph view alone (1600x600), top / middle / end | 20.6 / 23.1 / 18.0 ms | 20.1 / 15.2 / 19.6 ms |
+
+Baseline at 1000 commits: window redraw 6.0-6.6 ms, graph view alone 13.8-14.5 ms, lane
+assignment 0.9 ms. `git commit-graph write --reachable` on 100k commits: 885 ms.
+
+200k commits (an earlier run with `BREWERY_LOG_SCALE_COMMITS=200000`):
+
+- Raw `git log` first 1000 lines: 1278 ms without a commit-graph file, 259 ms with one.
+- The Log panel offered the commit-graph notice in this run.
+- Lane assignment: 108 / 75 ms.
+- Memory: +76 MiB.
+- Window redraw: 8-11 ms. Graph view alone: 18-24 ms.
+- `commit-graph write`: 1.9 s.
+
+25k commits: lane assignment 13-17 ms.
+
+Reading:
+
+- **First chunk.** Without a commit-graph file, `--date-order` has to walk the whole history
+  before git prints the first line. That takes about 6 µs per commit here: 0.6 s at 100k and
+  1.3 s at 200k. A commit-graph file cuts the first chunk by 4-5x. `--topo-order` is not
+  materially faster (570 vs 618 ms), so the Log keeps `--date-order`.
+- **The notice.** The Log panel times the first chunk of each graph it loads from git. If it
+  is slower than 1 s, it checks once per repository whether a commit-graph file is missing:
+  `rev-parse --git-path` for `objects/info/commit-graph` and `commit-graphs`, and
+  `core.commitGraph` must not be `false`. If the file is missing, a one-line notice offers
+  **Write commit-graph**, which runs `git commit-graph write --reachable` through GitCli.
+  On this machine 100k commits stay under the 1 s threshold, so the notice does not appear.
+  At 200k it does.
+- **Lane assignment.** It is linear: about 0.4-0.7 µs per commit, under 1 ms per
+  1000-commit chunk. The `would_overlap` rescan in `add_commits` did not show up. The chunk
+  size stays at 1000.
+- **Per-frame work.** `render_graph_canvas` filters the whole `graph_data.lines` vector, one
+  `Rc` per edge, on every frame. That is the one O(n) per-frame loop. Everything else (rows,
+  ref labels, `fetch_commit_data` for ±100 rows) is bounded by the visible range.
+  - Measured, the graph view alone takes about 14 ms at 1k commits, 15-23 ms at 100k and
+    18-24 ms at 200k. The full window redraw stays at 7-10 ms. The numbers are noisy.
+  - The cost is acceptable at 100k, so nothing was changed: `git_graph.rs` is outside the
+    M5b edit list.
+  - A fix, if 1M-commit repositories matter: the lines are pushed in order of their end
+    row, so a `partition_point` on `full_interval.end` plus an index over long lines would
+    bound the scan to the visible range.
+- **Memory.** Opening the Log adds about 400 B per commit: 40 MiB at 100k. That covers the
+  repository's commit list and oid index, plus the graph's rows and edges. The gap
+  analysis estimated 10-20 MB.
+- **The harness row.** The "Log panel in the gpui test harness" times include the test
+  scheduler. On that single thread it reads git's pipe, parses, and runs the panel, at about
+  10 µs per commit, linearly. It also tends to deliver every chunk in one go. In the app,
+  reading and parsing run on background threads. There, the first chunk shows at about
+  "Zed's loader" first chunk, plus under 1 ms of lane assignment, plus one frame.

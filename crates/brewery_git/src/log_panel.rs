@@ -11,6 +11,11 @@
 //! (`Repository::forget_graph_data`), so at most the current filtered graph and the unfiltered
 //! one stay cached. A text that is a commit hash goes to that commit instead of filtering.
 //! Filters are local only: in remote projects the bar is disabled.
+//!
+//! Large repositories: without a commit-graph file `git log --date-order` walks the whole
+//! history before printing anything. When a graph's first chunk takes longer than a second, the
+//! panel checks once per repository for a commit-graph file and, if there is none, offers to
+//! write one (`git commit-graph write --reachable`).
 
 use crate::GitCli;
 use crate::log_filter_bar::{FilterStatus, LogFilterBar, LogFilterChanged};
@@ -28,8 +33,10 @@ use project::git_store::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::time::Duration;
-use ui::prelude::*;
+use std::collections::HashSet;
+use std::path::Path;
+use std::time::{Duration, Instant};
+use ui::{Tooltip, prelude::*};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
@@ -50,6 +57,9 @@ pub struct ShowCommitInLog {
 
 const LOG_PANEL_KEY: &str = "LogPanel";
 pub const NO_REPOSITORY: &str = "No Git repository";
+pub const COMMIT_GRAPH_NOTICE: &str = "This repository has no commit-graph file, so the log is \
+     slow to start. Writing one makes it load faster.";
+const SLOW_FIRST_CHUNK: Duration = Duration::from_secs(1);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -71,6 +81,21 @@ struct HostedGraph {
     graph: Entity<GitGraph>,
 }
 
+/// A graph whose first chunk is still on its way, to time it.
+struct PendingFirstChunk {
+    repo_id: RepositoryId,
+    source: LogSource,
+    started: Instant,
+}
+
+/// The offer to write a commit-graph file, shown once per repository.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommitGraphNotice {
+    Offered,
+    Writing,
+    Failed(SharedString),
+}
+
 pub struct LogPanel {
     workspace: WeakEntity<Workspace>,
     /// Held directly because `Panel` callbacks such as `set_active` run while the workspace is
@@ -83,6 +108,13 @@ pub struct LogPanel {
     log: Option<HostedGraph>,
     filter_bar: Entity<LogFilterBar>,
     active: bool,
+    /// A first chunk slower than this, in a repository without a commit-graph file, offers to
+    /// write one.
+    slow_first_chunk: Duration,
+    /// Repositories whose commit-graph state has been checked: the notice is offered once.
+    commit_graph_checked: HashSet<RepositoryId>,
+    first_chunk: Option<PendingFirstChunk>,
+    notice: Option<(RepositoryId, CommitGraphNotice)>,
     _git_store_events: Subscription,
     _filter_events: Subscription,
 }
@@ -135,6 +167,10 @@ impl LogPanel {
             log: None,
             filter_bar,
             active: false,
+            slow_first_chunk: SLOW_FIRST_CHUNK,
+            commit_graph_checked: HashSet::default(),
+            first_chunk: None,
+            notice: None,
             _git_store_events: git_store_events,
             _filter_events: filter_events,
         }
@@ -207,6 +243,7 @@ impl LogPanel {
         cx: &mut Context<Self>,
     ) {
         let had_focus = self.focus_handle.contains_focused(window, cx);
+        self.time_first_chunk(repo_id, source.clone().unwrap_or_default(), cx);
         let git_store = self.git_store(cx);
         let workspace = self.workspace.clone();
         let graph =
@@ -302,6 +339,204 @@ impl LogPanel {
         };
         self.filter_bar
             .update(cx, |bar, cx| bar.set_status(status, cx));
+    }
+
+    /// The commit-graph notice for the repository the Log shows.
+    pub fn commit_graph_notice(&self) -> Option<&CommitGraphNotice> {
+        let (repo_id, notice) = self.notice.as_ref()?;
+        (self.log.as_ref()?.repo_id == *repo_id).then_some(notice)
+    }
+
+    /// Runs `git commit-graph write --reachable` for the repository the notice is about.
+    pub fn write_commit_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((repo_id, notice)) = &self.notice else {
+            return;
+        };
+        if *notice == CommitGraphNotice::Writing {
+            return;
+        }
+        let repo_id = *repo_id;
+        let Some(repo) = self.repository(repo_id, cx) else {
+            self.notice = None;
+            return;
+        };
+        self.notice = Some((repo_id, CommitGraphNotice::Writing));
+        let write = GitCli::run(
+            &repo,
+            vec!["commit-graph".into(), "write".into(), "--reachable".into()],
+            Some(Duration::from_secs(600)),
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let failure = match write.await {
+                Ok(output) if output.success() => None,
+                Ok(output) => Some(output.message()),
+                Err(error) => Some(format!("{error:#}")),
+            };
+            this.update(cx, |this, cx| {
+                if this.notice.as_ref().map(|(id, _)| *id) == Some(repo_id) {
+                    this.notice = failure.map(|message| {
+                        let message = format!("git commit-graph write failed: {message}");
+                        (repo_id, CommitGraphNotice::Failed(message.into()))
+                    });
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn dismiss_commit_graph_notice(&mut self, cx: &mut Context<Self>) {
+        if self.notice.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Times the first chunk of a graph that has to be loaded from git (not one in the cache).
+    fn time_first_chunk(&mut self, repo_id: RepositoryId, source: LogSource, cx: &App) {
+        self.first_chunk = None;
+        if self.commit_graph_checked.contains(&repo_id) || !self.project.read(cx).is_local() {
+            return;
+        }
+        let cached = self.repository(repo_id, cx).is_some_and(|repo| {
+            repo.read(cx)
+                .get_graph_data(source.clone(), LogOrder::default())
+                .is_some()
+        });
+        if !cached {
+            self.first_chunk = Some(PendingFirstChunk {
+                repo_id,
+                source,
+                started: Instant::now(),
+            });
+        }
+    }
+
+    /// On the first chunk of a timed graph: if it was slow, checks once whether the repository
+    /// lacks a commit-graph file (and has not turned them off), and if so offers to write one.
+    fn first_chunk_arrived(
+        &mut self,
+        repo_id: RepositoryId,
+        source: &LogSource,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self
+            .first_chunk
+            .take_if(|pending| pending.repo_id == repo_id && pending.source == *source)
+        else {
+            return;
+        };
+        if pending.started.elapsed() < self.slow_first_chunk
+            || !self.commit_graph_checked.insert(repo_id)
+        {
+            return;
+        }
+        let Some(repo) = self.repository(repo_id, cx) else {
+            return;
+        };
+        let work_dir = repo.read(cx).work_directory_abs_path.clone();
+        let enabled = GitCli::run(
+            &repo,
+            vec!["config".into(), "--bool".into(), "core.commitGraph".into()],
+            Some(Duration::from_secs(20)),
+            cx,
+        );
+        let paths = GitCli::run(
+            &repo,
+            vec![
+                "rev-parse".into(),
+                "--git-path".into(),
+                "objects/info/commit-graph".into(),
+                "--git-path".into(),
+                "objects/info/commit-graphs".into(),
+            ],
+            Some(Duration::from_secs(20)),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            // Unset means on (exit status 1, no output).
+            let disabled = matches!(enabled.await, Ok(output) if output.stdout.trim() == "false");
+            let missing = match paths.await {
+                Ok(output) if output.success() => !output
+                    .stdout
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .any(|line| work_dir.join(Path::new(line)).exists()),
+                Ok(output) => {
+                    log::debug!("rev-parse --git-path: {}", output.message());
+                    false
+                }
+                Err(error) => {
+                    log::debug!("rev-parse --git-path: {error:#}");
+                    false
+                }
+            };
+            if missing && !disabled {
+                this.update(cx, |this, cx| {
+                    this.notice = Some((repo_id, CommitGraphNotice::Offered));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn render_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let notice = self.commit_graph_notice()?;
+        let (message, color) = match notice {
+            CommitGraphNotice::Offered => (SharedString::from(COMMIT_GRAPH_NOTICE), Color::Default),
+            CommitGraphNotice::Writing => (
+                SharedString::from("Writing the commit-graph file\u{2026}"),
+                Color::Muted,
+            ),
+            CommitGraphNotice::Failed(message) => (message.clone(), Color::Error),
+        };
+        let offered = matches!(notice, CommitGraphNotice::Offered);
+        let writing = matches!(notice, CommitGraphNotice::Writing);
+        Some(
+            h_flex()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_2()
+                .border_b_1()
+                .border_color(cx.theme().colors().border_variant)
+                .child(
+                    Icon::new(IconName::Info)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Label::new(message).size(LabelSize::Small).color(color)),
+                )
+                .when(offered, |row| {
+                    row.child(
+                        Button::new("log-write-commit-graph", "Write commit-graph")
+                            .label_size(LabelSize::Small)
+                            .tooltip(Tooltip::text("git commit-graph write --reachable"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.write_commit_graph(window, cx)
+                            })),
+                    )
+                })
+                .when(!writing, |row| {
+                    row.child(
+                        IconButton::new("log-dismiss-commit-graph", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Dismiss"))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.dismiss_commit_graph_notice(cx)),
+                            ),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     /// The hosted graph of the Log tab, if the panel has been shown and there is a repository.
@@ -410,6 +645,9 @@ impl LogPanel {
                 RepositoryEvent::GraphEvent((source, _), graph_event),
                 _,
             ) => {
+                if !matches!(graph_event, GitGraphEvent::LoadingError) {
+                    self.first_chunk_arrived(*repo_id, source, cx);
+                }
                 if let Some(log) = &self.log
                     && log.repo_id == *repo_id
                     && log.source.as_ref() == Some(source)
@@ -433,6 +671,7 @@ impl Render for LogPanel {
             Some(log) => v_flex()
                 .size_full()
                 .child(self.filter_bar.clone())
+                .children(self.render_notice(cx))
                 .child(div().flex_1().min_h_0().child(log.graph.clone()))
                 .into_any_element(),
             None => v_flex()
