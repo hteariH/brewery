@@ -123,8 +123,13 @@ merge into the current branch, rename and delete. When a merge or rebase stops o
 conflicts, a notification says how many files conflict; its Show Conflicts button
 opens the Commit tool window.
 
-The Log tool window, file history, compare with branch or revision, and a 3-way
-merge editor come in the next updates.
+The Log tool window (bottom, Alt+9, Cmd+9 on macOS) shows the commit graph with
+commit details. Filter it by branch, user, date, path, and text or hash. On very
+large repositories without a commit-graph file, Brewery offers to write one, which
+makes the Log load faster.
+
+File history, compare with branch or revision, and a 3-way merge editor come in the
+next updates.
 
 ## Licence
 
