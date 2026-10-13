@@ -37,6 +37,7 @@ pub const MAX_FILE_SIZE: usize = 5 * 1024 * 1024;
 pub const BINARY_MESSAGE: &str = "Binary file — can't show differences";
 pub const LARGE_MESSAGE: &str = "File is too large — can't show differences";
 const WORKING_COPY: &str = "Working Copy";
+const EMPTY: &str = "empty";
 pub(crate) const SHORT_SHA_LEN: usize = 8;
 pub(crate) const RECALCULATE_DIFF_DEBOUNCE: Duration = Duration::from_millis(250);
 
@@ -49,10 +50,22 @@ pub enum NewSide {
     Revision(String),
 }
 
+/// What is compared with (the left-hand side).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OldSide {
+    /// The file at a revision: a branch, tag, sha or any `git rev-parse` expression.
+    Revision(String),
+    /// Nothing: the file did not exist (e.g. the parent side of a root commit), so the new side
+    /// shows as entirely added.
+    Empty,
+}
+
 /// A side of the comparison after its revision was resolved, when the view opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedSide {
     WorkingCopy,
+    /// No file (the old side of a root commit).
+    Empty,
     /// `rev` as the caller gave it and the commit it resolved to.
     Revision {
         rev: String,
@@ -65,6 +78,7 @@ impl ResolvedSide {
     fn title(&self) -> String {
         match self {
             Self::WorkingCopy => WORKING_COPY.to_string(),
+            Self::Empty => format!("({EMPTY})"),
             Self::Revision { rev, .. } => format!("({})", short_ref(rev)),
         }
     }
@@ -73,6 +87,7 @@ impl ResolvedSide {
     fn description(&self) -> String {
         match self {
             Self::WorkingCopy => WORKING_COPY.to_string(),
+            Self::Empty => EMPTY.to_string(),
             Self::Revision { rev, sha } if *rev == sha.to_string() => rev.clone(),
             Self::Revision { rev, sha } => format!("{rev} ({sha})"),
         }
@@ -102,7 +117,10 @@ enum Content {
 }
 
 pub struct RevisionDiffView {
+    /// The file on the new side.
     path: RepoPath,
+    /// The file on the old side: differs from `path` across a rename.
+    old_path: RepoPath,
     old: ResolvedSide,
     new: ResolvedSide,
     content: Content,
@@ -158,10 +176,41 @@ impl RevisionDiffView {
         window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<Entity<Self>>> {
+        Self::open_paths(
+            workspace,
+            repo,
+            OldSide::Revision(old),
+            path.clone(),
+            new,
+            path,
+            window,
+            cx,
+        )
+    }
+
+    /// Like `open`, with the file under its own path on each side (a file renamed between the
+    /// two) and an old side that may be empty (the parent of a root commit).
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_paths(
+        workspace: WeakEntity<Workspace>,
+        repo: Entity<Repository>,
+        old: OldSide,
+        old_path: RepoPath,
+        new: NewSide,
+        path: RepoPath,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<Entity<Self>>> {
         window.spawn(cx, async move |cx| {
             let project = workspace.update(cx, |workspace, _| workspace.project().clone())?;
 
-            let old_sha = resolve(&repo, &old, cx).await?;
+            let old_side = match old {
+                OldSide::Revision(rev) => ResolvedSide::Revision {
+                    sha: resolve(&repo, &rev, cx).await?,
+                    rev,
+                },
+                OldSide::Empty => ResolvedSide::Empty,
+            };
             let new_side = match &new {
                 NewSide::WorkingCopy => ResolvedSide::WorkingCopy,
                 NewSide::Revision(rev) => ResolvedSide::Revision {
@@ -169,17 +218,18 @@ impl RevisionDiffView {
                     sha: resolve(&repo, rev, cx).await?,
                 },
             };
-            let old_side = ResolvedSide::Revision {
-                rev: old,
-                sha: old_sha,
+            let old_content = match &old_side {
+                ResolvedSide::Revision { sha, .. } => {
+                    Loaded::from_bytes(read_revision(&repo, *sha, &old_path, cx).await?)
+                }
+                _ => Loaded::Missing,
             };
-
-            let old_content = Loaded::from_bytes(read_revision(&repo, old_sha, &path, cx).await?);
             let new_content = match &new_side {
                 ResolvedSide::Revision { sha, .. } => {
                     Loaded::from_bytes(read_revision(&repo, *sha, &path, cx).await?)
                 }
                 ResolvedSide::WorkingCopy => read_working_copy(&project, &repo, &path, cx).await?,
+                ResolvedSide::Empty => Loaded::Missing,
             };
 
             let message = match (&old_content, &new_content) {
@@ -198,6 +248,7 @@ impl RevisionDiffView {
                 return workspace.update_in(cx, |workspace, window, cx| {
                     let view = cx.new(|cx| Self {
                         path,
+                        old_path,
                         old: old_side,
                         new: new_side,
                         content: Content::Message {
@@ -240,6 +291,7 @@ impl RevisionDiffView {
                 let view = cx.new(|cx| {
                     Self::new_diff(
                         path,
+                        old_path,
                         old_side,
                         new_side,
                         old_content,
@@ -260,6 +312,7 @@ impl RevisionDiffView {
     #[allow(clippy::too_many_arguments)]
     fn new_diff(
         path: RepoPath,
+        old_path: RepoPath,
         old: ResolvedSide,
         new: ResolvedSide,
         old_content: Loaded,
@@ -287,7 +340,12 @@ impl RevisionDiffView {
             splittable.set_diff_hunk_renderer(Some(Arc::new(HiddenUnstagedDiffHunkRenderer)), cx);
             splittable
         });
-        let header = format!("{} {} ↔ {}", path.as_unix_str(), old.title(), new.title());
+        let header = format!(
+            "{} {} ↔ {}",
+            paths_description(&old_path, &path),
+            old.title(),
+            new.title()
+        );
         editor.update(cx, |editor, cx| {
             editor.rhs_editor().update(cx, |editor, _| {
                 editor.set_breadcrumb_header(header);
@@ -352,6 +410,7 @@ impl RevisionDiffView {
 
         Self {
             path,
+            old_path,
             old,
             new,
             content: Content::Diff {
@@ -368,7 +427,12 @@ impl RevisionDiffView {
         &self.path
     }
 
-    /// The left (old) side: always a revision.
+    /// The compared file on the old side: differs from `path` across a rename.
+    pub fn old_path(&self) -> &RepoPath {
+        &self.old_path
+    }
+
+    /// The left (old) side: a revision, or empty.
     pub fn old_side(&self) -> &ResolvedSide {
         &self.old
     }
@@ -410,6 +474,15 @@ impl RevisionDiffView {
 
     fn file_name(&self) -> &str {
         self.path.file_name().unwrap_or(self.path.as_unix_str())
+    }
+}
+
+/// `a.txt`, or `old.txt → new.txt` across a rename.
+fn paths_description(old_path: &RepoPath, path: &RepoPath) -> String {
+    if old_path == path {
+        path.as_unix_str().to_string()
+    } else {
+        format!("{} → {}", old_path.as_unix_str(), path.as_unix_str())
     }
 }
 
@@ -536,7 +609,7 @@ impl Item for RevisionDiffView {
         Some(
             format!(
                 "{}\n{} ↔ {}",
-                self.path.as_unix_str(),
+                paths_description(&self.old_path, &self.path),
                 self.old.description(),
                 self.new.description()
             )

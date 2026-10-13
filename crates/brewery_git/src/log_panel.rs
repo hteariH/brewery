@@ -16,16 +16,22 @@
 //! history before printing anything. When a graph's first chunk takes longer than a second, the
 //! panel checks once per repository for a commit-graph file and, if there is none, offers to
 //! write one (`git commit-graph write --reachable`).
+//!
+//! File history (`file_history`) opens further tabs, one per file: the panel then shows a tab
+//! strip (Log first) and remembers the active tab while it runs. A history tab's graph data is
+//! dropped when the tab closes.
 
 use crate::GitCli;
+use crate::cli::RepoPath;
+use crate::file_history::FileHistoryView;
 use crate::log_filter_bar::{FilterStatus, LogFilterBar, LogFilterChanged};
 use anyhow::Result;
 use git::Oid;
 use git::repository::{LogOrder, LogSource};
 use git_ui::git_graph::GitGraph;
 use gpui::{
-    Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
-    Render, Subscription, WeakEntity, Window, actions, px,
+    Action, App, AsyncWindowContext, Context, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, Pixels, Render, Subscription, WeakEntity, Window, actions, px,
 };
 use project::Project;
 use project::git_store::{
@@ -56,6 +62,7 @@ pub struct ShowCommitInLog {
 }
 
 const LOG_PANEL_KEY: &str = "LogPanel";
+pub const LOG_TAB: &str = "Log";
 pub const NO_REPOSITORY: &str = "No Git repository";
 pub const COMMIT_GRAPH_NOTICE: &str = "This repository has no commit-graph file, so the log is \
      slow to start. Writing one makes it load faster.";
@@ -106,6 +113,10 @@ pub struct LogPanel {
     /// Created when the panel is first shown (a full `git log` is not worth running for a panel
     /// nobody looks at) and kept while it is hidden.
     log: Option<HostedGraph>,
+    /// File-history tabs, after the Log tab, in the order they were opened.
+    histories: Vec<Entity<FileHistoryView>>,
+    /// The active file-history tab; `None` is the Log tab.
+    active_history: Option<EntityId>,
     filter_bar: Entity<LogFilterBar>,
     active: bool,
     /// A first chunk slower than this, in a repository without a commit-graph file, offers to
@@ -141,7 +152,9 @@ impl LogPanel {
         // The panel itself has nothing to focus: hand focus to the graph, whose key context
         // carries the graph's actions.
         cx.on_focus(&focus_handle, window, |this, window, cx| {
-            if let Some(log) = &this.log {
+            if let Some(history) = this.active_history() {
+                history.focus_handle(cx).focus(window, cx);
+            } else if let Some(log) = &this.log {
                 log.graph.focus_handle(cx).focus(window, cx);
             }
         })
@@ -165,6 +178,8 @@ impl LogPanel {
             focus_handle,
             position: DockPosition::Bottom,
             log: None,
+            histories: Vec::new(),
+            active_history: None,
             filter_bar,
             active: false,
             slow_first_chunk: SLOW_FIRST_CHUNK,
@@ -546,6 +561,9 @@ impl LogPanel {
 
     /// Selects `sha` in the Log tab, once the graph has loaded it.
     pub fn select_commit(&mut self, sha: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_history.is_some() {
+            self.activate_tab(None, window, cx);
+        }
         self.sync_graph(window, cx);
         let Ok(oid) = sha.parse::<Oid>() else {
             log::warn!("not a commit hash: {sha}");
@@ -555,6 +573,150 @@ impl LogPanel {
             log.graph
                 .update(cx, |graph, cx| graph.select_commit_by_sha(oid, cx));
         }
+    }
+
+    /// The file-history tabs, in tab order (after the Log tab).
+    pub fn histories(&self) -> &[Entity<FileHistoryView>] {
+        &self.histories
+    }
+
+    /// The active file-history tab; `None` when the Log tab is active.
+    pub fn active_history(&self) -> Option<&Entity<FileHistoryView>> {
+        let id = self.active_history?;
+        self.histories
+            .iter()
+            .find(|history| history.entity_id() == id)
+    }
+
+    /// The tab strip's titles (`Log`, then `History: <file>` per history tab).
+    pub fn tab_titles(&self, cx: &App) -> Vec<SharedString> {
+        std::iter::once(SharedString::from(LOG_TAB))
+            .chain(
+                self.histories
+                    .iter()
+                    .map(|history| history.read(cx).title()),
+            )
+            .collect()
+    }
+
+    /// The strip is shown only when there is more than the Log tab.
+    pub fn shows_tab_strip(&self) -> bool {
+        !self.histories.is_empty()
+    }
+
+    /// Opens (or activates) the history tab of `path` in repository `repo_id`.
+    pub fn open_file_history(
+        &mut self,
+        repo_id: RepositoryId,
+        path: RepoPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<FileHistoryView> {
+        let existing = self.histories.iter().find(|history| {
+            let history = history.read(cx);
+            history.repo_id() == repo_id && *history.path() == path
+        });
+        let history = match existing {
+            Some(history) => history.clone(),
+            None => {
+                let workspace = self.workspace.clone();
+                let git_store = self.git_store(cx);
+                let history = cx.new(|cx| {
+                    FileHistoryView::new(workspace, git_store, repo_id, path, window, cx)
+                });
+                self.histories.push(history.clone());
+                history
+            }
+        };
+        self.activate_tab(Some(history.entity_id()), window, cx);
+        history
+    }
+
+    /// Activates a history tab, or the Log tab for `None`.
+    pub fn activate_tab(
+        &mut self,
+        history: Option<EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let history = history.filter(|id| {
+            self.histories
+                .iter()
+                .any(|history| history.entity_id() == *id)
+        });
+        let had_focus = self.focus_handle.contains_focused(window, cx);
+        self.active_history = history;
+        if history.is_none() && self.active {
+            self.sync_graph(window, cx);
+        }
+        if had_focus {
+            self.focus_handle.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Closes a history tab and drops its graph data. Closing the active tab activates the
+    /// one before it.
+    pub fn close_file_history(
+        &mut self,
+        history: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self
+            .histories
+            .iter()
+            .position(|tab| tab.entity_id() == history)
+        else {
+            return;
+        };
+        let closed = self.histories.remove(index);
+        let (repo_id, source) = {
+            let closed = closed.read(cx);
+            (closed.repo_id(), closed.log_source())
+        };
+        drop(closed);
+        let still_used = self.histories.iter().any(|history| {
+            let history = history.read(cx);
+            history.repo_id() == repo_id && history.log_source() == source
+        });
+        if !still_used && let Some(repo) = self.repository(repo_id, cx) {
+            repo.update(cx, |repo, _| {
+                repo.forget_graph_data(&source, LogOrder::default())
+            });
+        }
+        if self.active_history == Some(history) {
+            let previous = index
+                .checked_sub(1)
+                .and_then(|index| self.histories.get(index))
+                .map(|history| history.entity_id());
+            self.activate_tab(previous, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Opens the history of `path` in the workspace's Log panel and focuses it; the repository
+    /// root opens the Log tab. `false` when the workspace has no Log panel.
+    pub fn show_file_history(
+        workspace: &mut Workspace,
+        repo_id: RepositoryId,
+        path: RepoPath,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> bool {
+        let Some(panel) = workspace.panel::<LogPanel>(cx) else {
+            return false;
+        };
+        // Before the panel is shown, so that showing it does not load the Log tab's graph.
+        panel.update(cx, |panel, cx| {
+            if path.is_empty() {
+                panel.activate_tab(None, window, cx);
+            } else {
+                panel.open_file_history(repo_id, path, window, cx);
+            }
+        });
+        workspace.focus_panel::<LogPanel>(window, cx);
+        true
     }
 
     /// Opens and focuses the panel, then selects `sha` in it.
@@ -631,7 +793,18 @@ impl LogPanel {
             GitStoreEvent::ActiveRepositoryChanged(_)
             | GitStoreEvent::RepositoryAdded
             | GitStoreEvent::RepositoryRemoved(_) => {
-                if self.active {
+                if let GitStoreEvent::RepositoryRemoved(removed) = event {
+                    let gone = self
+                        .histories
+                        .iter()
+                        .filter(|history| history.read(cx).repo_id() == *removed)
+                        .map(|history| history.entity_id())
+                        .collect::<Vec<_>>();
+                    for history in gone {
+                        self.close_file_history(history, window, cx);
+                    }
+                }
+                if self.active && self.active_history.is_none() {
                     self.sync_graph(window, cx);
                 } else if self.log.as_ref().map(|log| log.repo_id) != self.active_repository_id(cx)
                 {
@@ -665,16 +838,77 @@ impl LogPanel {
     }
 }
 
+impl LogPanel {
+    fn render_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.active_history;
+        let tab = |id: SharedString, label: SharedString, selected: bool| {
+            h_flex()
+                .id(id)
+                .h_full()
+                .px_2()
+                .gap_1()
+                .border_r_1()
+                .border_color(cx.theme().colors().border_variant)
+                .cursor_pointer()
+                .when(selected, |tab| {
+                    tab.bg(cx.theme().colors().tab_active_background)
+                })
+                .hover(|tab| tab.bg(cx.theme().colors().ghost_element_hover))
+                .child(Label::new(label).size(LabelSize::Small).color(if selected {
+                    Color::Default
+                } else {
+                    Color::Muted
+                }))
+        };
+        h_flex()
+            .w_full()
+            .h_7()
+            .flex_none()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().tab_bar_background)
+            .child(
+                tab("log-tab".into(), LOG_TAB.into(), active.is_none()).on_click(
+                    cx.listener(|this, _, window, cx| this.activate_tab(None, window, cx)),
+                ),
+            )
+            .children(self.histories.iter().map(|history| {
+                let id = history.entity_id();
+                let title = history.read(cx).title();
+                let tooltip = history.read(cx).path().as_unix_str().to_string();
+                tab(
+                    format!("log-history-tab-{id}").into(),
+                    title,
+                    active == Some(id),
+                )
+                .tooltip(Tooltip::text(tooltip))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.activate_tab(Some(id), window, cx)),
+                )
+                .child(
+                    IconButton::new(format!("log-history-close-{id}"), IconName::Close)
+                        .icon_size(IconSize::XSmall)
+                        .tooltip(Tooltip::text("Close"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_file_history(id, window, cx)
+                        })),
+                )
+            }))
+    }
+}
+
 impl Render for LogPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = match &self.log {
-            Some(log) => v_flex()
+        let body = match (self.active_history(), &self.log) {
+            (Some(history), _) => history.clone().into_any_element(),
+            (None, Some(log)) => v_flex()
                 .size_full()
                 .child(self.filter_bar.clone())
                 .children(self.render_notice(cx))
                 .child(div().flex_1().min_h_0().child(log.graph.clone()))
                 .into_any_element(),
-            None => v_flex()
+            (None, None) => v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
@@ -686,7 +920,10 @@ impl Render for LogPanel {
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(cx.theme().colors().panel_background)
-            .child(body)
+            .when(self.shows_tab_strip(), |panel| {
+                panel.child(self.render_tab_strip(cx))
+            })
+            .child(div().flex_1().min_h_0().child(body))
     }
 }
 
@@ -738,7 +975,8 @@ impl Panel for LogPanel {
 
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.active = active;
-        if active {
+        // A history tab needs nothing; the Log tab's graph is built when first shown.
+        if active && self.active_history.is_none() {
             self.sync_graph(window, cx);
         }
     }
