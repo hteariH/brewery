@@ -88,7 +88,7 @@ Brewery checks `https://github.com/hteariH/brewery/releases/latest/download/late
                 "linux-x86_64": {...}, "macos-aarch64": {...}}}
 
 On Windows the installer is downloaded, verified against `sha256`, run in update mode,
-and `toolsuto_update_helper.exe` swaps the files on quit, including the `jre`,
+and `tools\auto_update_helper.exe` swaps the files on quit, including the `jre`,
 `brewery-daemon`, `jdtls` and `extensions` directories. The helper waits up to 5 s for
 processes started from those directories and then stops them. On Linux and macOS
 Brewery only shows a notification with a link to the release notes; packages update
