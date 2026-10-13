@@ -214,7 +214,7 @@ fn submenu_entries_depend_on_branch_kind() {
             "Checkout and Rebase onto 'main'",
             "Rebase 'main' onto 'feature-a'",
             "Merge 'feature-a' into 'main'",
-            "(off) Compare with 'main'",
+            "Compare with 'main'",
             "Rename…",
             "Delete",
         ]
@@ -231,7 +231,7 @@ fn submenu_entries_depend_on_branch_kind() {
             "Checkout and Rebase onto 'main'",
             "Rebase 'main' onto 'origin/main'",
             "Merge 'origin/main' into 'main'",
-            "(off) Compare with 'main'",
+            "Compare with 'main'",
         ]
     );
     // Detached HEAD: nothing to merge into or rebase.

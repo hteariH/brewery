@@ -192,7 +192,8 @@ impl BranchDiff {
         });
     }
 
-    pub(crate) fn deploy_branch_diff_with_base_ref(
+    // brewery: pub, for Brewery's Compare with Branch or Revision
+    pub fn deploy_branch_diff_with_base_ref(
         workspace: &mut Workspace,
         project: Entity<Project>,
         intended_repo: Entity<Repository>,

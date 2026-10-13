@@ -1,7 +1,7 @@
 //! IntelliJ-style Branches popup: top actions, Recent / Local / Remote groups and a per-branch
-//! submenu (checkout, new branch from, rebase, merge, rename, delete). It replaces Zed's
-//! branch picker in the title bar (through `git_ui_core::set_branch_picker_builder`) and for
-//! `git::Branch`.
+//! submenu (checkout, new branch from, rebase, merge, compare with current, rename, delete).
+//! It replaces Zed's branch picker in the title bar (through
+//! `git_ui_core::set_branch_picker_builder`) and for `git::Branch`.
 //!
 //! Checkout, create, rename and delete go through Zed's `Repository` methods; merge, rebase,
 //! detached checkout and the reflog go through [`GitCli`]. Update Project and Push dispatch
@@ -33,6 +33,7 @@ use workspace::notifications::NotificationId;
 use workspace::{ModalView, Toast, Workspace};
 
 use crate::cli::{GitCli, MergeOutcome, Operation, check_revision};
+use crate::compare;
 
 /// How many recent branches the Recent group shows.
 const RECENT_LIMIT: usize = 5;
@@ -480,29 +481,40 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn show_toast(workspace: &WeakEntity<Workspace>, toast: OutcomeToast, cx: &mut App) {
-    #[cfg(test)]
-    SHOWN_TOASTS.with(|shown| shown.borrow_mut().push(toast.clone()));
+pub(crate) fn show_toast(workspace: &WeakEntity<Workspace>, toast: OutcomeToast, cx: &mut App) {
     let Some(workspace) = workspace.upgrade() else {
+        #[cfg(test)]
+        SHOWN_TOASTS.with(|shown| shown.borrow_mut().push(toast.clone()));
         log::info!("{}", toast.message);
         return;
     };
-    let weak = workspace.downgrade();
     workspace.update(cx, |workspace, cx| {
-        let mut notification = Toast::new(toast_id(toast.kind), toast.message);
-        match toast.kind {
-            ToastKind::Success => notification = notification.autohide(),
-            // M5d replaces this with the Conflicts dialog.
-            ToastKind::Conflicts => {
-                notification = notification.on_click("Show Conflicts", move |window, cx| {
-                    weak.update(cx, |workspace, cx| open_git_panel(workspace, window, cx))
-                        .ok();
-                })
-            }
-            ToastKind::Error => {}
-        }
-        workspace.show_toast(notification, cx);
+        show_workspace_toast(workspace, toast, cx)
     });
+}
+
+/// `show_toast` from inside a workspace update.
+pub(crate) fn show_workspace_toast(
+    workspace: &mut Workspace,
+    toast: OutcomeToast,
+    cx: &mut Context<Workspace>,
+) {
+    #[cfg(test)]
+    SHOWN_TOASTS.with(|shown| shown.borrow_mut().push(toast.clone()));
+    let weak = cx.weak_entity();
+    let mut notification = Toast::new(toast_id(toast.kind), toast.message);
+    match toast.kind {
+        ToastKind::Success => notification = notification.autohide(),
+        // M5d replaces this with the Conflicts dialog.
+        ToastKind::Conflicts => {
+            notification = notification.on_click("Show Conflicts", move |window, cx| {
+                weak.update(cx, |workspace, cx| open_git_panel(workspace, window, cx))
+                    .ok();
+            })
+        }
+        ToastKind::Error => {}
+    }
+    workspace.show_toast(notification, cx);
 }
 
 fn open_git_panel(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
@@ -590,7 +602,7 @@ pub(crate) fn submenu_entries(
         entries.push((
             BranchAction::CompareWithCurrent,
             format!("Compare with '{current}'"),
-            false,
+            true,
         ));
     }
     if is_local {
@@ -798,7 +810,18 @@ impl BranchesDelegate {
                 window,
                 cx,
             ),
-            BranchAction::CompareWithCurrent => {}
+            BranchAction::CompareWithCurrent => {
+                // The project against the branch, as a merge-base diff.
+                let Some(repo) = self.repo.clone() else {
+                    return;
+                };
+                self.workspace
+                    .update(cx, |workspace, cx| {
+                        compare::compare_project(workspace, repo, name.into(), window, cx)
+                    })
+                    .ok();
+                cx.emit(DismissEvent);
+            }
             BranchAction::MergeIntoCurrent => {
                 let Some(current) = current else { return };
                 self.spawn_operation(
