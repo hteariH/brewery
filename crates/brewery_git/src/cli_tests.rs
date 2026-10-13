@@ -643,6 +643,155 @@ fn user_strings_that_look_like_options_are_refused() {
     assert!(!repo.work.join("x").exists());
 }
 
+#[test]
+fn conflict_stages_read_base_ours_and_theirs() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    let runner = repo.runner();
+    block(runner.merge("feature")).expect("merge");
+    let a = RepoPath::new("a.txt").expect("path");
+
+    let stages = block(runner.conflict_stages(&a, 1024)).expect("stages");
+    assert_eq!(
+        stages.base,
+        StageBlob::Bytes(
+            b"base
+"
+            .to_vec()
+        )
+    );
+    assert_eq!(
+        stages.ours,
+        StageBlob::Bytes(
+            b"main
+"
+            .to_vec()
+        )
+    );
+    assert_eq!(
+        stages.theirs,
+        StageBlob::Bytes(
+            b"feature
+"
+            .to_vec()
+        )
+    );
+
+    let small = block(runner.conflict_stages(&a, 4)).expect("stages");
+    assert_eq!(small.base, StageBlob::TooLarge);
+    assert_eq!(small.ours, StageBlob::TooLarge);
+    assert_eq!(small.theirs, StageBlob::TooLarge);
+}
+
+#[test]
+fn conflict_stages_of_an_add_add_conflict_have_no_base() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "a.txt", "base
+", "base",
+    );
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    repo.commit(
+        "new.txt",
+        "feature
+",
+        "feature adds",
+    );
+    repo.git(&["checkout", "--quiet", "main"]);
+    repo.commit(
+        "new.txt",
+        "main
+",
+        "main adds",
+    );
+    let runner = repo.runner();
+    block(runner.merge("feature")).expect("merge");
+
+    let stages = block(runner.conflict_stages(&RepoPath::new("new.txt").expect("path"), 1024))
+        .expect("stages");
+    assert_eq!(stages.base, StageBlob::Missing);
+    assert_eq!(
+        stages.ours,
+        StageBlob::Bytes(
+            b"main
+"
+            .to_vec()
+        )
+    );
+    assert_eq!(
+        stages.theirs,
+        StageBlob::Bytes(
+            b"feature
+"
+            .to_vec()
+        )
+    );
+}
+
+#[test]
+fn conflict_sides_in_a_merge() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    let runner = repo.runner();
+    block(runner.merge("feature")).expect("merge");
+
+    let sides = block(runner.conflict_sides()).expect("sides");
+    assert_eq!(sides.operation, Some(Operation::Merge));
+    assert_eq!(sides.yours, "main");
+    assert_eq!(sides.theirs, "feature");
+    assert_eq!(sides.yours_stage(), Side::Ours);
+}
+
+#[test]
+fn conflict_sides_in_a_rebase_keep_yours_as_the_rebased_branch() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    repo.git(&["checkout", "--quiet", "feature"]);
+    let runner = repo.runner();
+    block(runner.rebase("main")).expect("rebase");
+
+    let sides = block(runner.conflict_sides()).expect("sides");
+    assert_eq!(sides.operation, Some(Operation::Rebase));
+    assert_eq!(sides.yours, "feature");
+    assert_eq!(sides.theirs, "main");
+    // git's stage 2 ("ours") is main here; the user's own change is stage 3.
+    assert_eq!(sides.yours_stage(), Side::Theirs);
+}
+
+#[test]
+fn conflict_sides_name_an_unnamed_merge_head_by_short_sha() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    let feature = repo.git(&["rev-parse", "feature"]);
+    repo.git(&["branch", "--quiet", "-D", "feature"]);
+    let runner = repo.runner();
+    block(runner.merge(&feature)).expect("merge");
+
+    let sides = block(runner.conflict_sides()).expect("sides");
+    assert_eq!(sides.yours, "main");
+    assert_eq!(sides.theirs, feature[..8].to_string());
+}
+
+#[test]
+fn mark_resolved_stages_the_files() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    let runner = repo.runner();
+    block(runner.merge("feature")).expect("merge");
+
+    repo.write(
+        "a.txt",
+        "resolved
+",
+    );
+    block(runner.mark_resolved(paths(&["a.txt"]))).expect("add");
+    assert_eq!(
+        repo.git(&["diff", "--name-only", "--diff-filter=U"]),
+        "c.txt"
+    );
+    assert_eq!(repo.git(&["show", ":a.txt"]), "resolved");
+}
+
 // Through the project's Repository entity and its job queue.
 
 fn init_gpui(cx: &mut TestAppContext) {

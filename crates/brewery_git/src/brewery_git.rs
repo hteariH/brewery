@@ -11,15 +11,19 @@ pub mod log_filter;
 pub mod log_filter_bar;
 pub mod log_panel;
 pub mod merge3;
+pub mod merge_view;
 pub mod revision_diff_view;
 
 pub use branches_popup::BranchesPopup;
-pub use cli::{GitCli, GitOutput, MergeOutcome, Operation, Side};
+pub use cli::{
+    ConflictSides, ConflictStages, GitCli, GitOutput, MergeOutcome, Operation, Side, StageBlob,
+};
 pub use compare::{CompareTarget, CompareWithRevision};
 pub use file_history::{FileHistoryView, ShowFileHistory};
 pub use log_filter::LogFilter;
 pub use log_filter_bar::LogFilterBar;
 pub use log_panel::LogPanel;
+pub use merge_view::MergeView;
 pub use revision_diff_view::{NewSide, OldSide, ResolvedSide, RevisionDiffView};
 
 use gpui::App;

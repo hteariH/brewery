@@ -575,7 +575,7 @@ async fn open_worktree_buffer(
     Ok(Some(buffer))
 }
 
-async fn language_for_path(
+pub(crate) async fn language_for_path(
     languages: &Arc<LanguageRegistry>,
     path: &RepoPath,
 ) -> Option<Arc<Language>> {
@@ -585,7 +585,7 @@ async fn language_for_path(
         .ok()
 }
 
-fn in_memory_buffer(
+pub(crate) fn in_memory_buffer(
     text: &str,
     language: &Option<Arc<Language>>,
     languages: &Arc<LanguageRegistry>,

@@ -72,6 +72,60 @@ pub enum Operation {
     CherryPick,
 }
 
+/// One index stage of a conflicted file, as read for the merge editor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StageBlob {
+    /// The stage does not exist: no common ancestor (add/add), or that side deleted the file.
+    Missing,
+    /// Larger than the limit the caller gave; not read.
+    TooLarge,
+    Bytes(Vec<u8>),
+}
+
+/// The index stages of a conflicted file, in git's terms: `:1:` base, `:2:` ours, `:3:` theirs.
+/// See [`Side`] and [`ConflictSides`] for which is the user's own side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictStages {
+    pub base: StageBlob,
+    pub ours: StageBlob,
+    pub theirs: StageBlob,
+}
+
+/// Who is on which side of the conflicts the repository is stopped on, named for the user.
+///
+/// - Merge (and cherry-pick, or no operation, e.g. a stash pop): yours is the current branch
+///   (stage 2, git's "ours"); theirs is what is merged in, stage 3 (`MERGE_HEAD`, named from
+///   `MERGE_MSG` or a ref pointing at it; `CHERRY_PICK_HEAD`).
+/// - Rebase: git checks out the upstream and replays your commits onto it, so stage 2 is the
+///   branch being rebased *onto* and stage 3 is your commit. Yours is the branch being rebased
+///   (`rebase-merge/head-name`), theirs the onto commit (`rebase-merge/onto`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictSides {
+    pub operation: Option<Operation>,
+    /// A branch name, or a short sha for a detached HEAD.
+    pub yours: String,
+    /// A branch or tag name, or a short sha; empty when unknown.
+    pub theirs: String,
+}
+
+impl ConflictSides {
+    /// The git side ("ours"/"theirs", stage 2/3) that holds the user's own changes.
+    pub fn yours_stage(&self) -> Side {
+        match self.operation {
+            Some(Operation::Rebase) => Side::Theirs,
+            _ => Side::Ours,
+        }
+    }
+
+    /// The git side that holds the other changes.
+    pub fn theirs_stage(&self) -> Side {
+        match self.yours_stage() {
+            Side::Ours => Side::Theirs,
+            Side::Theirs => Side::Ours,
+        }
+    }
+}
+
 /// `git` operations on a project repository. Remote (collab) repositories are not supported.
 pub struct GitCli;
 
@@ -345,6 +399,44 @@ impl GitCli {
             cx,
             async move |runner, _| runner.rev_list(&range, limit).await,
         )
+    }
+
+    /// The index stages of a conflicted file; a stage larger than `max_size` bytes is not read.
+    pub fn conflict_stages(
+        repo: &Entity<Repository>,
+        path: RepoPath,
+        max_size: u64,
+        cx: &mut App,
+    ) -> Task<Result<ConflictStages>> {
+        Self::job(
+            repo,
+            "brewery git conflict stages",
+            None,
+            cx,
+            async move |runner, _| runner.conflict_stages(&path, max_size).await,
+        )
+    }
+
+    /// The operation in progress and the names of the user's side and the other side.
+    pub fn conflict_sides(repo: &Entity<Repository>, cx: &mut App) -> Task<Result<ConflictSides>> {
+        Self::job(
+            repo,
+            "brewery git conflict sides",
+            None,
+            cx,
+            async move |runner, _| runner.conflict_sides().await,
+        )
+    }
+
+    /// Marks files resolved with their working tree content: `git add -- <paths>`.
+    pub fn mark_resolved(
+        repo: &Entity<Repository>,
+        paths: Vec<RepoPath>,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        Self::job(repo, "brewery git add", None, cx, async move |runner, _| {
+            runner.mark_resolved(paths).await
+        })
     }
 
     pub fn in_progress(repo: &Entity<Repository>, cx: &mut App) -> Task<Result<Option<Operation>>> {
@@ -743,6 +835,154 @@ impl GitRunner {
         Ok(operation)
     }
 
+    pub(crate) async fn conflict_stages(
+        &self,
+        path: &RepoPath,
+        max_size: u64,
+    ) -> Result<ConflictStages> {
+        let object = |stage: u8| format!(":{stage}:{}", path.as_unix_str());
+        Ok(ConflictStages {
+            base: self.stage_blob(&object(1), max_size).await?,
+            ours: self.stage_blob(&object(2), max_size).await?,
+            theirs: self.stage_blob(&object(3), max_size).await?,
+        })
+    }
+
+    async fn stage_blob(&self, object: &str, max_size: u64) -> Result<StageBlob> {
+        if !self.run(&["cat-file", "-e", object]).await?.success() {
+            return Ok(StageBlob::Missing);
+        }
+        let size = self.run(&["cat-file", "-s", object]).await?;
+        if !size.success() {
+            bail!("{}", size.message());
+        }
+        if size.stdout.trim().parse::<u64>()? > max_size {
+            return Ok(StageBlob::TooLarge);
+        }
+        let blob = self
+            .run_raw(&["cat-file", "blob", object], &[], future::pending())
+            .await?;
+        if blob.status != 0 {
+            bail!("{}", blob.text().message());
+        }
+        Ok(StageBlob::Bytes(blob.stdout))
+    }
+
+    pub(crate) async fn conflict_sides(&self) -> Result<ConflictSides> {
+        let operation = self.in_progress().await?;
+        let current = self.current_branch().await?;
+        let (yours, theirs) = match operation {
+            Some(Operation::Rebase) => {
+                let dir = [
+                    self.git_dir.join("rebase-merge"),
+                    self.git_dir.join("rebase-apply"),
+                ]
+                .into_iter()
+                .find(|dir| dir.is_dir());
+                let read = |name: &str| {
+                    dir.as_ref()
+                        .and_then(|dir| std::fs::read_to_string(dir.join(name)).ok())
+                        .map(|text| text.trim().to_string())
+                        .filter(|text| !text.is_empty())
+                };
+                let yours = match read("head-name") {
+                    Some(head) if head != "detached HEAD" => head
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(&head)
+                        .to_string(),
+                    _ => match read("orig-head") {
+                        Some(sha) => short_sha(&sha),
+                        None => current.clone(),
+                    },
+                };
+                let theirs = match read("onto") {
+                    Some(onto) => self.name_commit(&onto, &yours).await?,
+                    None => String::new(),
+                };
+                (yours, theirs)
+            }
+            Some(Operation::Merge) => {
+                let message = std::fs::read_to_string(self.git_dir.join("MERGE_MSG")).ok();
+                let theirs = match message.as_deref().and_then(merged_name_from_message) {
+                    Some(name) => name,
+                    None => self.name_head_file("MERGE_HEAD", &current).await?,
+                };
+                (current, theirs)
+            }
+            Some(Operation::CherryPick) => {
+                let theirs = self.name_head_file("CHERRY_PICK_HEAD", &current).await?;
+                (current, theirs)
+            }
+            None => (current, String::new()),
+        };
+        Ok(ConflictSides {
+            operation,
+            yours,
+            theirs,
+        })
+    }
+
+    pub(crate) async fn mark_resolved(&self, paths: Vec<RepoPath>) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut add = vec!["add", "--"];
+        add.extend(paths.iter().map(|path| path.as_unix_str()));
+        self.run_literal_checked(&add).await
+    }
+
+    /// The current branch, or HEAD's short sha when detached.
+    async fn current_branch(&self) -> Result<String> {
+        let branch = self.run(&["symbolic-ref", "--short", "-q", "HEAD"]).await?;
+        if branch.success() && !branch.stdout.trim().is_empty() {
+            return Ok(branch.stdout.trim().to_string());
+        }
+        Ok(self
+            .head()
+            .await?
+            .map(|sha| short_sha(&sha))
+            .unwrap_or_default())
+    }
+
+    /// Names the first commit in `.git/<file>` (e.g. `MERGE_HEAD`).
+    async fn name_head_file(&self, file: &str, exclude: &str) -> Result<String> {
+        let Some(sha) = std::fs::read_to_string(self.git_dir.join(file))
+            .ok()
+            .and_then(|text| text.lines().next().map(|line| line.trim().to_string()))
+            .filter(|sha| !sha.is_empty())
+        else {
+            return Ok(String::new());
+        };
+        self.name_commit(&sha, exclude).await
+    }
+
+    /// A local branch, then a remote branch, then a tag pointing at `sha` (other than
+    /// `exclude`), else the short sha.
+    async fn name_commit(&self, sha: &str, exclude: &str) -> Result<String> {
+        check_revision(sha, "commit")?;
+        let points_at = format!("--points-at={sha}");
+        let refs = self
+            .run(&[
+                "for-each-ref",
+                "--format=%(refname:short)",
+                &points_at,
+                "refs/heads",
+                "refs/remotes",
+                "refs/tags",
+            ])
+            .await?;
+        if refs.success()
+            && let Some(name) = refs
+                .stdout
+                .lines()
+                .map(str::trim)
+                .find(|name| !name.is_empty() && *name != exclude && !name.ends_with("/HEAD"))
+        {
+            return Ok(name.to_string());
+        }
+        Ok(short_sha(sha))
+    }
+
     /// Runs with pathspec magic off, so file names are taken literally.
     async fn run_literal(&self, args: &[&str]) -> Result<GitOutput> {
         self.run_raw(args, &[("GIT_LITERAL_PATHSPECS", "1")], future::pending())
@@ -807,6 +1047,31 @@ impl GitRunner {
         }
         Ok(MergeOutcome::Conflicts(conflicts))
     }
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars()
+        .take(crate::revision_diff_view::SHORT_SHA_LEN)
+        .collect()
+}
+
+/// What `git merge` named in its message: `Merge branch 'feature'`, `Merge remote-tracking
+/// branch 'origin/x'`, `Merge tag 'v1'`, `Merge commit '<sha>'` (shortened).
+fn merged_name_from_message(message: &str) -> Option<String> {
+    let first = message.lines().next()?;
+    if !first.starts_with("Merge ") {
+        return None;
+    }
+    let start = first.find('\'')? + 1;
+    let length = first[start..].find('\'')?;
+    let name = &first[start..start + length];
+    if name.is_empty() {
+        return None;
+    }
+    if first.starts_with("Merge commit ") {
+        return Some(short_sha(name));
+    }
+    Some(name.to_string())
 }
 
 /// Refuses user strings git would read as options.
