@@ -964,9 +964,13 @@ async fn the_commit_graph_notice_can_be_dismissed(cx: &mut TestAppContext) {
 async fn no_commit_graph_notice_when_it_would_not_help(app: &mut TestAppContext) {
     init_test(app);
 
-    // Fast first chunk: not even checked.
+    // Fast first chunk: not even checked. The threshold is wall-clock time, so a loaded machine
+    // could make three commits look slow; an unreachable threshold keeps this case fast.
     let (repo, _) = TestRepo::with_three_commits();
     let (fixture, cx) = open_real(&repo, app).await;
+    fixture
+        .panel
+        .update(cx, |panel, _| panel.slow_first_chunk = Duration::MAX);
     cx.dispatch_action(ToggleLogPanel);
     wait_for_commits(&fixture, 3, cx);
     for _ in 0..10 {

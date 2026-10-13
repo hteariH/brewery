@@ -462,6 +462,11 @@ impl MergeView {
         &self.repo
     }
 
+    /// The conflict's index records when the view opened (`GitCli::conflict_stage_ids`).
+    pub fn stage_ids(&self) -> &[String] {
+        &self.stage_ids
+    }
+
     /// The conflicted file, repository-relative.
     pub fn path(&self) -> &RepoPath {
         &self.path

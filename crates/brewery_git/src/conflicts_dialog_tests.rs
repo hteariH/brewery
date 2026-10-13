@@ -580,3 +580,212 @@ async fn conflicts_from_outside_brewery_show_one_toast_per_episode(cx: &mut Test
     );
     wait_until(cx, "the second toast", |_| conflict_toasts() == 2);
 }
+
+fn open_merge_view(
+    fixture: &Fixture,
+    file: &str,
+    cx: &mut VisualTestContext,
+) -> Task<Result<Entity<MergeView>>> {
+    let repository = fixture.repository.clone();
+    fixture.workspace.update_in(cx, |workspace, window, cx| {
+        MergeView::open(workspace.weak_handle(), repository, path(file), window, cx)
+    })
+}
+
+#[gpui::test]
+async fn accept_asks_before_discarding_merge_work_for_that_file(cx: &mut TestAppContext) {
+    init_test(cx, true);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let a = open_merge_view(&fixture, "a.txt", cx).await.expect("a.txt");
+    a.update(cx, |view, cx| view.accept_left(cx));
+    let c = open_merge_view(&fixture, "c.txt", cx).await.expect("c.txt");
+    let dialog = resolve_conflicts(&fixture, cx);
+
+    // Declining keeps the merge editor and the conflict.
+    let task = dialog.update_in(cx, |dialog, window, cx| {
+        dialog.accept(path("a.txt"), Choice::Theirs, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt(), "unapplied merge work asks first");
+    cx.simulate_prompt_answer("Cancel");
+    task.await.expect("declined");
+    cx.run_until_parked();
+    assert_eq!(repo.unmerged(), "a.txt\nc.txt");
+    assert_eq!(merge_views(&fixture, cx).len(), 2);
+
+    let task = dialog.update_in(cx, |dialog, window, cx| {
+        dialog.accept(path("a.txt"), Choice::Theirs, window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Discard");
+    task.await.expect("accept");
+    cx.run_until_parked();
+    assert_eq!(repo.read("a.txt"), "a\nfeature\nz\n");
+    let open = merge_views(&fixture, cx);
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].entity_id(), c.entity_id());
+
+    // An untouched merge editor closes without a question.
+    let task = dialog.update_in(cx, |dialog, window, cx| {
+        dialog.accept(path("c.txt"), Choice::Yours, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+    task.await.expect("accept");
+    cx.run_until_parked();
+    assert!(merge_views(&fixture, cx).is_empty());
+    assert_eq!(repo.read("c.txt"), "main\n");
+}
+
+#[gpui::test]
+async fn accept_resolves_a_modify_delete_conflict(cx: &mut TestAppContext) {
+    init_test(cx, true);
+    let repo = TestRepo::new();
+    repo.commit_all(&[("a.txt", "base\n"), ("c.txt", "base\n")], "base");
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    repo.git(&["rm", "--quiet", "c.txt"]);
+    repo.git(&["commit", "--quiet", "-m", "delete c"]);
+    repo.git(&["checkout", "--quiet", "main"]);
+    repo.commit_all(&[("c.txt", "main\n")], "change c");
+    assert!(
+        !repo
+            .run(&["merge", "--no-edit", "feature"])
+            .status
+            .success()
+    );
+    let (fixture, cx) = open_real(&repo, cx).await;
+
+    let dialog = resolve_conflicts(&fixture, cx);
+    assert_eq!(dialog_paths(&dialog, cx), paths(&["c.txt"]));
+    wait_until(cx, "mergeable", |cx| {
+        dialog.read_with(cx, |dialog, _| dialog.can_merge(&path("c.txt")).is_some())
+    });
+    dialog.read_with(cx, |dialog, _| {
+        assert_eq!(dialog.can_merge(&path("c.txt")), Some(false))
+    });
+    let task = dialog.update_in(cx, |dialog, window, cx| {
+        dialog.accept(path("c.txt"), Choice::Theirs, window, cx)
+    });
+    task.await.expect("accept theirs");
+    assert!(!repo.work.join("c.txt").exists(), "theirs deleted it");
+    assert_eq!(repo.unmerged(), "");
+}
+
+#[gpui::test]
+async fn continuing_a_rebase_closes_merge_editors_left_from_the_previous_commit(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx, true);
+    let repo = TestRepo::new();
+    repo.commit_all(&[("a.txt", "a\nbase\nz\n"), ("c.txt", "base\n")], "base");
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    repo.commit_all(
+        &[("a.txt", "a\nfeature\nz\n"), ("c.txt", "feature\n")],
+        "feature",
+    );
+    repo.git(&["checkout", "--quiet", "main"]);
+    repo.commit_all(&[("a.txt", "a\nmain1\nz\n"), ("c.txt", "main\n")], "main 1");
+    repo.commit_all(&[("a.txt", "a\nmain2\nz\n")], "main 2");
+    assert!(!repo.run(&["rebase", "feature"]).status.success());
+    let (fixture, cx) = open_real(&repo, cx).await;
+
+    // a.txt has a merge editor open, then gets resolved in a terminal (to feature's text, so
+    // the next commit conflicts in it again).
+    open_merge_view(&fixture, "a.txt", cx).await.expect("a.txt");
+    repo.git(&["checkout", "--ours", "--", "a.txt"]);
+    repo.git(&["add", "a.txt"]);
+    let dialog = resolve_conflicts(&fixture, cx);
+    let task = dialog.update_in(cx, |dialog, window, cx| {
+        dialog.accept(path("c.txt"), Choice::Theirs, window, cx)
+    });
+    task.await.expect("accept");
+    wait_until(cx, "nothing left", |cx| {
+        dialog.read_with(cx, |dialog, _| dialog.can_continue())
+    });
+    assert_eq!(merge_views(&fixture, cx).len(), 1);
+
+    let task = dialog.update_in(cx, |dialog, window, cx| {
+        dialog.continue_operation(window, cx)
+    });
+    task.await.expect("continue");
+    assert_eq!(repo.unmerged(), "a.txt");
+    wait_until(cx, "the stale editor to close", |cx| {
+        merge_views(&fixture, cx).is_empty()
+    });
+}
+
+#[gpui::test]
+async fn closing_the_dialog_during_continue_keeps_the_outcome(cx: &mut TestAppContext) {
+    init_test(cx, true);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    repo.git(&["checkout", "--theirs", "--", "a.txt", "c.txt"]);
+    repo.git(&["add", "a.txt", "c.txt"]);
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let dialog = resolve_conflicts(&fixture, cx);
+    wait_until(cx, "nothing left", |cx| {
+        dialog.read_with(cx, |dialog, _| dialog.can_continue())
+    });
+
+    let task = dialog.update_in(cx, |dialog, window, cx| {
+        dialog.continue_operation(window, cx)
+    });
+    let repository = fixture.repository.clone();
+    assert!(cx.update(|_, cx| operation_running(repository.entity_id(), cx)));
+    fixture.workspace.update_in(cx, |workspace, window, cx| {
+        workspace.hide_modal(window, cx);
+    });
+    drop(dialog);
+    cx.run_until_parked();
+    task.await.expect("continue");
+    cx.run_until_parked();
+
+    assert!(!repo.exists("MERGE_HEAD"));
+    assert!(shown_toasts().contains(&OutcomeToast::success("Merge completed")));
+    assert!(
+        !cx.update(|_, cx| operation_running(repository.entity_id(), cx)),
+        "the operation ended although the dialog went away"
+    );
+}
+
+#[gpui::test]
+fn an_operation_ends_when_its_guard_drops(cx: &mut TestAppContext) {
+    init_test(cx, true);
+    cx.update(|cx| {
+        let id = EntityId::from(7u64);
+        let first = OperationGuard::begin(id, cx);
+        let second = OperationGuard::begin(id, cx);
+        assert!(operation_running(id, cx));
+        drop(first);
+        assert!(operation_running(id, cx));
+        drop(second);
+        assert!(!operation_running(id, cx));
+    });
+}
+
+#[gpui::test]
+async fn a_conflict_opener_can_decline(cx: &mut TestAppContext) {
+    init_test(cx, true);
+    // As Brewery's own opener does for remote projects: Zed's diff opens instead.
+    cx.update(|cx| git_ui_core::brewery_hooks::set_conflict_opener(|_, _, _, _, _| false, cx));
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+
+    confirm_in_git_panel(&fixture, "a.txt", cx).await;
+    wait_until(cx, "the project diff", |cx| {
+        fixture.workspace.read_with(cx, |workspace, cx| {
+            workspace.item_of_type::<ProjectDiff>(cx).is_some()
+        })
+    });
+    assert!(merge_views(&fixture, cx).is_empty());
+    assert!(dialog(&fixture, cx).is_none());
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        assert!(
+            handles_conflicts(workspace, cx),
+            "a local project is handled"
+        );
+    });
+}

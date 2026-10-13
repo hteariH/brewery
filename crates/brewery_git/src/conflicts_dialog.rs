@@ -19,7 +19,9 @@
 //!   typing. An episode starts when a repository goes from no conflicted files to some, and
 //!   ends when it has none again.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use anyhow::{Result, anyhow};
 use gpui::{
@@ -60,6 +62,8 @@ pub struct ConflictsDialog {
     /// Whether each listed file can open in the merge editor; missing while being checked.
     mergeable: HashMap<RepoPath, bool>,
     loaded: bool,
+    /// Why the last listing failed; shown instead of the list.
+    error: Option<String>,
     /// A git command started from the dialog is running.
     busy: bool,
     selected: usize,
@@ -111,6 +115,7 @@ impl ConflictsDialog {
             paths: Vec::new(),
             mergeable: HashMap::new(),
             loaded: false,
+            error: None,
             busy: false,
             selected: 0,
             refresh_task: Task::ready(()),
@@ -162,7 +167,11 @@ impl ConflictsDialog {
 
     /// Continue is offered: an operation is in progress and nothing is left to resolve.
     pub fn can_continue(&self) -> bool {
-        self.loaded && !self.busy && self.paths.is_empty() && self.operation().is_some()
+        self.loaded
+            && self.error.is_none()
+            && !self.busy
+            && self.paths.is_empty()
+            && self.operation().is_some()
     }
 
     /// Whether the file can open in the merge editor (`None` while that is being checked).
@@ -181,9 +190,11 @@ impl ConflictsDialog {
                     (Ok(paths), Ok(sides)) => {
                         this.paths = paths;
                         this.sides = Some(sides);
+                        this.error = None;
                     }
                     (Err(error), _) | (_, Err(error)) => {
                         log::warn!("listing conflicts failed: {error:#}");
+                        this.error = Some(format!("{error:#}"));
                     }
                 }
                 this.loaded = true;
@@ -224,12 +235,12 @@ impl ConflictsDialog {
     }
 
     /// Takes one side of a file and marks it resolved. A merge editor open for the file closes,
-    /// since its result no longer applies.
+    /// since its result no longer applies; when it holds unapplied work, the user is asked first.
     pub fn accept(
         &mut self,
         path: RepoPath,
         choice: Choice,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         let Some(sides) = self.sides.clone() else {
@@ -239,23 +250,45 @@ impl ConflictsDialog {
             Choice::Yours => sides.yours_stage(),
             Choice::Theirs => sides.theirs_stage(),
         };
-        self.busy = true;
-        cx.notify();
-        close_merge_views(&self.workspace, &self.repo, Some(&path), cx);
-        let task = GitCli::checkout_side(&self.repo, vec![path], side, cx);
+        let views = merge_views_of(&self.workspace, &self.repo, Some(&path), cx);
+        let confirm = (!unapplied_files(&views, cx).is_empty()).then(|| {
+            window.prompt(
+                PromptLevel::Warning,
+                &format!("Discard the merge in progress for {}?", path.as_unix_str()),
+                Some("Its merge editor has changes that are not applied; accepting a side replaces them."),
+                &["Discard", "Cancel"],
+                cx,
+            )
+        });
+        let workspace = self.workspace.clone();
+        let repo = self.repo.clone();
         cx.spawn(async move |this, cx| {
+            if let Some(confirm) = confirm
+                && confirm.await.ok() != Some(0)
+            {
+                return Ok(());
+            }
+            this.update(cx, |this, cx| {
+                this.busy = true;
+                cx.notify();
+            })
+            .ok();
+            let task = cx.update(|cx| {
+                discard_views(views, cx);
+                GitCli::checkout_side(&repo, vec![path], side, cx)
+            });
             let result = task.await;
+            cx.update(|cx| {
+                if let Err(error) = &result {
+                    let toast = OutcomeToast::error("Accept failed", &format!("{error:#}"));
+                    show_toast(&workspace, toast, cx);
+                }
+            });
             this.update(cx, |this, cx| {
                 this.busy = false;
-                if let Err(error) = &result {
-                    show_toast(
-                        &this.workspace,
-                        OutcomeToast::error("Accept failed", &format!("{error:#}")),
-                        cx,
-                    );
-                }
                 this.refresh(cx);
-            })?;
+            })
+            .ok();
             result
         })
     }
@@ -304,52 +337,66 @@ impl ConflictsDialog {
             .as_ref()
             .map(|sides| sides.yours.clone())
             .unwrap_or_default();
+        let views = merge_views_of(&self.workspace, &self.repo, None, cx);
+        let unapplied = unapplied_files(&views, cx);
+        let message = if unapplied.is_empty() {
+            format!("Abort the {what}?")
+        } else {
+            format!(
+                "Abort the {what}? Discard the merge in progress for {}?",
+                unapplied.join(", ")
+            )
+        };
         let detail = format!(
-            "Files resolved so far are reset, and {yours} goes back to where it was before the \
-             {what}."
+            "Files resolved so far are reset, open merge editors close without applying, and \
+             {yours} goes back to where it was before the {what}. Uncommitted changes from before \
+             the {what} may not be restored."
         );
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Abort the {what}?"),
+            &message,
             Some(&detail),
             &["Abort", "Cancel"],
             cx,
         );
-        cx.spawn_in(window, async move |this, cx| {
+        let repo = self.repo.clone();
+        let workspace = self.workspace.clone();
+        cx.spawn(async move |this, cx| {
             if answer.await.ok() != Some(0) {
                 return Ok(());
             }
-            let (repo, workspace) = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.busy = true;
                 cx.notify();
-                (this.repo.clone(), this.workspace.clone())
-            })?;
-            let task = cx.update(|_, cx| match operation {
+            })
+            .ok();
+            let task = cx.update(|cx| match operation {
                 Operation::Merge => GitCli::abort_merge(&repo, cx),
                 Operation::Rebase => GitCli::abort_rebase(&repo, cx),
                 Operation::CherryPick => GitCli::abort_cherry_pick(&repo, cx),
-            })?;
+            });
             let result = task.await;
-            this.update(cx, |this, cx| match &result {
+            cx.update(|cx| match &result {
                 Ok(()) => {
-                    close_merge_views(&workspace, &repo, None, cx);
-                    show_toast(
-                        &workspace,
-                        OutcomeToast::success(format!("{} aborted", capitalized(what))),
-                        cx,
-                    );
-                    cx.emit(DismissEvent);
+                    discard_views(merge_views_of(&workspace, &repo, None, cx), cx);
+                    let toast = OutcomeToast::success(format!("{} aborted", capitalized(what)));
+                    show_toast(&workspace, toast, cx);
                 }
                 Err(error) => {
+                    let toast =
+                        OutcomeToast::error(&format!("Abort {what} failed"), &format!("{error:#}"));
+                    show_toast(&workspace, toast, cx);
+                }
+            });
+            this.update(cx, |this, cx| {
+                if result.is_ok() {
+                    cx.emit(DismissEvent);
+                } else {
                     this.busy = false;
-                    show_toast(
-                        &workspace,
-                        OutcomeToast::error(&format!("Abort {what} failed"), &format!("{error:#}")),
-                        cx,
-                    );
                     this.refresh(cx);
                 }
-            })?;
+            })
+            .ok();
             result
         })
     }
@@ -358,7 +405,7 @@ impl ConflictsDialog {
     /// next commit's conflicts keeps the dialog open with those.
     pub fn continue_operation(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         let Some(operation) = self.operation() else {
@@ -368,50 +415,54 @@ impl ConflictsDialog {
         let workspace = self.workspace.clone();
         self.busy = true;
         cx.notify();
-        begin_operation(&repo, cx);
+        let guard = OperationGuard::begin(repo.entity_id(), cx);
         let task = match operation {
             Operation::Merge => GitCli::continue_merge(&repo, cx),
             Operation::Rebase => GitCli::continue_rebase(&repo, cx),
             Operation::CherryPick => GitCli::continue_cherry_pick(&repo, cx),
         };
         let what = capitalized(operation_name(operation));
-        cx.spawn_in(window, async move |this, cx| {
+        // Not tied to the dialog or the window: closing either while git runs keeps the outcome
+        // toast, and the guard ends the operation whatever happens.
+        cx.spawn(async move |this, cx| {
             let outcome = task.await;
-            this.update(cx, |this, cx| {
-                end_operation(&repo, cx);
-                this.busy = false;
-                match &outcome {
-                    Ok(MergeOutcome::Merged | MergeOutcome::UpToDate) => {
-                        show_toast(
-                            &workspace,
-                            OutcomeToast::success(format!("{what} completed")),
-                            cx,
-                        );
-                        cx.emit(DismissEvent);
-                    }
-                    Ok(MergeOutcome::Conflicts(_)) => {
-                        // The next commit of a rebase: same file names, new contents.
-                        this.mergeable.clear();
-                        this.refresh(cx);
-                    }
-                    Ok(MergeOutcome::Failed(message)) => {
-                        show_toast(
-                            &workspace,
-                            OutcomeToast::error(&format!("{what} failed"), message),
-                            cx,
-                        );
-                        this.refresh(cx);
-                    }
-                    Err(error) => {
-                        show_toast(
-                            &workspace,
-                            OutcomeToast::error(&format!("{what} failed"), &format!("{error:#}")),
-                            cx,
-                        );
-                        this.refresh(cx);
-                    }
+            drop(guard);
+            let toast = match &outcome {
+                Ok(MergeOutcome::Merged | MergeOutcome::UpToDate) => {
+                    Some(OutcomeToast::success(format!("{what} completed")))
                 }
-            })?;
+                Ok(MergeOutcome::Conflicts(_)) => None,
+                Ok(MergeOutcome::Failed(message)) => {
+                    Some(OutcomeToast::error(&format!("{what} failed"), message))
+                }
+                Err(error) => Some(OutcomeToast::error(
+                    &format!("{what} failed"),
+                    &format!("{error:#}"),
+                )),
+            };
+            let finished = matches!(outcome, Ok(MergeOutcome::Merged | MergeOutcome::UpToDate));
+            cx.update(|cx| {
+                if let Some(toast) = toast {
+                    show_toast(&workspace, toast, cx);
+                }
+            });
+            this.update(cx, |this, cx| {
+                this.busy = false;
+                if finished {
+                    cx.emit(DismissEvent);
+                } else {
+                    // A rebase's next commit: same file names, new contents.
+                    this.mergeable.clear();
+                    this.refresh(cx);
+                }
+            })
+            .ok();
+            if matches!(
+                outcome,
+                Ok(MergeOutcome::Merged | MergeOutcome::Conflicts(_))
+            ) {
+                close_stale_merge_views(&workspace, &repo, cx).await;
+            }
             outcome.map(|_| ())
         })
     }
@@ -567,12 +618,14 @@ impl Render for ConflictsDialog {
             .map(|(ix, path)| self.render_row(ix, path, cx).into_any_element())
             .collect::<Vec<_>>();
         let status = if !self.loaded {
-            Some("Loading…")
+            Some("Loading…".to_string())
+        } else if let Some(error) = &self.error {
+            Some(format!("Could not list the conflicts: {error}"))
         } else if self.paths.is_empty() {
             Some(if operation.is_some() {
-                "All conflicts are resolved. Continue to finish."
+                "All conflicts are resolved. Continue to finish.".to_string()
             } else {
-                "All conflicts are resolved."
+                "All conflicts are resolved.".to_string()
             })
         } else {
             None
@@ -665,17 +718,17 @@ fn capitalized(word: &str) -> String {
     }
 }
 
-/// Closes the merge editors of `repo` (only `path`'s, if given) without asking.
-fn close_merge_views(
+/// The merge editors of `repo` (only `path`'s, if given).
+fn merge_views_of(
     workspace: &WeakEntity<Workspace>,
     repo: &Entity<Repository>,
     path: Option<&RepoPath>,
-    cx: &mut App,
-) {
+    cx: &App,
+) -> Vec<Entity<MergeView>> {
     let Some(workspace) = workspace.upgrade() else {
-        return;
+        return Vec::new();
     };
-    let views = workspace
+    workspace
         .read(cx)
         .items_of_type::<MergeView>(cx)
         .filter(|view| {
@@ -683,9 +736,52 @@ fn close_merge_views(
             view.repo().entity_id() == repo.entity_id()
                 && path.is_none_or(|path| view.path() == path)
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+/// The files whose merge editors hold work that is not applied.
+fn unapplied_files(views: &[Entity<MergeView>], cx: &App) -> Vec<String> {
+    views
+        .iter()
+        .map(|view| view.read(cx))
+        .filter(|view| view.has_unapplied_work())
+        .map(|view| view.path().as_unix_str().to_string())
+        .collect()
+}
+
+/// Closes merge editors without asking (the caller asked already, or nothing is unapplied).
+fn discard_views(views: Vec<Entity<MergeView>>, cx: &mut App) {
     for view in views {
         view.update(cx, |view, cx| view.discard(cx));
+    }
+}
+
+/// After a Continue: closes the repository's merge editors whose conflict is gone or has other
+/// stages now (a rebase's next commit). Editors with unapplied work stay; their Apply refuses a
+/// changed conflict and says so.
+async fn close_stale_merge_views(
+    workspace: &WeakEntity<Workspace>,
+    repo: &Entity<Repository>,
+    cx: &mut gpui::AsyncApp,
+) {
+    let views = cx.update(|cx| merge_views_of(workspace, repo, None, cx));
+    for view in views {
+        let (path, opened, dirty) = view.read_with(cx, |view, _| {
+            (
+                view.path().clone(),
+                view.stage_ids().to_vec(),
+                view.has_unapplied_work(),
+            )
+        });
+        if dirty {
+            continue;
+        }
+        let current = cx
+            .update(|cx| GitCli::conflict_stage_ids(repo, path, cx))
+            .await;
+        if current.is_ok_and(|current| current != opened) {
+            view.update(cx, |view, cx| view.discard(cx));
+        }
     }
 }
 
@@ -722,28 +818,52 @@ fn reopen_if_unfinished(
 #[derive(Default)]
 struct ConflictEpisodes {
     announced: HashSet<EntityId>,
-    brewery_running: HashMap<EntityId, usize>,
+    /// Shared with each [`OperationGuard`], which decrements its repository's count on drop.
+    brewery_running: Rc<RefCell<HashMap<EntityId, usize>>>,
 }
 
 impl Global for ConflictEpisodes {}
 
-/// A Brewery merge, rebase or continue starts on `repo`: conflicts it causes open the dialog,
-/// so the watcher's toast stays away.
-pub(crate) fn begin_operation(repo: &Entity<Repository>, cx: &mut App) {
-    *cx.default_global::<ConflictEpisodes>()
-        .brewery_running
-        .entry(repo.entity_id())
-        .or_default() += 1;
+/// A Brewery merge, rebase or continue running on a repository: while one is alive, conflicts
+/// it causes open the dialog and the watcher's toast stays away. Dropping the guard ends the
+/// operation, on every path (success, error, a dropped task, window or dialog).
+pub(crate) struct OperationGuard {
+    running: Rc<RefCell<HashMap<EntityId, usize>>>,
+    repo: EntityId,
 }
 
-pub(crate) fn end_operation(repo: &Entity<Repository>, cx: &mut App) {
-    let episodes = cx.default_global::<ConflictEpisodes>();
-    if let Some(count) = episodes.brewery_running.get_mut(&repo.entity_id()) {
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            episodes.brewery_running.remove(&repo.entity_id());
+impl OperationGuard {
+    pub(crate) fn begin(repo: EntityId, cx: &mut App) -> Self {
+        let running = cx
+            .default_global::<ConflictEpisodes>()
+            .brewery_running
+            .clone();
+        *running.borrow_mut().entry(repo).or_default() += 1;
+        Self { running, repo }
+    }
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        let mut running = self.running.borrow_mut();
+        if let Some(count) = running.get_mut(&self.repo) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                running.remove(&self.repo);
+            }
         }
     }
+}
+
+/// Whether a Brewery operation is running on the repository.
+pub(crate) fn operation_running(repo: EntityId, cx: &App) -> bool {
+    cx.try_global::<ConflictEpisodes>().is_some_and(|episodes| {
+        episodes
+            .brewery_running
+            .borrow()
+            .get(&repo)
+            .is_some_and(|count| *count > 0)
+    })
 }
 
 /// The user is looking at `repo`'s conflicts already: no toast for this episode.
@@ -764,18 +884,15 @@ fn check_episode(
     repo: &Entity<Repository>,
     cx: &mut Context<Workspace>,
 ) {
-    let conflicts = repo
-        .read(cx)
-        .cached_status()
-        .filter(|entry| entry.status.is_conflicted())
-        .count();
+    // The status tree's summary counts conflicted files without walking the statuses.
+    let conflicts = repo.read(cx).status_summary().conflict;
     let id = repo.entity_id();
     let episodes = cx.default_global::<ConflictEpisodes>();
     if conflicts == 0 {
         episodes.announced.remove(&id);
         return;
     }
-    if !episodes.announced.insert(id) || episodes.brewery_running.contains_key(&id) {
+    if !episodes.announced.insert(id) || operation_running(id, cx) {
         return;
     }
     if workspace
@@ -846,7 +963,13 @@ fn open_conflict_from_git_panel(
     path: RepoPath,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> bool {
+    if !workspace
+        .upgrade()
+        .is_some_and(|workspace| handles_conflicts(workspace.read(cx), cx))
+    {
+        return false;
+    }
     let open = MergeView::open(workspace.clone(), repo.clone(), path, window, cx);
     window
         .spawn(cx, async move |cx| {
@@ -859,6 +982,13 @@ fn open_conflict_from_git_panel(
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
+    true
+}
+
+/// Brewery resolves conflicts only in local projects: its git commands run on the local
+/// repository. Remote (SSH, collab) projects keep Zed's own conflict UI.
+pub(crate) fn handles_conflicts(workspace: &Workspace, cx: &App) -> bool {
+    workspace.project().read(cx).is_local()
 }
 
 /// Registers `brewery::ResolveConflicts`, the git panel's conflict opener and the conflict

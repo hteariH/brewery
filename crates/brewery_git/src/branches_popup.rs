@@ -901,11 +901,11 @@ impl BranchesDelegate {
             return;
         };
         let workspace = self.workspace.clone();
-        conflicts_dialog::begin_operation(&repo, cx);
+        let guard = conflicts_dialog::OperationGuard::begin(repo.entity_id(), cx);
         cx.spawn_in(window, async move |_, cx| {
             let result = operation(repo.clone(), cx).await;
+            drop(guard);
             cx.update(|window, cx| {
-                conflicts_dialog::end_operation(&repo, cx);
                 let toast = match result {
                     Ok(toast) => toast,
                     Err(error) if error.to_string() == CANCELLED => return,
