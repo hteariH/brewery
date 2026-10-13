@@ -137,6 +137,120 @@ class SchemaSnapshotTest {
     }
 
     @Test
+    fun `concurrent misses share one build`() {
+        val cache = SchemaCache()
+        val builds = java.util.concurrent.atomic.AtomicInteger()
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val result = DbSchema(listOf(SchemaInfo("s", emptyList())), false)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(6)
+        try {
+            val first = pool.submit<DbSchema> { cache.get("c", false) { builds.incrementAndGet(); started.countDown(); release.await(); result } }
+            started.await()
+            val others = (1..5).map { pool.submit<DbSchema> { cache.get("c", false) { builds.incrementAndGet(); result } } }
+            Thread.sleep(100)
+            release.countDown()
+            assertSame(result, first.get(10, java.util.concurrent.TimeUnit.SECONDS))
+            others.forEach { assertSame(result, it.get(10, java.util.concurrent.TimeUnit.SECONDS)) }
+            assertEquals(1, builds.get())
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `a failed build reaches its waiters and is not remembered`() {
+        val cache = SchemaCache()
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val first = pool.submit<DbSchema> { cache.get("c", false) { started.countDown(); release.await(); throw DbException(DbErrorCodes.CONNECTION_FAILED, "down") } }
+            started.await()
+            val second = pool.submit<DbSchema> { cache.get("c", false) { error("must join the first build") } }
+            Thread.sleep(100)
+            release.countDown()
+            for (f in listOf(first, second)) {
+                val e = assertFailsWith<java.util.concurrent.ExecutionException> { f.get(10, java.util.concurrent.TimeUnit.SECONDS) }
+                assertEquals(DbErrorCodes.CONNECTION_FAILED, (e.cause as DbException).code)
+            }
+            val ok = DbSchema(emptyList(), false)
+            assertSame(ok, cache.get("c", false) { ok })
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `a refresh during a build starts a new build and the older result is not cached`() {
+        val cache = SchemaCache()
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val old = DbSchema(emptyList(), false)
+        val fresh = DbSchema(listOf(SchemaInfo("new", emptyList())), false)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(1)
+        try {
+            val first = pool.submit<DbSchema> { cache.get("c", false) { started.countDown(); release.await(); old } }
+            started.await()
+            assertSame(fresh, cache.get("c", true) { fresh })
+            release.countDown()
+            assertSame(old, first.get(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertSame(fresh, cache.get("c", false) { error("fresh must be cached") })
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `concurrent requests through the service build once`() {
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(8)
+        try {
+            val all = (1..8).map { pool.submit<DbSchema> { service.schema(connectionId, false) } }.map { it.get(20, java.util.concurrent.TimeUnit.SECONDS) }
+            assertTrue(all.all { it === all[0] })
+            assertEquals(1, service.schemaBuilds.get())
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `without the unfinished-cursor policy the build runs on the session`() {
+        service.schema(connectionId, false)
+        assertEquals(1, service.sessions.openCount)
+    }
+
+    @Test
+    fun `with the mariadb policy the build uses a separate connection and keeps cursors alive`() {
+        service.close()
+        service = DbService(root, InMemorySecretStore(), manageTransactions = { false }, expireUnfinishedBeforeCommands = { true })
+        DriverManager.getConnection("jdbc:sqlite:$db").use { c ->
+            c.createStatement().use { st -> st.executeUpdate("INSERT INTO owners (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')") }
+        }
+        val cursor = service.execute(connectionId, "SELECT id FROM owners").cursorId!!
+        assertEquals(1, service.fetch(cursor, 0, 1).rows.size)
+
+        val snapshot = service.schema(connectionId, true)
+        assertEquals(listOf("owners", "pets", "pet_names"), snapshot.schemas.single().tables.map { it.name })
+        service.schema(connectionId, true)
+
+        assertEquals(2, service.fetch(cursor, 1, 10).rows.size)
+        // introspection still expires them (user-initiated), the snapshot did not.
+        val another = service.execute(connectionId, "SELECT id FROM owners").cursorId!!
+        assertEquals(1, service.fetch(another, 0, 1).rows.size)
+        service.introspect(connectionId, emptyList())
+        assertEquals(-32013, assertFailsWith<DbException> { service.fetch(another, 1, 1) }.code)
+    }
+
+    @Test
+    fun `the separate connection path maps errors like the session path`() {
+        service.close()
+        service = DbService(root, InMemorySecretStore(), expireUnfinishedBeforeCommands = { true })
+        assertEquals(DbErrorCodes.NOT_FOUND, assertFailsWith<DbException> { service.schema("missing", false) }.code)
+        val bad = service.save(ConnectionInfo("", "bad", "sqlite", "jdbc:sqlite:/no/such/dir/x.db", null, false, emptyMap()), null)
+        assertEquals(DbErrorCodes.CONNECTION_FAILED, assertFailsWith<DbException> { service.schema(bad.id, false) }.code)
+    }
+
+    @Test
     fun `truncation at the injected limit`() {
         service.close()
         service = DbService(root, InMemorySecretStore(), maxSchemaTables = 2)

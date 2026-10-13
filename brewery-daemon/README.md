@@ -35,9 +35,12 @@ The daemon owns database access for the editor's Database tool window.
   schemas, system schemas are left out. The snapshot is cached per connection until
   `refresh: true`, a DDL statement (`CREATE`, `ALTER`, `DROP`, `RENAME`, `TRUNCATE`)
   through `db/execute`, or save/delete of the connection. A cache hit does not touch the
-  database. A build uses metadata calls only (one `getColumns` per schema); like
-  `db/introspect`, on MariaDB/MySQL it first expires unfinished streaming cursors of
-  that connection (`db/fetch` then returns -32013). PostgreSQL cursors are not affected.
+  database, and concurrent misses share one build. A build uses metadata calls only and
+  never ends streaming cursors: on MariaDB/MySQL (whose driver drains a pending result
+  when another command runs) it uses a short-lived separate connection on its own thread;
+  elsewhere it runs on the connection's session. When there are more than 5000 tables the
+  limit is shared fairly between schemas. Changes made outside the editor, or by
+  statements such as `SELECT ... INTO`, `CALL` or `ATTACH`, show up after `refresh: true`.
 - `db/execute`, `db/fetch`, `db/cancel`, `db/close`: SQL runs on one thread per
   connection. Query results stay on the server as cursors and are pulled in pages
   (fetch size 500); `fetch` only moves forward. Values arrive as strings: binary as

@@ -1,5 +1,8 @@
 package dev.brewery.daemon.db
 
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
+
 /** `db/schema` params; [refresh] (default false) rebuilds the cached snapshot instead of returning it. */
 data class DbSchemaParams(val connectionId: String, val refresh: Boolean? = null)
 
@@ -18,31 +21,60 @@ object SchemaSnapshot {
 }
 
 /**
- * The snapshot per connection id. [invalidate] also stops a build that is running at that moment from
- * being stored: its result may predate the change that caused the invalidation, so it is only returned.
+ * The snapshot per connection id, single-flight: concurrent misses share one in-flight build. [invalidate] (and a
+ * `refresh`) bump the connection's generation, so a build that started before it is returned to its own waiters
+ * but never cached or joined by later callers; its result may predate the change. The generation map keeps one
+ * small entry per connection id for the life of the service (it cannot be dropped without losing the guard).
  */
 class SchemaCache {
+    private class Flight(val generation: Long, val result: CompletableFuture<DbSchema> = CompletableFuture())
+
     private val lock = Any()
     private val entries = HashMap<String, DbSchema>()
-    private val epochs = HashMap<String, Long>()
+    private val generations = HashMap<String, Long>()
+    private val inFlight = HashMap<String, Flight>()
 
-    /** The cached snapshot of [id] unless [refresh]; otherwise [build] runs (outside the lock) and its result is cached. */
+    /** The cached snapshot of [id] unless [refresh]; otherwise one [build] (outside the lock) runs and is shared. */
     fun get(id: String, refresh: Boolean, build: () -> DbSchema): DbSchema {
-        val epoch = synchronized(lock) {
-            if (!refresh) entries[id]?.let { return it }
-            epochs[id] ?: 0L
+        var mine: Flight? = null
+        val flight = synchronized(lock) {
+            if (refresh) bump(id) else entries[id]?.let { return it }
+            val generation = generations[id] ?: 0L
+            inFlight[id]?.takeIf { it.generation == generation }
+                ?: Flight(generation).also {
+                    inFlight[id] = it
+                    mine = it
+                }
         }
-        val built = build()
-        synchronized(lock) {
-            if ((epochs[id] ?: 0L) == epoch) entries[id] = built
+        if (mine == null) {
+            try {
+                return flight.result.get()
+            } catch (e: ExecutionException) {
+                throw e.cause ?: e
+            }
         }
-        return built
+        try {
+            val built = build()
+            synchronized(lock) {
+                if ((generations[id] ?: 0L) == flight.generation) entries[id] = built
+                if (inFlight[id] === flight) inFlight.remove(id)
+            }
+            flight.result.complete(built)
+            return built
+        } catch (t: Throwable) {
+            synchronized(lock) { if (inFlight[id] === flight) inFlight.remove(id) }
+            flight.result.completeExceptionally(t)
+            throw t
+        }
     }
 
     fun invalidate(id: String) {
-        synchronized(lock) {
-            entries.remove(id)
-            epochs[id] = (epochs[id] ?: 0L) + 1
-        }
+        synchronized(lock) { bump(id) }
+    }
+
+    // Caller holds [lock].
+    private fun bump(id: String) {
+        entries.remove(id)
+        generations[id] = (generations[id] ?: 0L) + 1
     }
 }

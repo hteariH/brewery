@@ -60,6 +60,23 @@ class PostgresSchemaTest {
     }
 
     @Test
+    fun `a small limit is shared between schemas instead of starving later ones`() {
+        val small = DbService(Files.createTempDirectory("brewery-pg-schema-small"), InMemorySecretStore(), maxSchemaTables = 4)
+        try {
+            val sid = small.save(ConnectionInfo("", "pg", "postgresql", postgres.jdbcUrl, postgres.username, false, emptyMap()), postgres.password).id
+            val snapshot = small.schema(sid, false)
+            assertTrue(snapshot.truncated)
+            assertEquals(4, snapshot.schemas.sumOf { it.tables.size })
+            assertEquals(listOf("pets"), snapshot.schemas.first { it.name == "public" }.tables.map { it.name })
+            assertEquals(1, snapshot.schemas.first { it.name == "a_b" }.tables.size)
+            assertEquals(1, snapshot.schemas.first { it.name == "app" }.tables.size)
+            assertTrue(snapshot.schemas.first { it.name == "app" }.tables.single().columns.isNotEmpty())
+        } finally {
+            small.close()
+        }
+    }
+
+    @Test
     fun `building the snapshot leaves an open streaming cursor alive`() {
         service.schema(id, true)
         val cursor = service.execute(id, "SELECT g FROM generate_series(1, 5000) g").cursorId!!
@@ -94,6 +111,16 @@ class MariaDbSchemaTest {
     fun stop() {
         if (::service.isInitialized) service.close()
         maria.stop()
+    }
+
+    @Test
+    fun `building the snapshot leaves an unfinished streaming cursor alive`() {
+        val cursor = service.execute(id, "SELECT seq FROM seq_1_to_5000").cursorId!!
+        assertEquals(10, service.fetch(cursor, 0, 10).rows.size)
+        service.schema(id, true)
+        service.schema(id, true)
+        assertEquals(10, service.fetch(cursor, 10, 10).rows.size)
+        service.closeCursor(cursor)
     }
 
     @Test

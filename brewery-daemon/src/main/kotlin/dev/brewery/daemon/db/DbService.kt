@@ -53,7 +53,7 @@ class DbService(
         val saved = store.saveConnection(connection)
         // URL, user or options may have changed: the next use opens a fresh session.
         sessions.close(saved.id)
-        schemas.invalidate(saved.id)
+        forgetSchema(saved.id)
         var warning: String? = null
         try {
             when {
@@ -74,7 +74,7 @@ class DbService(
     fun delete(id: String) {
         if (!store.deleteConnection(id)) throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
         sessions.close(id)
-        schemas.invalidate(id)
+        forgetSchema(id)
         try {
             secrets.remove(account(id))
         } catch (_: SecretStoreUnavailable) {
@@ -149,25 +149,67 @@ class DbService(
     /** How many snapshots were built (cache misses and refreshes); tests use it to prove a cache hit. */
     internal val schemaBuilds = java.util.concurrent.atomic.AtomicInteger()
 
+    // Per connection id: whether snapshots are built on a separate connection (see [schema]); forgotten on save/delete.
+    private val separateBuild = ConcurrentHashMap<String, Boolean>()
+    private val metadataThreads = ConcurrentHashMap<String, java.util.concurrent.ExecutorService>()
+
     /**
      * The completion snapshot of connection [connectionId] (see [Introspector.snapshot]), cached until [refresh],
-     * DDL through [execute], or save/delete of the connection. A cache hit does not touch the session at all.
-     * A build runs on the session thread with metadata calls only; like [introspect], on MariaDB/MySQL it first
-     * expires the session's unfinished streaming cursors (fetch -> -32013), and nothing else is dropped:
-     * PostgreSQL cursors and the streaming transaction survive, SQLite has no streaming.
+     * DDL through [execute], or save/delete of the connection. A cache hit does not touch any connection, and
+     * concurrent misses share one build.
+     *
+     * A build never expires streaming cursors, because completion calls it automatically. Where the driver drains
+     * a pending streaming result when another command runs (the `expireUnfinishedBeforeCommands` policy, i.e.
+     * MariaDB/MySQL) the snapshot is built on a short-lived separate connection (same saved settings, opened with
+     * [openSaved] and closed afterwards) on a thread of its own per connection, so the session and its cursors are
+     * not touched at all. Elsewhere (PostgreSQL, SQLite, generic) it runs on the session thread: metadata queries
+     * leave PostgreSQL portals and the streaming transaction alone, and a separate connection would not see a
+     * private SQLite database such as `:memory:`. The policy is decided once per connection id on the first build
+     * (that costs one extra connection for the check), and forgotten when the connection is saved or deleted.
      */
     fun schema(connectionId: String, refresh: Boolean?): DbSchema =
-        schemas.get(connectionId, refresh == true) {
-            sessions.runIn(connectionId) { session, c ->
-                cursorManagers[connectionId]?.takeIf { it.session === session }?.expireUnfinishedIfNeeded(c)
-                try {
-                    schemaBuilds.incrementAndGet()
-                    Introspector(c).snapshot(maxSchemaTables)
-                } catch (e: SQLException) {
-                    throw queryFailure(e)
-                }
+        schemas.get(connectionId, refresh == true) { buildSnapshot(connectionId) }
+
+    private fun buildSnapshot(id: String): DbSchema {
+        val known = separateBuild[id]
+        if (known != false) {
+            val built = onMetadataThread(id) { c ->
+                val separate = known ?: runCatching { expireUnfinishedBeforeCommands(c) }.getOrDefault(false).also { separateBuild[id] = it }
+                if (separate) snapshotOf(c) else null
             }
+            if (built != null) return built
         }
+        return sessions.runIn(id) { _, c -> snapshotOf(c) }
+    }
+
+    private fun snapshotOf(c: Connection): DbSchema = try {
+        schemaBuilds.incrementAndGet()
+        Introspector(c).snapshot(maxSchemaTables)
+    } catch (e: SQLException) {
+        throw queryFailure(e)
+    }
+
+    /** Runs [block] with a fresh connection of saved connection [id] on that id's metadata thread; closes it afterwards. */
+    private fun <T> onMetadataThread(id: String, block: (Connection) -> T): T {
+        val future = try {
+            metadataThreads.computeIfAbsent(id) {
+                Executors.newSingleThreadExecutor { r -> Thread(r, "brewery-db-metadata").apply { isDaemon = true } }
+            }.submit(Callable { openSaved(id).use(block) })
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            throw DbException(DbErrorCodes.CONNECTION_FAILED, "The database service is shutting down")
+        }
+        try {
+            return future.get()
+        } catch (e: ExecutionException) {
+            throw e.cause ?: e
+        }
+    }
+
+    private fun forgetSchema(id: String) {
+        schemas.invalidate(id)
+        separateBuild.remove(id)
+        metadataThreads.remove(id)?.shutdown()
+    }
 
     // cursor id -> the manager (one per live session) that owns it
     private val cursorIndex = ConcurrentHashMap<String, CursorManager>()
@@ -222,6 +264,7 @@ class DbService(
 
     override fun close() {
         sessions.close()
+        metadataThreads.values.forEach { it.shutdownNow() }
         testThreads.shutdownNow()
         registry.close()
     }

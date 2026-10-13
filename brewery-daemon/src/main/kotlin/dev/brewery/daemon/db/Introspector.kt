@@ -46,19 +46,32 @@ class Introspector(private val connection: Connection, private val includeSystem
 
     /**
      * Every namespace with its tables, views and columns, for SQL completion. Metadata calls only: `getTables`
-     * and one `getColumns` per schema/catalog (not per table). At most [maxTables] tables and views are
-     * included, namespaces in name order, tables before views; the rest sets `truncated`.
+     * and one `getColumns` per schema/catalog (per table for a namespace cut down to a few tables). At most
+     * [maxTables] tables and views are included; the rest sets `truncated`. The budget is shared fairly: every
+     * namespace gets an equal share, and what small namespaces do not use goes to the larger ones, so a huge
+     * schema cannot starve the others. Output is in namespace name order, tables before views, by name.
      */
     fun snapshot(maxTables: Int): DbSchema {
         val namespaces = if (depth == 0) listOf(emptyList()) else namespaces().map { it.path }
-        var remaining = maxTables
+        val found = namespaces.map { tableList(it) }
+        val keep = IntArray(found.size)
+        var remaining = maxTables.coerceAtLeast(0)
+        val bySize = found.indices.sortedBy { found[it].size }
+        bySize.forEachIndexed { rank, i ->
+            keep[i] = minOf(found[i].size, remaining / (bySize.size - rank))
+            remaining -= keep[i]
+        }
         var truncated = false
-        val schemas = namespaces.map { ns ->
-            val found = tableList(ns)
-            val kept = found.take(remaining.coerceAtLeast(0))
-            if (kept.size < found.size) truncated = true
-            remaining -= kept.size
-            val columns = if (kept.isEmpty()) emptyMap() else allColumns(ns, kept.mapTo(HashSet()) { it.first })
+        val schemas = namespaces.mapIndexed { i, ns ->
+            val kept = found[i].take(keep[i])
+            if (kept.size < found[i].size) truncated = true
+            val columns = when {
+                kept.isEmpty() -> emptyMap()
+                kept.size < found[i].size && kept.size <= PER_TABLE_COLUMNS -> kept.fold(HashMap<String, List<ColumnInfo>>()) { acc, (name, _) ->
+                    acc.also { it.putAll(allColumns(ns, setOf(name), escape(name))) }
+                }
+                else -> allColumns(ns, kept.mapTo(HashSet()) { it.first }, "%")
+            }
             SchemaInfo(ns.firstOrNull().orEmpty(), kept.map { (name, view) -> TableInfo(name, if (view) "view" else "table", columns[name].orEmpty()) })
         }
         return DbSchema(schemas, truncated)
@@ -79,10 +92,10 @@ class Introspector(private val connection: Connection, private val includeSystem
         return tables.sortedBy { it.lowercase() }.map { it to false } + views.sortedBy { it.lowercase() }.map { it to true }
     }
 
-    /** The columns of all tables of [ns] named in [wanted] with a single `getColumns` call. */
-    private fun allColumns(ns: List<String>, wanted: Set<String>): Map<String, List<ColumnInfo>> {
+    /** The columns of the tables of [ns] named in [wanted] with a single `getColumns` call for [tablePattern]. */
+    private fun allColumns(ns: List<String>, wanted: Set<String>, tablePattern: String): Map<String, List<ColumnInfo>> {
         val byTable = HashMap<String, MutableList<Pair<Int, ColumnInfo>>>()
-        meta.getColumns(catalogOf(ns), schemaPatternOf(ns), "%", "%").use { rs ->
+        meta.getColumns(catalogOf(ns), schemaPatternOf(ns), tablePattern, "%").use { rs ->
             while (rs.next()) {
                 if (!rs.inNamespace(ns)) continue
                 val table = rs.getString("TABLE_NAME") ?: continue
@@ -268,6 +281,8 @@ class Introspector(private val connection: Connection, private val includeSystem
         const val FOLDER_COLUMNS = "columns"
         const val FOLDER_INDEXES = "indexes"
         const val FOLDER_FOREIGN_KEYS = "foreignKeys"
+        /** A namespace cut down to at most this many tables reads their columns table by table. */
+        const val PER_TABLE_COLUMNS = 100
         const val UNBOUNDED = 1_000_000_000
         const val MAX_PRECISION = 1000
     }
