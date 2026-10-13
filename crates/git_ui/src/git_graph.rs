@@ -5078,7 +5078,8 @@ mod persistence {
 
     pub fn serialize_log_source_type(log_source: &LogSource) -> i32 {
         match log_source {
-            LogSource::All => LOG_SOURCE_ALL,
+            // brewery: filtered logs live in the Log tool window, never serialised as items
+            LogSource::All | LogSource::Args(_) => LOG_SOURCE_ALL,
             LogSource::Branch(_) => LOG_SOURCE_BRANCH,
             LogSource::Sha(_) => LOG_SOURCE_SHA,
             LogSource::Path(_) => LOG_SOURCE_PATH,
@@ -5087,7 +5088,7 @@ mod persistence {
 
     pub fn serialize_log_source_value(log_source: &LogSource) -> Option<String> {
         match log_source {
-            LogSource::All => None,
+            LogSource::All | LogSource::Args(_) => None, // brewery: as `All`
             LogSource::Branch(branch) => Some(branch.to_string()),
             LogSource::Sha(oid) => Some(oid.to_string()),
             LogSource::Path(path) => Some(path.as_unix_str().to_string()),

@@ -7360,6 +7360,13 @@ impl Repository {
         self.initial_graph_data.get(&(log_source, log_order))
     }
 
+    // brewery: the Log tool window drops a filtered graph it replaced, so the cache stays bounded
+    pub fn forget_graph_data(&mut self, log_source: &LogSource, log_order: LogOrder) -> bool {
+        self.initial_graph_data
+            .remove(&(log_source.clone(), log_order))
+            .is_some()
+    }
+
     pub fn search_commits(
         &mut self,
         log_source: LogSource,
@@ -7386,7 +7393,14 @@ impl Repository {
                         .request_stream(proto::SearchCommits {
                             project_id: project_id.to_proto(),
                             repository_id: repository_id.to_proto(),
-                            log_source: Some(log_source_to_proto(&log_source)),
+                            // brewery: filters are local only
+                            log_source: match log_source_to_proto(&log_source) {
+                                Ok(source) => Some(source),
+                                Err(error) => {
+                                    log::error!("failed to search commits remotely: {error}");
+                                    return;
+                                }
+                            },
                             query: search_args.query.to_string(),
                             case_sensitive: search_args.case_sensitive,
                         })
@@ -7616,7 +7630,11 @@ impl Repository {
             .request_stream(proto::GetInitialGraphData {
                 project_id: remote.project_id.to_proto(),
                 repository_id: repository_id.to_proto(),
-                log_source: Some(log_source_to_proto(&log_source)),
+                // brewery: filters are local only
+                log_source: Some(
+                    log_source_to_proto(&log_source)
+                        .map_err(|err| SharedString::from(err.to_string()))?,
+                ),
                 log_order: log_order_to_proto(log_order),
             })
             .await
@@ -11198,8 +11216,9 @@ fn deserialize_blame_buffer_response(
     ))
 }
 
-fn log_source_to_proto(log_source: &LogSource) -> proto::GitLogSource {
-    proto::GitLogSource {
+// brewery: `Result`, because `LogSource::Args` (the Log tool window's filters) is local only
+fn log_source_to_proto(log_source: &LogSource) -> Result<proto::GitLogSource> {
+    Ok(proto::GitLogSource {
         source: Some(match log_source {
             LogSource::All => proto::git_log_source::Source::All(proto::GitLogSourceAll {}),
             LogSource::Branch(branch) => proto::git_log_source::Source::Branch(branch.to_string()),
@@ -11207,8 +11226,9 @@ fn log_source_to_proto(log_source: &LogSource) -> proto::GitLogSource {
             LogSource::Path(path) => {
                 proto::git_log_source::Source::Path(path.as_unix_str().to_owned())
             }
+            LogSource::Args(_) => anyhow::bail!("git log filters are local only"),
         }),
-    }
+    })
 }
 
 fn log_source_from_proto(log_source: proto::GitLogSource) -> Result<LogSource> {

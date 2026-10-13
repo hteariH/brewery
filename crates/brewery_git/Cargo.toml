@@ -27,6 +27,7 @@ picker.workspace = true
 project.workspace = true
 schemars.workspace = true
 serde.workspace = true
+time.workspace = true
 ui.workspace = true
 util.workspace = true
 which.workspace = true

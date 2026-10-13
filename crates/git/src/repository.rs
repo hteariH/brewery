@@ -734,6 +734,8 @@ pub enum LogSource {
     Branch(SharedString),
     Sha(Oid),
     Path(RepoPath),
+    // brewery: filtered logs (Log tool window); passed to `git log` verbatim, with their own `--`
+    Args(Arc<[SharedString]>),
 }
 
 impl LogSource {
@@ -753,11 +755,13 @@ impl LogSource {
                 Cow::Borrowed("--"),
                 Cow::Borrowed(path.as_unix_str()),
             ],
+            // brewery: verbatim
+            LogSource::Args(args) => args.iter().map(|arg| Cow::Borrowed(arg.as_ref())).collect(),
         };
         // Without a terminator git cannot tell a branch named `docs/rewrite` from a
         // `docs/rewrite` directory in the working tree, and refuses the argument as
         // ambiguous. `Path` states its own separator before the path it passes.
-        if !matches!(self, LogSource::Path(_)) {
+        if !matches!(self, LogSource::Path(_) | LogSource::Args(_)) {
             args.push(Cow::Borrowed("--"));
         }
         args
@@ -5531,6 +5535,21 @@ mod tests {
             path_args.iter().filter(|arg| arg.as_ref() == "--").count(),
             1,
             "Path states the separator itself and must not gain a second one"
+        );
+    }
+
+    // brewery: `Args` is passed through untouched; the caller writes its own `--`
+    #[test]
+    fn test_log_source_args_are_verbatim() {
+        let source = LogSource::Args(
+            ["--author=a", "main", "--", "src"]
+                .map(SharedString::from)
+                .into(),
+        );
+        let args = source.get_args();
+        assert_eq!(
+            args.iter().map(|arg| arg.as_ref()).collect::<Vec<_>>(),
+            ["--author=a", "main", "--", "src"]
         );
     }
 

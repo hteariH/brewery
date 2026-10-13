@@ -50,10 +50,15 @@ impl TestRepo {
     }
 
     fn git(&self, args: &[&str]) -> String {
+        self.git_with_env(args, &[])
+    }
+
+    fn git_with_env(&self, args: &[&str], extra_env: &[(&str, &str)]) -> String {
         let output = smol::block_on(
             util::command::new_command("git")
                 .current_dir(&self.work)
                 .envs(&self.env)
+                .envs(extra_env.iter().copied())
                 .args(args)
                 .output(),
         )
@@ -412,4 +417,456 @@ fn alt_9_toggles_the_log_in_the_jetbrains_keymaps(cx: &mut TestAppContext) {
             "{key} inside the Log panel"
         );
     }
+}
+
+// Filters.
+
+use crate::log_filter::{DateBound, LogFilter};
+use crate::log_filter_bar::{ChoiceKind, LogFilterBar};
+use git::repository::{LogOrder, LogSource, RepoPath};
+use picker::PickerDelegate as _;
+use project::git_store::Repository;
+use std::collections::BTreeSet;
+
+/// main: c1 (Alice, a.txt) - c2 (Bob, b.txt) - c4 (Alice, b.txt) - c5 merge (Alice)
+/// feature (from c2): c3 (Bob, a.txt), merged by c5.
+struct History {
+    repo: TestRepo,
+    c: [String; 5],
+}
+
+impl History {
+    fn new() -> Self {
+        let repo = TestRepo::new();
+        let commit = |author: &str, date: &str, path: &str, content: &str, message: &str| {
+            std::fs::write(repo.work.join(path), content).expect("write");
+            repo.git(&["add", "--", path]);
+            let email = format!("{}@example.com", author.to_lowercase());
+            let env = [
+                ("GIT_AUTHOR_NAME", author),
+                ("GIT_AUTHOR_EMAIL", email.as_str()),
+                ("GIT_AUTHOR_DATE", date),
+                ("GIT_COMMITTER_DATE", date),
+            ];
+            repo.git_with_env(&["commit", "--quiet", "-m", message], &env);
+            repo.git(&["rev-parse", "HEAD"])
+        };
+        let c1 = commit(
+            "Alice",
+            "2026-01-01T12:00:00+00:00",
+            "a.txt",
+            "1\n",
+            "fix one",
+        );
+        let c2 = commit(
+            "Bob",
+            "2026-02-01T12:00:00+00:00",
+            "b.txt",
+            "1\n",
+            "feat two",
+        );
+        repo.git(&["checkout", "--quiet", "-b", "feature"]);
+        let c3 = commit(
+            "Bob",
+            "2026-02-15T12:00:00+00:00",
+            "a.txt",
+            "2\n",
+            "feat three",
+        );
+        repo.git(&["checkout", "--quiet", "main"]);
+        let c4 = commit(
+            "Alice",
+            "2026-03-01T12:00:00+00:00",
+            "b.txt",
+            "2\n",
+            "fix four",
+        );
+        let date = "2026-03-10T12:00:00+00:00";
+        repo.git_with_env(
+            &[
+                "merge",
+                "--quiet",
+                "--no-ff",
+                "-m",
+                "merge feature",
+                "feature",
+            ],
+            &[
+                ("GIT_AUTHOR_NAME", "Alice"),
+                ("GIT_AUTHOR_EMAIL", "alice@example.com"),
+                ("GIT_AUTHOR_DATE", date),
+                ("GIT_COMMITTER_DATE", date),
+            ],
+        );
+        let c5 = repo.git(&["rev-parse", "HEAD"]);
+        Self {
+            repo,
+            c: [c1, c2, c3, c4, c5],
+        }
+    }
+
+    /// The hashes of commits `cN` (1-based).
+    fn shas(&self, ix: &[usize]) -> BTreeSet<String> {
+        ix.iter().map(|ix| self.c[*ix - 1].clone()).collect()
+    }
+}
+
+fn bar(fixture: &Fixture, cx: &VisualTestContext) -> Entity<LogFilterBar> {
+    fixture
+        .panel
+        .read_with(cx, |panel, _| panel.filter_bar().clone())
+}
+
+fn apply(fixture: &Fixture, filter: LogFilter, cx: &mut VisualTestContext) {
+    bar(fixture, cx).update_in(cx, |bar, window, cx| bar.set_filter(filter, window, cx));
+    cx.run_until_parked();
+}
+
+/// The commits the graph has laid out (lanes assigned), once it has fully loaded.
+fn wait_for_graph(fixture: &Fixture, cx: &mut VisualTestContext) -> BTreeSet<String> {
+    wait_until(cx, "the graph to load", |cx| {
+        let Some(graph) = log_graph(fixture, cx) else {
+            return false;
+        };
+        !graph
+            .update(cx, |graph, cx| {
+                graph.commit_count_and_loading_state_for_test(cx)
+            })
+            .1
+    });
+    let graph = log_graph(fixture, cx).expect("graph");
+    graph.read_with(cx, |graph, _| {
+        graph
+            .initial_commit_data_for_test()
+            .iter()
+            .map(|commit| commit.sha.to_string())
+            .collect()
+    })
+}
+
+fn panel_source(fixture: &Fixture, cx: &VisualTestContext) -> Option<LogSource> {
+    fixture
+        .panel
+        .read_with(cx, |panel, _| panel.log_source().cloned())
+}
+
+fn repository(fixture: &Fixture, cx: &VisualTestContext) -> Entity<Repository> {
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .project()
+            .read(cx)
+            .active_repository(cx)
+            .expect("repository")
+    })
+}
+
+fn is_cached(fixture: &Fixture, source: &LogSource, cx: &VisualTestContext) -> bool {
+    repository(fixture, cx).read_with(cx, |repo, _| {
+        repo.get_graph_data(source.clone(), LogOrder::default())
+            .is_some()
+    })
+}
+
+async fn open_history<'a>(
+    history: &History,
+    cx: &'a mut TestAppContext,
+) -> (Fixture, &'a mut VisualTestContext) {
+    let (fixture, cx) = open_real(&history.repo, cx).await;
+    cx.dispatch_action(ToggleLogPanel);
+    assert_eq!(wait_for_graph(&fixture, cx), history.shas(&[1, 2, 3, 4, 5]));
+    (fixture, cx)
+}
+
+#[gpui::test]
+async fn each_filter_yields_only_the_matching_commits(cx: &mut TestAppContext) {
+    init_test(cx);
+    let history = History::new();
+    let (fixture, cx) = open_history(&history, cx).await;
+    let day = DateBound::parse_day;
+    let b_txt = || vec![RepoPath::new("b.txt").expect("path")];
+    let cases: Vec<(&str, LogFilter, &[usize])> = vec![
+        (
+            "author, case-insensitive substring",
+            LogFilter {
+                authors: vec!["bob".into()],
+                ..Default::default()
+            },
+            &[2, 3],
+        ),
+        (
+            "author with a merge whose second parent is filtered out",
+            LogFilter {
+                authors: vec!["ALICE@example".into()],
+                ..Default::default()
+            },
+            &[1, 4, 5],
+        ),
+        (
+            "two authors",
+            LogFilter {
+                authors: vec!["Alice".into(), "Bob".into()],
+                ..Default::default()
+            },
+            &[1, 2, 3, 4, 5],
+        ),
+        (
+            "branch",
+            LogFilter {
+                branches: vec!["feature".into()],
+                ..Default::default()
+            },
+            &[1, 2, 3],
+        ),
+        (
+            "since",
+            LogFilter {
+                since: day("2026-02-10"),
+                ..Default::default()
+            },
+            &[3, 4, 5],
+        ),
+        (
+            "until",
+            LogFilter {
+                until: day("2026-02-01"),
+                ..Default::default()
+            },
+            &[1, 2],
+        ),
+        (
+            "path",
+            LogFilter {
+                paths: b_txt(),
+                ..Default::default()
+            },
+            &[2, 4],
+        ),
+        (
+            "text",
+            LogFilter {
+                text: Some("FIX".into()),
+                ..Default::default()
+            },
+            &[1, 4],
+        ),
+        (
+            "branch, author and dates",
+            LogFilter {
+                branches: vec!["main".into()],
+                authors: vec!["alice".into()],
+                since: day("2026-02-01"),
+                until: day("2026-03-05"),
+                ..Default::default()
+            },
+            &[4],
+        ),
+    ];
+    for (what, filter, expected) in cases {
+        apply(&fixture, filter.clone(), cx);
+        assert_eq!(
+            panel_source(&fixture, cx),
+            filter.log_source().expect("valid"),
+            "{what}: the graph is rebuilt with the filtered source"
+        );
+        assert_eq!(
+            wait_for_graph(&fixture, cx),
+            history.shas(expected),
+            "{what}"
+        );
+    }
+
+    // `--parents` rewrites parents through the path filter: c4's parent is c2, as git
+    // simplifies the history of b.txt.
+    apply(
+        &fixture,
+        LogFilter {
+            paths: b_txt(),
+            ..Default::default()
+        },
+        cx,
+    );
+    wait_for_graph(&fixture, cx);
+    let graph = log_graph(&fixture, cx).expect("graph");
+    let c4 = graph.read_with(cx, |graph, _| {
+        graph
+            .initial_commit_data_for_test()
+            .into_iter()
+            .find(|commit| commit.sha.to_string() == history.c[3])
+            .expect("c4")
+    });
+    assert_eq!(
+        c4.parents
+            .iter()
+            .map(|parent| parent.to_string())
+            .collect::<Vec<_>>(),
+        vec![history.c[1].clone()]
+    );
+}
+
+#[gpui::test]
+async fn the_graph_search_works_inside_a_text_filter(cx: &mut TestAppContext) {
+    init_test(cx);
+    let history = History::new();
+    let (fixture, cx) = open_history(&history, cx).await;
+    apply(
+        &fixture,
+        LogFilter {
+            text: Some("fix".into()),
+            ..Default::default()
+        },
+        cx,
+    );
+    assert_eq!(wait_for_graph(&fixture, cx), history.shas(&[1, 4]));
+    let graph = log_graph(&fixture, cx).expect("graph");
+    graph.update(cx, |graph, cx| graph.search_for_test("four".into(), cx));
+    wait_until(cx, "search results", |cx| {
+        graph.read_with(cx, |graph, _| !graph.search_matches_for_test().is_empty())
+    });
+    // Let a wrong second match arrive, if git sent one.
+    cx.run_until_parked();
+    let matches = graph.read_with(cx, |graph, _| graph.search_matches_for_test());
+    assert_eq!(
+        matches
+            .iter()
+            .map(|oid| oid.to_string())
+            .collect::<Vec<_>>(),
+        vec![history.c[3].clone()],
+        "both the filter text and the query must match"
+    );
+}
+
+#[gpui::test]
+async fn user_filter_shows_the_count_and_reset_restores_the_log(cx: &mut TestAppContext) {
+    init_test(cx);
+    let history = History::new();
+    let (fixture, cx) = open_history(&history, cx).await;
+    let unfiltered = log_graph(&fixture, cx).expect("graph");
+    let bar = bar(&fixture, cx);
+    assert_eq!(bar.read_with(cx, |bar, _| bar.status_text()), None);
+    wait_until(cx, "the User choices", |cx| {
+        bar.read_with(cx, |bar, _| bar.me().is_some() && !bar.authors().is_empty())
+    });
+    bar.read_with(cx, |bar, _| {
+        assert_eq!(bar.me(), Some("Brewery Test"), "me = user.name");
+        assert_eq!(bar.authors(), ["Alice", "Bob"]);
+    });
+
+    // User = Bob, picked in the User list.
+    let picker = bar.update_in(cx, |bar, window, cx| {
+        bar.choice_picker(ChoiceKind::User, window, cx)
+    });
+    picker.update_in(cx, |picker, window, cx| picker.set_query("bob", window, cx));
+    cx.run_until_parked();
+    picker.update_in(cx, |picker, window, cx| {
+        assert_eq!(picker.delegate.match_count(), 1, "Bob only");
+        picker.delegate.set_selected_index(0, window, cx);
+        picker.delegate.confirm(false, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        bar.read_with(cx, |bar, _| bar.filter().authors.clone()),
+        vec!["Bob".to_string()]
+    );
+    let bob = panel_source(&fixture, cx).expect("filtered");
+    assert_eq!(wait_for_graph(&fixture, cx), history.shas(&[2, 3]));
+    let filtered = log_graph(&fixture, cx).expect("graph");
+    assert_ne!(filtered.entity_id(), unfiltered.entity_id(), "re-created");
+    wait_until(cx, "the count", |cx| {
+        bar.read_with(cx, |bar, _| bar.status_text()) == Some("Filtered · 2 commits".into())
+    });
+
+    // Another user: the Bob graph's data is dropped, the unfiltered one is kept.
+    bar.update(cx, |bar, cx| {
+        bar.toggle_author("Bob", cx);
+        bar.toggle_author("Alice", cx);
+    });
+    cx.run_until_parked();
+    let alice = panel_source(&fixture, cx).expect("filtered");
+    assert_eq!(wait_for_graph(&fixture, cx), history.shas(&[1, 4, 5]));
+    assert!(
+        !is_cached(&fixture, &bob, cx),
+        "the replaced filter is forgotten"
+    );
+    assert!(is_cached(&fixture, &alice, cx));
+    assert!(is_cached(&fixture, &LogSource::All, cx));
+
+    // Reset: back to the unfiltered log, no chip, the filtered data forgotten.
+    bar.update_in(cx, |bar, window, cx| bar.reset(window, cx));
+    cx.run_until_parked();
+    assert_eq!(panel_source(&fixture, cx), None);
+    assert_eq!(wait_for_graph(&fixture, cx), history.shas(&[1, 2, 3, 4, 5]));
+    assert_eq!(bar.read_with(cx, |bar, _| bar.status_text()), None);
+    assert!(!is_cached(&fixture, &alice, cx));
+}
+
+#[gpui::test]
+async fn a_hash_goes_to_the_commit_without_filtering(cx: &mut TestAppContext) {
+    init_test(cx);
+    let history = History::new();
+    let (fixture, cx) = open_history(&history, cx).await;
+    let graph = log_graph(&fixture, cx).expect("graph");
+    apply(
+        &fixture,
+        LogFilter {
+            text: Some(history.c[1][..9].to_uppercase()),
+            ..Default::default()
+        },
+        cx,
+    );
+    wait_until(cx, "the commit to be selected", |cx| {
+        selected_sha(&fixture, cx) == Some(history.c[1].clone())
+    });
+    assert_eq!(panel_source(&fixture, cx), None, "not filtered");
+    assert_eq!(
+        log_graph(&fixture, cx).map(|g| g.entity_id()),
+        Some(graph.entity_id()),
+        "the same graph"
+    );
+
+    // An unknown hash says so.
+    apply(
+        &fixture,
+        LogFilter {
+            text: Some("0000000".into()),
+            ..Default::default()
+        },
+        cx,
+    );
+    let bar = bar(&fixture, cx);
+    wait_until(cx, "the error", |cx| {
+        bar.read_with(cx, |bar, _| bar.error().cloned()) == Some("No commit 0000000".into())
+    });
+}
+
+#[gpui::test]
+async fn a_bad_branch_or_disabled_filters_leave_the_log_unfiltered(cx: &mut TestAppContext) {
+    init_test(cx);
+    let history = History::new();
+    let (fixture, cx) = open_history(&history, cx).await;
+    apply(
+        &fixture,
+        LogFilter {
+            branches: vec!["--all".into()],
+            ..Default::default()
+        },
+        cx,
+    );
+    assert_eq!(panel_source(&fixture, cx), None);
+    let bar = bar(&fixture, cx);
+    assert_eq!(
+        bar.read_with(cx, |bar, _| bar.error().cloned()),
+        Some("not a branch name: --all".into())
+    );
+
+    // Disabled, as in remote projects: filters are ignored.
+    bar.update(cx, |bar, cx| bar.set_enabled(false, cx));
+    apply(
+        &fixture,
+        LogFilter {
+            authors: vec!["bob".into()],
+            ..Default::default()
+        },
+        cx,
+    );
+    assert_eq!(panel_source(&fixture, cx), None);
 }

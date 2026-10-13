@@ -4,18 +4,31 @@
 //! The graph is hosted as a plain child view, never as a pane item: it gets no tab, no nav
 //! history and is not serialised with the workspace. Focus given to the panel is forwarded to the
 //! graph, so its `GitGraph` key context (and every action bound there) works inside the panel.
+//!
+//! The filter bar (`LogFilterBar`) sits above the graph. A filter maps to
+//! `LogSource::Args(LogFilter::to_git_args())`; applying one replaces the hosted graph with one
+//! for the new source and drops the replaced filtered graph's cached data
+//! (`Repository::forget_graph_data`), so at most the current filtered graph and the unfiltered
+//! one stay cached. A text that is a commit hash goes to that commit instead of filtering.
+//! Filters are local only: in remote projects the bar is disabled.
 
+use crate::GitCli;
+use crate::log_filter_bar::{FilterStatus, LogFilterBar, LogFilterChanged};
 use anyhow::Result;
 use git::Oid;
+use git::repository::{LogOrder, LogSource};
 use git_ui::git_graph::GitGraph;
 use gpui::{
     Action, App, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
     Render, Subscription, WeakEntity, Window, actions, px,
 };
 use project::Project;
-use project::git_store::{GitStore, GitStoreEvent, RepositoryId};
+use project::git_store::{
+    GitGraphEvent, GitStore, GitStoreEvent, Repository, RepositoryEvent, RepositoryId,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use std::time::Duration;
 use ui::prelude::*;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -50,9 +63,11 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-/// The graph of one repository; replaced when the active repository changes.
+/// The graph of one repository; replaced when the active repository or the filter changes.
 struct HostedGraph {
     repo_id: RepositoryId,
+    /// `None` is the unfiltered log (`LogSource::All`).
+    source: Option<LogSource>,
     graph: Entity<GitGraph>,
 }
 
@@ -66,8 +81,10 @@ pub struct LogPanel {
     /// Created when the panel is first shown (a full `git log` is not worth running for a panel
     /// nobody looks at) and kept while it is hidden.
     log: Option<HostedGraph>,
+    filter_bar: Entity<LogFilterBar>,
     active: bool,
     _git_store_events: Subscription,
+    _filter_events: Subscription,
 }
 
 impl LogPanel {
@@ -99,15 +116,192 @@ impl LogPanel {
         .detach();
         let git_store = project.read(cx).git_store().clone();
         let git_store_events = cx.subscribe_in(&git_store, window, Self::on_git_store_event);
+        let is_local = project.read(cx).is_local();
+        let filter_bar = cx.new(|cx| {
+            let mut bar = LogFilterBar::new(window, cx);
+            bar.set_enabled(is_local, cx);
+            bar
+        });
+        let filter_events = cx.subscribe_in(
+            &filter_bar,
+            window,
+            |this, _, _: &LogFilterChanged, window, cx| this.apply_filter(window, cx),
+        );
         Self {
             workspace,
             project,
             focus_handle,
             position: DockPosition::Bottom,
             log: None,
+            filter_bar,
             active: false,
             _git_store_events: git_store_events,
+            _filter_events: filter_events,
         }
+    }
+
+    pub fn filter_bar(&self) -> &Entity<LogFilterBar> {
+        &self.filter_bar
+    }
+
+    /// The source the Log tab shows: `None` unfiltered.
+    pub fn log_source(&self) -> Option<&LogSource> {
+        self.log.as_ref().and_then(|log| log.source.as_ref())
+    }
+
+    /// The source for the bar's current filter. Errors go to the bar; filters are ignored
+    /// where they cannot work (remote projects).
+    fn filter_source(&self, cx: &mut Context<Self>) -> Option<LogSource> {
+        let bar = self.filter_bar.read(cx);
+        if !bar.is_enabled() {
+            return None;
+        }
+        match bar.filter().log_source() {
+            Ok(source) => source,
+            Err(error) => {
+                let error = SharedString::from(error.to_string());
+                self.filter_bar
+                    .update(cx, |bar, cx| bar.set_error(Some(error), cx));
+                None
+            }
+        }
+    }
+
+    fn apply_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(log) = &self.log else {
+            // Applied when the graph is first created.
+            return;
+        };
+        let repo_id = log.repo_id;
+        let current = log.source.clone();
+        let source = self.filter_source(cx);
+        if current != source {
+            self.replace_graph(repo_id, source, window, cx);
+        }
+        let hash = self
+            .filter_bar
+            .read(cx)
+            .filter()
+            .commit_hash()
+            .map(str::to_string);
+        if let Some(hash) = hash {
+            self.go_to_hash(hash, window, cx);
+        }
+        self.refresh_status(false, cx);
+    }
+
+    fn repository(&self, repo_id: RepositoryId, cx: &App) -> Option<Entity<Repository>> {
+        self.git_store(cx)
+            .read(cx)
+            .repositories()
+            .get(&repo_id)
+            .cloned()
+    }
+
+    /// Replaces the hosted graph, keeping focus, and forgets the replaced filtered graph's data.
+    fn replace_graph(
+        &mut self,
+        repo_id: RepositoryId,
+        source: Option<LogSource>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let had_focus = self.focus_handle.contains_focused(window, cx);
+        let git_store = self.git_store(cx);
+        let workspace = self.workspace.clone();
+        let graph =
+            cx.new(|cx| GitGraph::new(repo_id, git_store, workspace, source.clone(), window, cx));
+        let old = self.log.replace(HostedGraph {
+            repo_id,
+            source,
+            graph,
+        });
+        if let Some(HostedGraph {
+            repo_id: old_repo_id,
+            source: Some(old_source),
+            graph: old_graph,
+        }) = old
+        {
+            drop(old_graph);
+            let still_used = self.log.as_ref().is_some_and(|log| {
+                log.repo_id == old_repo_id && log.source.as_ref() == Some(&old_source)
+            });
+            if !still_used && let Some(repo) = self.repository(old_repo_id, cx) {
+                repo.update(cx, |repo, _| {
+                    repo.forget_graph_data(&old_source, LogOrder::default())
+                });
+            }
+        }
+        if had_focus {
+            self.focus_handle.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Resolves a hash prefix with `git rev-parse` and selects the commit in the Log.
+    fn go_to_hash(&mut self, hash: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = self
+            .log
+            .as_ref()
+            .and_then(|log| self.repository(log.repo_id, cx))
+        else {
+            return;
+        };
+        let resolve = GitCli::run(
+            &repo,
+            vec![
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                "--end-of-options".into(),
+                format!("{hash}^{{commit}}"),
+            ],
+            Some(Duration::from_secs(20)),
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let sha = match resolve.await {
+                Ok(output) if output.success() => Some(output.stdout.trim().to_string()),
+                Ok(_) => None,
+                Err(error) => {
+                    log::debug!("rev-parse {hash}: {error:#}");
+                    None
+                }
+            };
+            this.update_in(cx, |this, window, cx| match sha {
+                Some(sha) => this.select_commit(&sha, window, cx),
+                None => this.filter_bar.update(cx, |bar, cx| {
+                    bar.set_error(Some(format!("No commit {hash}").into()), cx)
+                }),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Tells the bar how many commits the filtered graph has, or clears it when unfiltered.
+    fn refresh_status(&mut self, finished: bool, cx: &mut Context<Self>) {
+        let status = match &self.log {
+            Some(HostedGraph {
+                repo_id,
+                source: Some(source),
+                ..
+            }) => self.repository(*repo_id, cx).map(|repo| {
+                repo.update(cx, |repo, cx| {
+                    let loading = !finished
+                        && repo
+                            .graph_data(source.clone(), LogOrder::default(), 0..0, cx)
+                            .is_loading;
+                    let count = repo
+                        .get_graph_data(source.clone(), LogOrder::default())
+                        .map_or(0, |data| data.commit_data.len());
+                    FilterStatus { count, loading }
+                })
+            }),
+            _ => None,
+        };
+        self.filter_bar
+            .update(cx, |bar, cx| bar.set_status(status, cx));
     }
 
     /// The hosted graph of the Log tab, if the panel has been shown and there is a repository.
@@ -159,17 +353,36 @@ impl LogPanel {
         if self.log.as_ref().map(|log| log.repo_id) == repo_id {
             return;
         }
-        let had_focus = self.focus_handle.contains_focused(window, cx);
-        self.log = repo_id.map(|repo_id| {
-            let git_store = self.git_store(cx);
-            let workspace = self.workspace.clone();
-            let graph = cx.new(|cx| GitGraph::new(repo_id, git_store, workspace, None, window, cx));
-            HostedGraph { repo_id, graph }
-        });
-        if had_focus {
-            self.focus_handle.focus(window, cx);
+        // A different repository starts unfiltered (its branches and paths differ).
+        let repo = repo_id.and_then(|repo_id| self.repository(repo_id, cx));
+        self.filter_bar
+            .update(cx, |bar, cx| bar.set_repository(repo, window, cx));
+        match repo_id {
+            Some(repo_id) => {
+                let source = self.filter_source(cx);
+                self.replace_graph(repo_id, source, window, cx);
+                self.refresh_status(false, cx);
+            }
+            None => {
+                self.forget_filtered_graph(cx);
+                self.log = None;
+                cx.notify();
+            }
         }
-        cx.notify();
+    }
+
+    fn forget_filtered_graph(&mut self, cx: &mut Context<Self>) {
+        if let Some(HostedGraph {
+            repo_id,
+            source: Some(source),
+            ..
+        }) = &self.log
+            && let Some(repo) = self.repository(*repo_id, cx)
+        {
+            repo.update(cx, |repo, _| {
+                repo.forget_graph_data(source, LogOrder::default())
+            });
+        }
     }
 
     fn on_git_store_event(
@@ -188,7 +401,25 @@ impl LogPanel {
                 } else if self.log.as_ref().map(|log| log.repo_id) != self.active_repository_id(cx)
                 {
                     // Rebuilt when the panel is shown again.
+                    self.forget_filtered_graph(cx);
                     self.log = None;
+                }
+            }
+            GitStoreEvent::RepositoryUpdated(
+                repo_id,
+                RepositoryEvent::GraphEvent((source, _), graph_event),
+                _,
+            ) => {
+                if let Some(log) = &self.log
+                    && log.repo_id == *repo_id
+                    && log.source.as_ref() == Some(source)
+                {
+                    // The fetch task emits its last event before it finishes.
+                    let finished = matches!(
+                        graph_event,
+                        GitGraphEvent::FullyLoaded | GitGraphEvent::LoadingError
+                    );
+                    self.refresh_status(finished, cx);
                 }
             }
             _ => {}
@@ -199,9 +430,10 @@ impl LogPanel {
 impl Render for LogPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.log {
-            Some(log) => div()
+            Some(log) => v_flex()
                 .size_full()
-                .child(log.graph.clone())
+                .child(self.filter_bar.clone())
+                .child(div().flex_1().min_h_0().child(log.graph.clone()))
                 .into_any_element(),
             None => v_flex()
                 .size_full()

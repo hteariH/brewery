@@ -4,10 +4,14 @@
 
 pub mod branches_popup;
 pub mod cli;
+pub mod log_filter;
+pub mod log_filter_bar;
 pub mod log_panel;
 
 pub use branches_popup::BranchesPopup;
 pub use cli::{GitCli, GitOutput, MergeOutcome, Operation, Side};
+pub use log_filter::LogFilter;
+pub use log_filter_bar::LogFilterBar;
 pub use log_panel::LogPanel;
 
 use gpui::App;
