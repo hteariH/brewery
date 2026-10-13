@@ -172,8 +172,48 @@ pub struct MergeView {
     touched: bool,
     /// The result was applied, or the merge was abandoned: closing needs no confirmation.
     finished: bool,
+    /// The conflict's index records when the view opened (`GitCli::conflict_stage_ids`).
+    /// Apply refuses when they changed: the view would write a result for another conflict.
+    stage_ids: Vec<String>,
+    /// The working tree file when the view opened; `None` when it did not exist.
+    opened_file: Option<Vec<u8>>,
+    /// Each chunk's text in the result when the view opened (LF line endings).
+    initial_texts: Vec<String>,
+    /// Chunk offsets and resolutions for result texts this view produced itself, keyed by a
+    /// hash of the text, so undo and redo of an accept restore the chunk state exactly.
+    known_states: HashMap<u64, (Vec<Range<usize>>, Vec<Resolution>)>,
     _subscriptions: Vec<Subscription>,
 }
+
+/// Why Apply did not write the result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApplyError {
+    /// The file is no longer conflicted: it was resolved, or the merge was ended, elsewhere.
+    NotConflicted(String),
+    /// The file has a different conflict now (e.g. the next commit of a rebase).
+    ConflictChanged(String),
+    /// The user declined to replace changes made outside the merge editor.
+    Cancelled,
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConflicted(path) => write!(
+                f,
+                "{path} is no longer conflicted: it was resolved, or the merge was ended, \
+                 outside the merge editor"
+            ),
+            Self::ConflictChanged(path) => write!(
+                f,
+                "the conflict in {path} changed since the merge editor opened"
+            ),
+            Self::Cancelled => write!(f, "the merge was not applied"),
+        }
+    }
+}
+
+impl std::error::Error for ApplyError {}
 
 /// Emitted once the result is written and the file is marked resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +233,50 @@ impl MergeView {
     ) -> Task<Result<Entity<Self>>> {
         window.spawn(cx, async move |cx| {
             let project = workspace.update(cx, |workspace, _| workspace.project().clone())?;
+            let stage_ids = cx
+                .update(|_, cx| GitCli::conflict_stage_ids(&repo, path.clone(), cx))?
+                .await?;
+
+            // A view already open for this file is reused only while its conflict is current.
+            let repo_id = repo.entity_id();
+            let existing = workspace.update(cx, |workspace, cx| {
+                workspace.items_of_type::<MergeView>(cx).find(|view| {
+                    let view = view.read(cx);
+                    !view.finished && view.path == path && view.repo.entity_id() == repo_id
+                })
+            })?;
+            if let Some(existing) = existing {
+                let (current, dirty) = existing.read_with(cx, |view, _| {
+                    (view.stage_ids == stage_ids, view.has_unapplied_work())
+                });
+                let reload = if current {
+                    false
+                } else if dirty {
+                    let answer = cx.update(|window, cx| {
+                        window.prompt(
+                            PromptLevel::Warning,
+                            &format!(
+                                "The conflict in {} changed since the merge editor opened",
+                                path.as_unix_str()
+                            ),
+                            Some("Reload the merge editor? What you did there is not applied and is lost."),
+                            &["Reload", "Keep"],
+                            cx,
+                        )
+                    })?;
+                    answer.await.ok() == Some(0)
+                } else {
+                    true
+                };
+                if !reload {
+                    workspace.update_in(cx, |workspace, window, cx| {
+                        workspace.activate_item(&existing, true, true, window, cx);
+                    })?;
+                    return Ok(existing);
+                }
+                existing.update(cx, |view, cx| view.discard(cx));
+            }
+
             let (sides, input) = load_input(&repo, &path, cx).await?;
             let (base, yours, theirs) = match input {
                 MergeInput::Text {
@@ -214,6 +298,11 @@ impl MergeView {
                 in_memory_buffer(merge.text(Version::Ours), &language, &languages, cx);
             let right_buffer =
                 in_memory_buffer(merge.text(Version::Theirs), &language, &languages, cx);
+            let abs_path = repo.read_with(cx, |repo, _| {
+                repo.work_directory_abs_path.join(path.as_std_path())
+            });
+            let fs = project.read_with(cx, |project, _| project.fs().clone());
+            let opened_file = fs.load_bytes(&abs_path).await.ok();
             let result = MergeResult::new(&merge);
             let result_buffer = cx.new(|cx| {
                 let mut buffer = Buffer::local(result.text(), cx);
@@ -223,15 +312,6 @@ impl MergeView {
             });
 
             workspace.update_in(cx, |workspace, window, cx| {
-                let repo_id = repo.entity_id();
-                let existing = workspace.items_of_type::<MergeView>(cx).find(|view| {
-                    let view = view.read(cx);
-                    view.path == path && view.repo.entity_id() == repo_id
-                });
-                if let Some(existing) = existing {
-                    workspace.activate_item(&existing, true, true, window, cx);
-                    return existing;
-                }
                 let weak_workspace = cx.entity().downgrade();
                 let view = cx.new(|cx| {
                     Self::new(
@@ -242,6 +322,8 @@ impl MergeView {
                         sides,
                         merge,
                         result,
+                        stage_ids,
+                        opened_file,
                         [left_buffer, result_buffer, right_buffer],
                         window,
                         cx,
@@ -278,6 +360,8 @@ impl MergeView {
         sides: ConflictSides,
         merge: Merge3,
         result: MergeResult,
+        stage_ids: Vec<String>,
+        opened_file: Option<Vec<u8>>,
         [left_buffer, result_buffer, right_buffer]: [Entity<Buffer>; 3],
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -356,9 +440,17 @@ impl MergeView {
             pending_scrolls: HashMap::new(),
             touched: false,
             finished: false,
+            initial_texts: offsets
+                .iter()
+                .map(|range| snapshot.text_for_range(range.clone()).collect())
+                .collect(),
+            stage_ids,
+            opened_file,
+            known_states: HashMap::new(),
             _subscriptions: subscriptions,
         };
         view.reanchor(&snapshot, offsets);
+        view.remember_state(&snapshot);
         view.refresh(cx);
         if let Some(&first) = view.conflict_chunks().first() {
             view.move_to_chunk(first, window, cx);
@@ -504,6 +596,39 @@ impl MergeView {
         })
     }
 
+    /// Closes this view and opens a new one for the file's current conflict.
+    pub fn reload(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<Self>>> {
+        self.discard(cx);
+        MergeView::open(
+            self.workspace.clone(),
+            self.repo.clone(),
+            self.path.clone(),
+            window,
+            cx,
+        )
+    }
+
+    /// Conflicts Apply warns about: unresolved ones, and any conflict whose result lines are
+    /// still its starting (base) text without a side taken, e.g. ignored ones.
+    pub fn conflicts_without_a_side(&self, cx: &App) -> usize {
+        let snapshot = self.result_buffer.read(cx).text_snapshot();
+        let offsets = self.chunk_offsets(&snapshot);
+        self.conflict_chunks()
+            .into_iter()
+            .filter(|&ix| match self.resolutions[ix] {
+                Resolution::Unresolved => true,
+                Resolution::Ours | Resolution::Theirs | Resolution::Both => false,
+                _ => snapshot
+                    .text_for_range(offsets[ix].clone())
+                    .equals_str(&self.initial_texts[ix]),
+            })
+            .count()
+    }
+
     /// Closes the view without asking and without touching the file, e.g. after the merge was
     /// aborted.
     pub fn discard(&mut self, cx: &mut Context<Self>) {
@@ -525,7 +650,7 @@ impl MergeView {
 
     /// Asks first when conflicts are left; `false` when the user declined.
     fn confirm_unresolved(&self, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
-        let unresolved = self.unresolved_count();
+        let unresolved = self.conflicts_without_a_side(cx);
         if unresolved == 0 {
             return Task::ready(true);
         }
@@ -537,7 +662,11 @@ impl MergeView {
         let answer = window.prompt(
             PromptLevel::Warning,
             &message,
-            Some("The result is written as it is now, and the file is marked resolved."),
+            Some(
+                "The result is written as it is now, and the file is marked resolved. A \
+                 conflict without a side taken keeps its base text, without either side's \
+                 change.",
+            ),
             &["Apply Anyway", "Cancel"],
             cx,
         );
@@ -545,11 +674,23 @@ impl MergeView {
     }
 
     /// Writes the result to the worktree file and marks it resolved.
+    ///
+    /// Refuses ([`ApplyError`]) when the file is no longer conflicted or has another conflict
+    /// now, and asks before replacing changes made outside the merge editor: unsaved edits in
+    /// the file's open buffer, a file changed on disk since the view opened, or a file that
+    /// had no conflict markers left when it opened (resolved by hand, e.g. with Zed's inline
+    /// conflict buttons).
+    ///
+    /// Line endings: the stages are read as git checks them out (eol conversion applied), so
+    /// the result has the working tree's line endings. An open buffer keeps its own; a file
+    /// written to disk takes the line ending the file has now.
     fn write_result(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<()>> {
         let (rope, line_ending) = {
             let buffer = self.result_buffer.read(cx);
             (buffer.as_rope().clone(), buffer.line_ending())
         };
+        let stage_ids = self.stage_ids.clone();
+        let opened_file = self.opened_file.clone();
         let repo = self.repo.clone();
         let path = self.path.clone();
         let project = self.project.clone();
@@ -563,17 +704,62 @@ impl MergeView {
             .join(path.as_std_path());
         let fs = project.read(cx).fs().clone();
         cx.spawn_in(window, async move |this, cx| {
+            let display_path = path.as_unix_str().to_string();
+            let current = cx
+                .update(|_, cx| GitCli::conflict_stage_ids(&repo, path.clone(), cx))?
+                .await?;
+            if current.is_empty() {
+                return Err(ApplyError::NotConflicted(display_path).into());
+            }
+            if current != stage_ids {
+                return Err(ApplyError::ConflictChanged(display_path).into());
+            }
+
+            let on_disk = fs.load_bytes(&abs_path).await.ok();
+            let buffer_dirty = open_buffer
+                .as_ref()
+                .is_some_and(|buffer| buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
+            let changed_outside = buffer_dirty
+                || on_disk != opened_file
+                || !opened_file.as_deref().is_some_and(has_conflict_markers);
+            if changed_outside {
+                let file_name = path.file_name().unwrap_or(path.as_unix_str()).to_string();
+                let answer = this.update_in(cx, |_, window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        &format!(
+                            "{file_name} has changes outside the merge editor. Replace them \
+                             with the merge result?"
+                        ),
+                        None,
+                        &["Replace", "Cancel"],
+                        cx,
+                    )
+                })?;
+                if answer.await.ok() != Some(0) {
+                    return Err(ApplyError::Cancelled.into());
+                }
+            }
+
             match open_buffer {
                 Some(buffer) => {
+                    // The buffer keeps the line ending it detected in the working tree file.
                     buffer.update(cx, |buffer, cx| {
                         buffer.set_text(rope.to_string(), cx);
-                        buffer.set_line_ending(line_ending, cx);
                     });
                     project
                         .update(cx, |project, cx| project.save_buffer(buffer, cx))
                         .await?;
                 }
-                None => fs.save(&abs_path, &rope, line_ending).await?,
+                None => {
+                    let line_ending = on_disk
+                        .as_deref()
+                        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                        .filter(|text| text.contains('\n'))
+                        .map(LineEnding::detect)
+                        .unwrap_or(line_ending);
+                    fs.save(&abs_path, &rope, line_ending).await?
+                }
             }
             cx.update(|_, cx| GitCli::mark_resolved(&repo, vec![path], cx))?
                 .await?;
@@ -594,8 +780,33 @@ impl MergeView {
                 return anyhow::Ok(());
             }
             let task = this.update_in(cx, |this, window, cx| this.apply(window, cx))?;
-            if let Err(error) = task.await {
-                this.update(cx, |this, cx| this.show_error(&error, cx))?;
+            let Err(error) = task.await else {
+                return Ok(());
+            };
+            match error.downcast_ref::<ApplyError>() {
+                Some(ApplyError::Cancelled) => {}
+                Some(stale @ (ApplyError::NotConflicted(_) | ApplyError::ConflictChanged(_))) => {
+                    let changed = matches!(stale, ApplyError::ConflictChanged(_));
+                    let message = stale.to_string();
+                    let answers: &[&str] = if changed {
+                        &["Reload", "Cancel"]
+                    } else {
+                        &["Close Merge Editor", "Cancel"]
+                    };
+                    let answer = this.update_in(cx, |_, window, cx| {
+                        window.prompt(PromptLevel::Warning, &message, None, answers, cx)
+                    })?;
+                    if answer.await.ok() == Some(0) {
+                        this.update_in(cx, |this, window, cx| {
+                            if changed {
+                                this.reload(window, cx).detach_and_log_err(cx);
+                            } else {
+                                this.discard(cx);
+                            }
+                        })?;
+                    }
+                }
+                None => this.update(cx, |this, cx| this.show_error(&error, cx))?,
             }
             Ok(())
         })
@@ -629,18 +840,27 @@ impl MergeView {
             .collect()
     }
 
+    /// Anchors the chunks at `offsets`. Text typed at a boundary goes to the chunk after it,
+    /// except after an empty chunk, which takes it (so typing at an empty conflict fills that
+    /// conflict) and after the last chunk (text typed at the end of the file).
     fn reanchor(&mut self, snapshot: &TextBufferSnapshot, offsets: Vec<Range<usize>>) {
         let last = offsets.len().saturating_sub(1);
+        let boundary_takes_insertions = |ix: usize| ix == last || offsets[ix].is_empty();
         self.anchors = offsets
             .iter()
             .enumerate()
             .map(|(ix, range)| {
-                let end = if ix == last {
+                let start = if ix > 0 && boundary_takes_insertions(ix - 1) {
+                    snapshot.anchor_after(range.start)
+                } else {
+                    snapshot.anchor_before(range.start)
+                };
+                let end = if boundary_takes_insertions(ix) {
                     snapshot.anchor_after(range.end)
                 } else {
                     snapshot.anchor_before(range.end)
                 };
-                snapshot.anchor_before(range.start)..end
+                start..end
             })
             .collect();
         self.synced = snapshot.clone();
@@ -688,6 +908,14 @@ impl MergeView {
             Side::Theirs => Resolution::Theirs,
             Side::Both => Resolution::Both,
         };
+        self.remember_state(&snapshot);
+    }
+
+    fn remember_state(&mut self, snapshot: &TextBufferSnapshot) {
+        self.known_states.insert(
+            text_hash(snapshot),
+            (self.synced_offsets.clone(), self.resolutions.clone()),
+        );
     }
 
     /// Marks the chunks touched by edits made since the last sync as `Edited`.
@@ -700,14 +928,37 @@ impl MergeView {
             return;
         }
         self.touch(cx);
+        // Back to a text this view produced (undo or redo of an accept, or of the edits after
+        // one): restore that state exactly.
+        if let Some((offsets, resolutions)) = self.known_states.get(&text_hash(&snapshot)).cloned()
+            && offsets.last().is_none_or(|last| last.end == snapshot.len())
+        {
+            self.reanchor(&snapshot, offsets);
+            self.resolutions = resolutions;
+            self.refresh(cx);
+            return;
+        }
         let new_offsets = self.chunk_offsets(&snapshot);
         let mut changed = false;
         for (ix, (old, new)) in self.synced_offsets.iter().zip(&new_offsets).enumerate() {
             let touched = edits
                 .iter()
-                .any(|edit| touches(&edit.old, old) || touches(&edit.new, new));
+                .any(|edit| touches(&edit.old, &edit.new, old, new));
             if touched && self.resolutions[ix] != Resolution::Edited {
                 self.resolutions[ix] = Resolution::Edited;
+                changed = true;
+            }
+            // Edited back to where it started: nothing was chosen.
+            if self.resolutions[ix] == Resolution::Edited
+                && snapshot
+                    .text_for_range(new.clone())
+                    .equals_str(&self.initial_texts[ix])
+            {
+                self.resolutions[ix] = if self.merge.chunks[ix].is_conflict() {
+                    Resolution::Unresolved
+                } else {
+                    Resolution::Auto
+                };
                 changed = true;
             }
         }
@@ -999,18 +1250,41 @@ fn side_label(side: &str, name: &str) -> SharedString {
     }
 }
 
-/// Whether an edit range (in one version of the buffer) touches a chunk's range (in the same
-/// version). Ranges with content must overlap; an empty range touches what it is next to.
-fn touches(edit: &Range<usize>, chunk: &Range<usize>) -> bool {
-    if edit.is_empty() && chunk.is_empty() {
-        false
-    } else if edit.is_empty() || chunk.is_empty() {
-        // Only an empty chunk takes in what happens at its position; a pure deletion is
-        // judged by its old range.
-        chunk.is_empty() && edit.start <= chunk.end && chunk.start <= edit.end
+/// Whether an edit (its range before and after) touches a chunk (its offsets before and
+/// after). A chunk with lines is touched by an edit that overlaps them, before or after. An
+/// empty chunk is touched only by text inserted at its position or an edit spanning across
+/// it: deleting up to it (e.g. the newline of the line above) leaves it alone.
+fn touches(
+    edit_old: &Range<usize>,
+    edit_new: &Range<usize>,
+    old_chunk: &Range<usize>,
+    new_chunk: &Range<usize>,
+) -> bool {
+    let overlaps = |edit: &Range<usize>, chunk: &Range<usize>| {
+        !edit.is_empty() && !chunk.is_empty() && edit.start < chunk.end && chunk.start < edit.end
+    };
+    if old_chunk.is_empty() {
+        let at = old_chunk.start;
+        (edit_old.start < at && at < edit_old.end) || (edit_old.start == at && !edit_new.is_empty())
     } else {
-        edit.start < chunk.end && chunk.start < edit.end
+        overlaps(edit_old, old_chunk) || overlaps(edit_new, new_chunk)
     }
+}
+
+fn text_hash(snapshot: &TextBufferSnapshot) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for chunk in snapshot.as_rope().chunks() {
+        chunk.hash(&mut hasher);
+    }
+    snapshot.len().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Whether a file still has git's conflict markers (a `<<<<<<<` and a `>>>>>>>` line).
+fn has_conflict_markers(bytes: &[u8]) -> bool {
+    let mut lines = bytes.split(|byte| *byte == b'\n');
+    lines.any(|line| line.starts_with(b"<<<<<<<")) && lines.any(|line| line.starts_with(b">>>>>>>"))
 }
 
 /// The row in another pane that shows the same place as `row` (fractional, the top of the

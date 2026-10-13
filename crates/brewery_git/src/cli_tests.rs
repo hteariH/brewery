@@ -930,3 +930,42 @@ fn cherry_pick_abort_and_continue() {
     assert_eq!(block(runner.in_progress()).expect("in progress"), None);
     assert_ne!(repo.head(), head);
 }
+
+#[test]
+fn conflict_stages_are_read_as_checked_out() {
+    let repo = TestRepo::new();
+    repo.git(&["config", "core.autocrlf", "true"]);
+    repo.diverged_with_conflict();
+    let runner = repo.runner();
+    block(runner.merge("feature")).expect("merge");
+
+    let stages = block(runner.conflict_stages(&RepoPath::new("a.txt").expect("path"), 1024))
+        .expect("stages");
+    assert_eq!(stages.ours, StageBlob::Bytes(b"main\r\n".to_vec()));
+    assert_eq!(stages.theirs, StageBlob::Bytes(b"feature\r\n".to_vec()));
+}
+
+#[test]
+fn conflict_stage_ids_follow_the_conflict() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    let runner = repo.runner();
+    let a = RepoPath::new("a.txt").expect("path");
+    assert!(
+        block(runner.conflict_stage_ids(&a))
+            .expect("ids")
+            .is_empty()
+    );
+    block(runner.merge("feature")).expect("merge");
+
+    let ids = block(runner.conflict_stage_ids(&a)).expect("ids");
+    assert_eq!(ids.len(), 3);
+    assert!(ids[0].ends_with(" 1") && ids[1].ends_with(" 2") && ids[2].ends_with(" 3"));
+
+    repo.git(&["add", "a.txt"]);
+    assert!(
+        block(runner.conflict_stage_ids(&a))
+            .expect("ids")
+            .is_empty()
+    );
+}

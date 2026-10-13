@@ -758,3 +758,385 @@ fn bindings_for(
             .collect()
     })
 }
+
+// ---------------------------------------------------------------------------------------------
+// The merge editor never loses work: line endings, stale conflicts, outside changes, undo.
+// ---------------------------------------------------------------------------------------------
+
+fn crlf(text: &str) -> String {
+    text.replace('\n', "\r\n")
+}
+
+fn apply_error(result: Result<()>) -> ApplyError {
+    let error = result.err().expect("apply should fail");
+    error
+        .downcast_ref::<ApplyError>()
+        .cloned()
+        .unwrap_or_else(|| panic!("not an ApplyError: {error:#}"))
+}
+
+/// Waits for a prompt that comes after git calls (real processes, so parking is not enough).
+async fn wait_for_prompt(cx: &mut VisualTestContext) -> bool {
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.has_pending_prompt() {
+            return true;
+        }
+        cx.executor().timer(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+async fn open_project_buffer(
+    fixture: &Fixture,
+    file: &str,
+    cx: &mut VisualTestContext,
+) -> Entity<Buffer> {
+    let project = fixture
+        .workspace
+        .read_with(cx, |workspace, _| workspace.project().clone());
+    let project_path = fixture.repository.read_with(cx, |repository, cx| {
+        repository
+            .repo_path_to_project_path(&path(file), cx)
+            .expect("project path")
+    });
+    project
+        .update(cx, |project, cx| project.open_buffer(project_path, cx))
+        .await
+        .expect("open buffer")
+}
+
+#[gpui::test]
+async fn apply_keeps_crlf_under_autocrlf(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.git(&["config", "core.autocrlf", "true"]);
+    repo.merge_with_conflicts();
+    assert!(repo.read("a.txt").contains("\r\n"), "git checks out CRLF");
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    let conflicts = conflicts(&view, cx);
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.left_editor().read(cx).text(cx), lines(MAIN));
+    });
+    view.update(cx, |view, cx| {
+        view.accept_chunk(conflicts[0], Side::Ours, cx);
+        view.accept_chunk(conflicts[1], Side::Theirs, cx);
+    });
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    task.await.expect("apply");
+    cx.run_until_parked();
+
+    let expected = result_with(&[(1, "B-main"), (14, "O-feature")]);
+    assert_eq!(repo.read("a.txt"), crlf(&expected));
+    assert_eq!(repo.unmerged(), "");
+    assert!(
+        !repo.git(&["cat-file", "blob", ":0:a.txt"]).contains('\r'),
+        "the index keeps LF"
+    );
+}
+
+#[gpui::test]
+async fn apply_through_an_open_buffer_keeps_eol_crlf(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.commit(".gitattributes", "a.txt text eol=crlf\n", "attributes");
+    repo.merge_with_conflicts();
+    assert!(repo.read("a.txt").contains("\r\n"));
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let buffer = open_project_buffer(&fixture, "a.txt", cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_left(cx));
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    task.await.expect("apply");
+    cx.run_until_parked();
+
+    assert_eq!(repo.read("a.txt"), crlf(&lines(MAIN)));
+    buffer.read_with(cx, |buffer, _| {
+        assert_eq!(buffer.line_ending(), LineEnding::Windows);
+        assert!(!buffer.is_dirty());
+    });
+    assert_eq!(repo.unmerged(), "");
+}
+
+#[gpui::test]
+async fn apply_refuses_a_conflict_that_changed_and_open_reloads(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.diverged();
+    repo.git(&["checkout", "--quiet", "feature"]);
+    let mut second = FEATURE.to_vec();
+    second[1] = "B-feature2";
+    repo.commit("a.txt", lines(&second), "feature second change");
+    assert!(!repo.run(&["rebase", "main"]).status.success());
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let old = open_view(&fixture, "a.txt", cx).await.expect("open");
+
+    // Outside the merge editor: keep main's lines and go on to the next commit, which
+    // conflicts on the same file again.
+    repo.git(&["checkout", "--ours", "--", "a.txt"]);
+    repo.git(&["add", "--", "a.txt"]);
+    assert!(!repo.run(&["rebase", "--continue"]).status.success());
+    assert_eq!(repo.unmerged(), "a.txt");
+    let on_disk = repo.read("a.txt");
+
+    let task = old.update_in(cx, |view, window, cx| view.apply(window, cx));
+    let error = apply_error(task.await);
+    assert!(matches!(error, ApplyError::ConflictChanged(_)), "{error}");
+    assert_eq!(repo.read("a.txt"), on_disk, "nothing was written");
+    assert_eq!(repo.unmerged(), "a.txt");
+
+    let new = open_view(&fixture, "a.txt", cx).await.expect("reopen");
+    assert_ne!(
+        new.entity_id(),
+        old.entity_id(),
+        "a fresh view for the new conflict"
+    );
+    new.read_with(cx, |view, cx| {
+        assert!(
+            view.left_editor()
+                .read(cx)
+                .text(cx)
+                .contains("B-feature2\n")
+        );
+    });
+    assert_eq!(open_views(&fixture, cx), 1, "the stale view is closed");
+
+    // The current view is reused.
+    let again = open_view(&fixture, "a.txt", cx).await.expect("open again");
+    assert_eq!(again.entity_id(), new.entity_id());
+}
+
+#[gpui::test]
+async fn apply_refuses_a_file_resolved_outside(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_left(cx));
+
+    repo.git(&["checkout", "--theirs", "--", "a.txt"]);
+    repo.git(&["add", "--", "a.txt"]);
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    let error = apply_error(task.await);
+    assert!(matches!(error, ApplyError::NotConflicted(_)), "{error}");
+    assert_eq!(
+        repo.read("a.txt"),
+        lines(FEATURE),
+        "the outside resolution stays"
+    );
+}
+
+#[gpui::test]
+async fn apply_asks_before_replacing_unsaved_buffer_edits(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let buffer = open_project_buffer(&fixture, "a.txt", cx).await;
+    buffer.update(cx, |buffer, cx| buffer.edit([(0..0, "edited\n")], None, cx));
+    let on_disk = repo.read("a.txt");
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_left(cx));
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    assert!(
+        wait_for_prompt(cx).await,
+        "Apply asks about the unsaved edits"
+    );
+    cx.simulate_prompt_answer("Cancel");
+    assert_eq!(apply_error(task.await), ApplyError::Cancelled);
+    assert_eq!(repo.read("a.txt"), on_disk);
+    assert_eq!(repo.unmerged(), "a.txt");
+    buffer.read_with(cx, |buffer, _| {
+        assert!(buffer.text().starts_with("edited\n"))
+    });
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    assert!(wait_for_prompt(cx).await);
+    cx.simulate_prompt_answer("Replace");
+    task.await.expect("apply");
+    cx.run_until_parked();
+    assert_eq!(repo.read("a.txt"), lines(MAIN));
+    assert_eq!(repo.unmerged(), "");
+}
+
+#[gpui::test]
+async fn apply_asks_before_replacing_a_file_resolved_by_hand(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    // E.g. with Zed's inline conflict buttons: saved, without markers, not staged.
+    repo.write("a.txt", lines(FEATURE));
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_left(cx));
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    assert!(wait_for_prompt(cx).await);
+    cx.simulate_prompt_answer("Cancel");
+    assert_eq!(apply_error(task.await), ApplyError::Cancelled);
+    assert_eq!(repo.read("a.txt"), lines(FEATURE));
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    assert!(wait_for_prompt(cx).await);
+    cx.simulate_prompt_answer("Replace");
+    task.await.expect("apply");
+    assert_eq!(repo.read("a.txt"), lines(MAIN));
+}
+
+#[gpui::test]
+async fn apply_asks_when_the_file_changed_after_the_view_opened(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_left(cx));
+    let mut changed = repo.read("a.txt");
+    changed.push_str("appended outside\n");
+    repo.write("a.txt", &changed);
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    assert!(wait_for_prompt(cx).await);
+    cx.simulate_prompt_answer("Cancel");
+    assert_eq!(apply_error(task.await), ApplyError::Cancelled);
+    assert_eq!(repo.read("a.txt"), changed);
+}
+
+#[gpui::test]
+async fn undoing_an_accept_makes_the_conflict_unresolved_again(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    let conflicts = conflicts(&view, cx);
+    let editor = view.read_with(cx, |view, _| view.result_editor().clone());
+
+    view.update(cx, |view, cx| {
+        view.accept_chunk(conflicts[0], Side::Ours, cx)
+    });
+    cx.run_until_parked();
+    editor.update_in(cx, |editor, window, cx| {
+        editor.undo(&editor::actions::Undo, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(result_text(&view, cx), result_with(&[]));
+    assert_eq!(resolution(&view, conflicts[0], cx), Resolution::Unresolved);
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.unresolved_count(), 2);
+        assert_eq!(view.conflicts_without_a_side(cx), 2);
+    });
+
+    editor.update_in(cx, |editor, window, cx| {
+        editor.redo(&editor::actions::Redo, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(result_text(&view, cx), result_with(&[(1, "B-main")]));
+    assert_eq!(resolution(&view, conflicts[0], cx), Resolution::Ours);
+
+    // Typing the base text back by hand is not a choice either.
+    view.update(cx, |view, cx| {
+        view.accept_chunk(conflicts[1], Side::Theirs, cx)
+    });
+    editor.update_in(cx, |editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(14, 0)..Point::new(14, 9)])
+        });
+        editor.insert("o", window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(result_text(&view, cx), result_with(&[(1, "B-main")]));
+    assert_eq!(resolution(&view, conflicts[1], cx), Resolution::Unresolved);
+}
+
+#[gpui::test]
+async fn an_empty_conflict_is_resolved_only_by_typing_into_it(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    let base = ["p", "q", "r", "s", "t", "u"];
+    repo.commit("e.txt", lines(&base), "base");
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    repo.commit(
+        "e.txt",
+        lines(&["p", "THEIRS", "q", "r", "s", "t", "u"]),
+        "feature",
+    );
+    repo.git(&["checkout", "--quiet", "main"]);
+    repo.commit(
+        "e.txt",
+        lines(&["p", "OURS", "q", "r", "s", "t", "u"]),
+        "main",
+    );
+    assert!(
+        !repo
+            .run(&["merge", "--no-edit", "feature"])
+            .status
+            .success()
+    );
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "e.txt", cx).await.expect("open");
+    let conflicts = conflicts(&view, cx);
+    assert_eq!(conflicts.len(), 1);
+    let conflict = conflicts[0];
+    assert_eq!(result_text(&view, cx), lines(&base), "an empty base");
+    let editor = view.read_with(cx, |view, _| view.result_editor().clone());
+
+    // Backspace at the start of the line after it: joins "p" and "q", ends at the conflict.
+    editor.update_in(cx, |editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(1, 0)..Point::new(1, 0)])
+        });
+        editor.backspace(&editor::actions::Backspace, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(resolution(&view, conflict, cx), Resolution::Unresolved);
+    editor.update_in(cx, |editor, window, cx| {
+        editor.undo(&editor::actions::Undo, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(result_text(&view, cx), lines(&base));
+    assert_eq!(resolution(&view, conflict, cx), Resolution::Unresolved);
+
+    // Typing at its position fills it.
+    editor.update_in(cx, |editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(1, 0)..Point::new(1, 0)])
+        });
+        editor.insert("mine\n", window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(resolution(&view, conflict, cx), Resolution::Edited);
+    assert_eq!(resolution(&view, conflict + 1, cx), Resolution::Auto);
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.result_rows(cx)[conflict], 1..2);
+        assert_eq!(view.conflicts_without_a_side(cx), 0);
+    });
+}
+
+#[gpui::test]
+async fn ignored_conflicts_still_count_for_the_apply_warning(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    let conflicts = conflicts(&view, cx);
+
+    view.update(cx, |view, cx| view.ignore_chunk(conflicts[0], cx));
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.unresolved_count(), 1);
+        assert_eq!(view.conflicts_without_a_side(cx), 2);
+    });
+    view.update(cx, |view, cx| {
+        view.accept_chunk(conflicts[1], Side::Theirs, cx)
+    });
+    view.read_with(cx, |view, cx| {
+        assert_eq!(view.conflicts_without_a_side(cx), 1)
+    });
+}

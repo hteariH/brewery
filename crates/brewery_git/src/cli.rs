@@ -437,7 +437,10 @@ impl GitCli {
         )
     }
 
-    /// The index stages of a conflicted file; a stage larger than `max_size` bytes is not read.
+    /// The index stages of a conflicted file as git would check them out at `path` (eol
+    /// conversion such as `core.autocrlf`, `ident` and smudge filters applied), so they match
+    /// the working tree's line endings. A stage larger than `max_size` bytes (in the index) is
+    /// not read.
     pub fn conflict_stages(
         repo: &Entity<Repository>,
         path: RepoPath,
@@ -450,6 +453,23 @@ impl GitCli {
             None,
             cx,
             async move |runner, _| runner.conflict_stages(&path, max_size).await,
+        )
+    }
+
+    /// The index records of a conflicted file, `<mode> <oid> <stage>` each, sorted by stage:
+    /// `git ls-files -u -s -z -- <path>`. Empty when the file is not conflicted. Two reads
+    /// that compare equal mean the conflict did not change in between.
+    pub fn conflict_stage_ids(
+        repo: &Entity<Repository>,
+        path: RepoPath,
+        cx: &mut App,
+    ) -> Task<Result<Vec<String>>> {
+        Self::job(
+            repo,
+            "brewery git ls-files -u",
+            None,
+            cx,
+            async move |runner, _| runner.conflict_stage_ids(&path).await,
         )
     }
 
@@ -888,13 +908,29 @@ impl GitRunner {
     ) -> Result<ConflictStages> {
         let object = |stage: u8| format!(":{stage}:{}", path.as_unix_str());
         Ok(ConflictStages {
-            base: self.stage_blob(&object(1), max_size).await?,
-            ours: self.stage_blob(&object(2), max_size).await?,
-            theirs: self.stage_blob(&object(3), max_size).await?,
+            base: self.stage_blob(&object(1), path, max_size).await?,
+            ours: self.stage_blob(&object(2), path, max_size).await?,
+            theirs: self.stage_blob(&object(3), path, max_size).await?,
         })
     }
 
-    async fn stage_blob(&self, object: &str, max_size: u64) -> Result<StageBlob> {
+    pub(crate) async fn conflict_stage_ids(&self, path: &RepoPath) -> Result<Vec<String>> {
+        let output = self
+            .run_literal(&["ls-files", "-u", "-s", "-z", "--", path.as_unix_str()])
+            .await?;
+        if !output.success() {
+            bail!("{}", output.message());
+        }
+        Ok(output
+            .stdout
+            .split('\0')
+            .filter_map(|record| record.split_once('\t'))
+            .filter(|(_, name)| *name == path.as_unix_str())
+            .map(|(info, _)| info.to_string())
+            .collect())
+    }
+
+    async fn stage_blob(&self, object: &str, path: &RepoPath, max_size: u64) -> Result<StageBlob> {
         if !self.run(&["cat-file", "-e", object]).await?.success() {
             return Ok(StageBlob::Missing);
         }
@@ -905,8 +941,13 @@ impl GitRunner {
         if size.stdout.trim().parse::<u64>()? > max_size {
             return Ok(StageBlob::TooLarge);
         }
+        let attributes_path = format!("--path={}", path.as_unix_str());
         let blob = self
-            .run_raw(&["cat-file", "blob", object], &[], future::pending())
+            .run_raw(
+                &["cat-file", "--filters", &attributes_path, object],
+                &[],
+                future::pending(),
+            )
             .await?;
         if blob.status != 0 {
             bail!("{}", blob.text().message());
