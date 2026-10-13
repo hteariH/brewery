@@ -209,6 +209,14 @@
   { "context": "Diagnostics > Editor", "bindings": { "cmd-6": "pane::CloseActiveItem" } },
   { "context": "OutlinePanel", "bindings": { "cmd-7": "workspace::CloseActiveDock" } },
   { "context": "LogPanel", "bindings": { "cmd-9": "workspace::CloseActiveDock" } }, // brewery:
+  // brewery: the 3-pane merge editor, F7 / Shift+F7 as in IntelliJ's merge window
+  {
+    "context": "BreweryMergeView",
+    "bindings": {
+      "f7": "brewery_merge::NextConflict",
+      "shift-f7": "brewery_merge::PreviousConflict",
+    },
+  },
   {
     // `cmd-alt-l` is bound to `editor::Format` (jetbrains "Reformat Code") in
     // the Editor context above, which collides with the default

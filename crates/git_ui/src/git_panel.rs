@@ -2585,6 +2585,11 @@ impl GitPanel {
             let entry = self.entries.get(selected_index)?.status_entry()?;
             let workspace = self.workspace.upgrade()?;
             let git_repo = self.active_repository.as_ref()?;
+            // brewery: conflicted files open in Brewery's merge editor when the hook is set
+            let conflict = (git_repo, &entry.repo_path, entry.status);
+            if git_ui_core::brewery_hooks::open_conflict(conflict, &workspace, window, cx) {
+                return None; // brewery:
+            }
             let target =
                 Self::diff_target_for_section(self.section_for_entry_index(selected_index));
 

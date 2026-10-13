@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use ui::{Tooltip, prelude::*};
-use workspace::item::ItemEvent;
+use workspace::item::{ItemBufferKind, ItemEvent, SaveOptions};
 use workspace::notifications::NotificationId;
 use workspace::{Item, Toast, Workspace};
 
@@ -168,8 +168,16 @@ pub struct MergeView {
     right_blocks: HashSet<CustomBlockId>,
     /// Scroll events still to come from editors this view scrolled itself.
     pending_scrolls: HashMap<EntityId, usize>,
+    /// The user changed something (took a side, ignored a chunk, edited the result).
+    touched: bool,
+    /// The result was applied, or the merge was abandoned: closing needs no confirmation.
+    finished: bool,
     _subscriptions: Vec<Subscription>,
 }
+
+/// Emitted once the result is written and the file is marked resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MergeApplied;
 
 impl MergeView {
     /// Opens the 3-pane merge editor for a conflicted file (repository-relative) in the
@@ -346,6 +354,8 @@ impl MergeView {
             left_blocks: HashSet::new(),
             right_blocks: HashSet::new(),
             pending_scrolls: HashMap::new(),
+            touched: false,
+            finished: false,
             _subscriptions: subscriptions,
         };
         view.reanchor(&snapshot, offsets);
@@ -354,6 +364,10 @@ impl MergeView {
             view.move_to_chunk(first, window, cx);
         }
         view
+    }
+
+    pub fn repo(&self) -> &Entity<Repository> {
+        &self.repo
     }
 
     /// The conflicted file, repository-relative.
@@ -430,6 +444,7 @@ impl MergeView {
     pub fn ignore_chunk(&mut self, chunk: usize, cx: &mut Context<Self>) {
         if let Some(resolution) = self.resolutions.get_mut(chunk) {
             *resolution = Resolution::Ignored;
+            self.touch(cx);
             self.refresh(cx);
         }
     }
@@ -481,6 +496,56 @@ impl MergeView {
     /// Writes the result to the file, marks it resolved and closes the view. Does not ask about
     /// unresolved conflicts; the Apply button does.
     pub fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<()>> {
+        let write = self.write_result(window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            write.await?;
+            this.update(cx, |_, cx| cx.emit(ItemEvent::CloseItem))?;
+            Ok(())
+        })
+    }
+
+    /// Closes the view without asking and without touching the file, e.g. after the merge was
+    /// aborted.
+    pub fn discard(&mut self, cx: &mut Context<Self>) {
+        self.finished = true;
+        cx.emit(ItemEvent::CloseItem);
+    }
+
+    /// Whether the user changed something that is not applied yet.
+    pub fn has_unapplied_work(&self) -> bool {
+        self.touched && !self.finished
+    }
+
+    fn touch(&mut self, cx: &mut Context<Self>) {
+        if !self.touched {
+            self.touched = true;
+            cx.emit(ItemEvent::UpdateTab);
+        }
+    }
+
+    /// Asks first when conflicts are left; `false` when the user declined.
+    fn confirm_unresolved(&self, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+        let unresolved = self.unresolved_count();
+        if unresolved == 0 {
+            return Task::ready(true);
+        }
+        let message = if unresolved == 1 {
+            "1 conflict is not resolved".to_string()
+        } else {
+            format!("{unresolved} conflicts are not resolved")
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &message,
+            Some("The result is written as it is now, and the file is marked resolved."),
+            &["Apply Anyway", "Cancel"],
+            cx,
+        );
+        cx.background_spawn(async move { answer.await.ok() == Some(0) })
+    }
+
+    /// Writes the result to the worktree file and marks it resolved.
+    fn write_result(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<()>> {
         let (rope, line_ending) = {
             let buffer = self.result_buffer.read(cx);
             (buffer.as_rope().clone(), buffer.line_ending())
@@ -512,32 +577,20 @@ impl MergeView {
             }
             cx.update(|_, cx| GitCli::mark_resolved(&repo, vec![path], cx))?
                 .await?;
-            this.update(cx, |_, cx| cx.emit(ItemEvent::CloseItem))?;
+            this.update(cx, |this, cx| {
+                this.finished = true;
+                cx.emit(ItemEvent::UpdateTab);
+                cx.emit(MergeApplied);
+            })?;
             Ok(())
         })
     }
 
     /// The Apply button: asks first when conflicts are left, shows failures as a toast.
     fn apply_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let unresolved = self.unresolved_count();
-        let confirm = (unresolved > 0).then(|| {
-            let message = if unresolved == 1 {
-                "1 conflict is not resolved".to_string()
-            } else {
-                format!("{unresolved} conflicts are not resolved")
-            };
-            window.prompt(
-                PromptLevel::Warning,
-                &message,
-                Some("The result is written as it is now, and the file is marked resolved."),
-                &["Apply Anyway", "Cancel"],
-                cx,
-            )
-        });
+        let confirm = self.confirm_unresolved(window, cx);
         cx.spawn_in(window, async move |this, cx| {
-            if let Some(confirm) = confirm
-                && confirm.await.ok() != Some(0)
-            {
+            if !confirm.await {
                 return anyhow::Ok(());
             }
             let task = this.update_in(cx, |this, window, cx| this.apply(window, cx))?;
@@ -598,6 +651,7 @@ impl MergeView {
         if chunk >= self.merge.chunks.len() {
             return;
         }
+        self.touch(cx);
         // Account for any user edits first, so they are not mistaken for this one.
         self.result_edited(cx);
         let snapshot = self.result_buffer.read(cx).text_snapshot();
@@ -645,6 +699,7 @@ impl MergeView {
         if edits.is_empty() {
             return;
         }
+        self.touch(cx);
         let new_offsets = self.chunk_offsets(&snapshot);
         let mut changed = false;
         for (ix, (old, new)) in self.synced_offsets.iter().zip(&new_offsets).enumerate() {
@@ -1125,6 +1180,7 @@ fn render_chunk_controls(
 }
 
 impl EventEmitter<ItemEvent> for MergeView {}
+impl EventEmitter<MergeApplied> for MergeView {}
 
 impl Focusable for MergeView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -1163,6 +1219,49 @@ impl Item for MergeView {
 
     fn to_item_events(event: &ItemEvent, f: &mut dyn FnMut(ItemEvent)) {
         f(*event)
+    }
+
+    // Unapplied work makes the view dirty, so closing it (the tab, Cancel, quitting) goes
+    // through Zed's "Save / Don't Save / Cancel" prompt, where Save applies the result. Zed
+    // only asks for singleton items without project items, hence `Singleton`.
+    fn buffer_kind(&self, _cx: &App) -> ItemBufferKind {
+        ItemBufferKind::Singleton
+    }
+
+    fn is_dirty(&self, _cx: &App) -> bool {
+        self.has_unapplied_work()
+    }
+
+    fn can_save(&self, _cx: &App) -> bool {
+        true
+    }
+
+    /// Applies the result (asking first when conflicts are left) and closes the view.
+    fn save(
+        &mut self,
+        _options: SaveOptions,
+        _project: Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let confirm = self.confirm_unresolved(window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if !confirm.await {
+                bail!("the merge was not applied");
+            }
+            this.update_in(cx, |this, window, cx| this.apply(window, cx))?
+                .await
+        })
+    }
+
+    /// "Don't Save" in the close prompt: the result is dropped with the view.
+    fn reload(
+        &mut self,
+        _project: Entity<Project>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        Task::ready(Ok(()))
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {

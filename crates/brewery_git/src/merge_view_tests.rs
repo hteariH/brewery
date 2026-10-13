@@ -597,3 +597,164 @@ async fn binary_conflicts_are_not_offered(cx: &mut TestAppContext) {
         assert!(workspace.items_of_type::<MergeView>(cx).next().is_none());
     });
 }
+
+fn close_view(
+    fixture: &Fixture,
+    view: &Entity<MergeView>,
+    cx: &mut VisualTestContext,
+) -> Task<Result<()>> {
+    let pane = fixture
+        .workspace
+        .read_with(cx, |workspace, _| workspace.active_pane().clone());
+    let id = view.entity_id();
+    pane.update_in(cx, |pane, window, cx| {
+        pane.close_item_by_id(id, workspace::SaveIntent::Close, window, cx)
+    })
+}
+
+fn open_views(fixture: &Fixture, cx: &VisualTestContext) -> usize {
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        workspace.items_of_type::<MergeView>(cx).count()
+    })
+}
+
+#[gpui::test]
+async fn closing_with_unapplied_work_asks_first(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+
+    // Untouched: closes without a prompt.
+    view.read_with(cx, |view, cx| assert!(!view.is_dirty(cx)));
+    close_view(&fixture, &view, cx).await.expect("close");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(open_views(&fixture, cx), 0);
+
+    // After taking a side, closing (the tab or Cancel) asks; Cancel keeps the view.
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    let conflicts = conflicts(&view, cx);
+    view.update(cx, |view, cx| {
+        view.accept_chunk(conflicts[0], Side::Ours, cx)
+    });
+    view.read_with(cx, |view, cx| assert!(view.is_dirty(cx)));
+    let close = close_view(&fixture, &view, cx);
+    cx.run_until_parked();
+    assert!(
+        cx.has_pending_prompt(),
+        "closing asks about the unapplied merge"
+    );
+    cx.simulate_prompt_answer("Cancel");
+    close.await.expect("close");
+    cx.run_until_parked();
+    assert_eq!(open_views(&fixture, cx), 1);
+
+    view.update(cx, |view, cx| view.cancel(cx));
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt(), "Cancel asks too");
+    cx.simulate_prompt_answer("Don't Save");
+    cx.run_until_parked();
+    assert_eq!(open_views(&fixture, cx), 0);
+    assert_eq!(repo.unmerged(), "a.txt", "nothing was applied");
+
+    // An ignored chunk is work too.
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    let conflicts = self::conflicts(&view, cx);
+    view.update(cx, |view, cx| view.ignore_chunk(conflicts[0], cx));
+    view.read_with(cx, |view, cx| assert!(view.is_dirty(cx)));
+}
+
+#[gpui::test]
+async fn saving_from_the_close_prompt_applies(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_left(cx));
+
+    let close = close_view(&fixture, &view, cx);
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Save");
+    close.await.expect("close");
+    cx.run_until_parked();
+    assert_eq!(open_views(&fixture, cx), 0);
+    assert_eq!(repo.read("a.txt"), lines(MAIN));
+    assert_eq!(repo.unmerged(), "");
+}
+
+#[gpui::test]
+async fn applying_does_not_ask_on_close(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_right(cx));
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    task.await.expect("apply");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(open_views(&fixture, cx), 0);
+}
+
+#[gpui::test]
+fn f7_moves_between_conflicts_in_the_jetbrains_keymaps(cx: &mut TestAppContext) {
+    init_test(cx);
+    let inside = ["Workspace", "Pane", "BreweryMergeView", "Editor"];
+    for keymap in [
+        include_str!("../../../assets/keymaps/linux/jetbrains.json"),
+        include_str!("../../../assets/keymaps/macos/jetbrains.json"),
+    ] {
+        for (key, action) in [
+            ("f7", "brewery_merge::NextConflict"),
+            ("shift-f7", "brewery_merge::PreviousConflict"),
+        ] {
+            assert_eq!(
+                bindings_for(keymap, key, &inside, cx).first(),
+                Some(&action.to_string()),
+                "{key} in the merge editor"
+            );
+        }
+        // Outside the merge editor F7 keeps its debugger binding.
+        assert!(
+            !bindings_for(keymap, "f7", &["Workspace", "Pane", "Editor"], cx)
+                .iter()
+                .any(|action| action.starts_with("brewery_merge::"))
+        );
+    }
+}
+
+/// The actions a keymap resolves for `keystroke` with the context stack `contexts`, most
+/// specific first. Bindings for actions this test binary does not link are skipped.
+fn bindings_for(
+    keymap: &str,
+    keystroke: &str,
+    contexts: &[&str],
+    cx: &mut TestAppContext,
+) -> Vec<String> {
+    cx.update(|cx| {
+        let bindings = match settings::KeymapFile::load(keymap, cx) {
+            settings::KeymapFileLoadResult::Success { key_bindings }
+            | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => key_bindings,
+            settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+                panic!("keymap does not parse: {error}")
+            }
+        };
+        let contexts = contexts
+            .iter()
+            .map(|context| gpui::KeyContext::parse(context).expect("context"))
+            .collect::<Vec<_>>();
+        gpui::Keymap::new(bindings)
+            .bindings_for_input(
+                &[gpui::Keystroke::parse(keystroke).expect("keystroke")],
+                &contexts,
+            )
+            .0
+            .iter()
+            .map(|binding| binding.action().name().to_string())
+            .collect()
+    })
+}

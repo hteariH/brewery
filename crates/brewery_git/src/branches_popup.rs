@@ -34,12 +34,10 @@ use workspace::{ModalView, Toast, Workspace};
 
 use crate::cli::{GitCli, MergeOutcome, Operation, check_revision};
 use crate::compare;
+use crate::conflicts_dialog::{self, ConflictsDialog};
 
 /// How many recent branches the Recent group shows.
 const RECENT_LIMIT: usize = 5;
-
-/// The git panel's `Panel::persistent_name`, used to open it without depending on `git_ui`.
-const GIT_PANEL_NAME: &str = "GitPanel";
 
 // ---------------------------------------------------------------------------------------------
 // Rows
@@ -505,37 +503,19 @@ pub(crate) fn show_workspace_toast(
     let mut notification = Toast::new(toast_id(toast.kind), toast.message);
     match toast.kind {
         ToastKind::Success => notification = notification.autohide(),
-        // M5d replaces this with the Conflicts dialog.
         ToastKind::Conflicts => {
-            notification = notification.on_click("Show Conflicts", move |window, cx| {
-                weak.update(cx, |workspace, cx| open_git_panel(workspace, window, cx))
-                    .ok();
+            notification = notification.on_click("Resolve…", move |window, cx| {
+                weak.update(cx, |workspace, cx| {
+                    if let Some(repo) = workspace.project().read(cx).active_repository(cx) {
+                        ConflictsDialog::open(workspace, repo, window, cx);
+                    }
+                })
+                .ok();
             })
         }
         ToastKind::Error => {}
     }
     workspace.show_toast(notification, cx);
-}
-
-fn open_git_panel(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let docks = workspace
-        .all_docks()
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    for dock in docks {
-        let Some(ix) = dock
-            .read(cx)
-            .panel_index_for_persistent_name(GIT_PANEL_NAME, cx)
-        else {
-            continue;
-        };
-        dock.update(cx, |dock, cx| {
-            dock.activate_panel(ix, window, cx);
-            dock.set_open(true, window, cx);
-        });
-        return;
-    }
 }
 
 /// Git branch names cannot contain spaces; like Zed's picker, typed spaces become dashes.
@@ -909,7 +889,7 @@ impl BranchesDelegate {
     }
 
     /// Runs `operation` after the popup closes and shows the toast it returns (an `Err` becomes
-    /// an error toast).
+    /// an error toast). Conflicts open the Conflicts dialog instead of a toast.
     fn spawn_operation(
         &mut self,
         window: &mut Window,
@@ -921,13 +901,27 @@ impl BranchesDelegate {
             return;
         };
         let workspace = self.workspace.clone();
+        conflicts_dialog::begin_operation(&repo, cx);
         cx.spawn_in(window, async move |_, cx| {
-            let toast = match operation(repo, cx).await {
-                Ok(toast) => toast,
-                Err(error) if error.to_string() == CANCELLED => return,
-                Err(error) => OutcomeToast::error("git failed", &format!("{error:#}")),
-            };
-            cx.update(|_, cx| show_toast(&workspace, toast, cx)).ok();
+            let result = operation(repo.clone(), cx).await;
+            cx.update(|window, cx| {
+                conflicts_dialog::end_operation(&repo, cx);
+                let toast = match result {
+                    Ok(toast) => toast,
+                    Err(error) if error.to_string() == CANCELLED => return,
+                    Err(error) => OutcomeToast::error("git failed", &format!("{error:#}")),
+                };
+                if toast.kind == ToastKind::Conflicts
+                    && let Some(workspace) = workspace.upgrade()
+                {
+                    workspace.update(cx, |workspace, cx| {
+                        ConflictsDialog::open(workspace, repo, window, cx);
+                    });
+                    return;
+                }
+                show_toast(&workspace, toast, cx);
+            })
+            .ok();
         })
         .detach();
         cx.emit(DismissEvent);

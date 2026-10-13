@@ -230,6 +230,42 @@ impl GitCli {
         )
     }
 
+    pub fn abort_cherry_pick(repo: &Entity<Repository>, cx: &mut App) -> Task<Result<()>> {
+        Self::job(
+            repo,
+            "brewery git cherry-pick --abort",
+            None,
+            cx,
+            async move |runner, _| runner.abort_cherry_pick().await,
+        )
+    }
+
+    /// Commits the picked change once every conflict is resolved and staged.
+    pub fn continue_cherry_pick(
+        repo: &Entity<Repository>,
+        cx: &mut App,
+    ) -> Task<Result<MergeOutcome>> {
+        Self::job(
+            repo,
+            "brewery git cherry-pick --continue",
+            None,
+            cx,
+            async move |runner, _| runner.continue_cherry_pick().await,
+        )
+    }
+
+    /// The conflicted (unmerged) files, sorted: `git diff --name-only --diff-filter=U`. Unlike
+    /// the repository snapshot, this is current right after a git command returns.
+    pub fn unmerged_paths(repo: &Entity<Repository>, cx: &mut App) -> Task<Result<Vec<RepoPath>>> {
+        Self::job(
+            repo,
+            "brewery git unmerged paths",
+            None,
+            cx,
+            async move |runner, _| runner.unmerged_paths().await,
+        )
+    }
+
     /// Takes one side of conflicted files and marks them resolved: `checkout --ours|--theirs`
     /// then `add`, or `rm` where that side deleted the file. See [`Side`] for rebases.
     pub fn checkout_side(
@@ -614,6 +650,16 @@ impl GitRunner {
         // A finished rebase is `Merged` even when the last commit was dropped as empty and HEAD
         // did not move; `None` makes `outcome` skip the HEAD comparison.
         self.outcome(output, None).await
+    }
+
+    pub(crate) async fn abort_cherry_pick(&self) -> Result<()> {
+        self.run_checked(&["cherry-pick", "--abort"]).await
+    }
+
+    pub(crate) async fn continue_cherry_pick(&self) -> Result<MergeOutcome> {
+        let before = self.head().await?;
+        let output = self.run(&["cherry-pick", "--continue"]).await?;
+        self.outcome(output, before).await
     }
 
     pub(crate) async fn checkout_side(&self, paths: Vec<RepoPath>, side: Side) -> Result<()> {
@@ -1013,7 +1059,7 @@ impl GitRunner {
         Ok(output.success().then(|| output.stdout.trim().to_string()))
     }
 
-    async fn unmerged_paths(&self) -> Result<Vec<RepoPath>> {
+    pub(crate) async fn unmerged_paths(&self) -> Result<Vec<RepoPath>> {
         let output = self
             .run(&["diff", "--name-only", "--diff-filter=U", "-z"])
             .await?;

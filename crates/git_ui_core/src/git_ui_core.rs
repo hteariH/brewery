@@ -8,6 +8,7 @@ use project::{ProjectPath, git_store::Repository};
 use workspace::Workspace;
 
 pub mod askpass_modal;
+pub mod brewery_hooks; // brewery: hooks for Brewery's git features
 pub mod created_worktrees;
 pub mod file_diff_view;
 pub mod notifications;

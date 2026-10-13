@@ -720,8 +720,10 @@ async fn merge_into_current_reports_merged_and_refreshes(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-async fn conflicting_merge_reports_conflicts(cx: &mut TestAppContext) {
+async fn conflicting_merge_opens_the_conflicts_dialog(cx: &mut TestAppContext) {
     init_test(cx);
+    // With the conflict watcher: a Brewery merge gets the dialog, not also the watcher's toast.
+    cx.update(conflicts_dialog::init);
     let repo = TestRepo::new();
     repo.commit("a.txt", "base\n", "base");
     repo.commit("c.txt", "base\n", "base c");
@@ -745,18 +747,41 @@ async fn conflicting_merge_reports_conflicts(cx: &mut TestAppContext) {
         "feature",
         &mut opened.cx,
     );
-    wait_until(&mut opened.cx, "merge toast", |_| {
-        !shown_toasts().is_empty()
+    // The Conflicts dialog replaces the popup and lists the files; no toast.
+    let workspace = opened.workspace.clone();
+    wait_until(&mut opened.cx, "the conflicts dialog", |cx| {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_modal::<ConflictsDialog>(cx)
+                .is_some_and(|dialog| dialog.read(cx).is_loaded())
+        })
     });
-    assert_eq!(
-        shown_toasts(),
-        vec![OutcomeToast {
-            kind: ToastKind::Conflicts,
-            message: "Merge has conflicts: 2 files".into()
-        }]
-    );
-    assert!(has_notification(&mut opened, ToastKind::Conflicts));
-    // The popup closed when the merge started.
+    let dialog = opened.workspace.read_with(&opened.cx, |workspace, cx| {
+        workspace
+            .active_modal::<ConflictsDialog>(cx)
+            .expect("dialog")
+    });
+    dialog.read_with(&opened.cx, |dialog, _| {
+        assert_eq!(
+            dialog.paths(),
+            &[
+                RepoPath::new("a.txt").expect("path"),
+                RepoPath::new("c.txt").expect("path")
+            ]
+        );
+        assert_eq!(dialog.header().as_ref(), "Merging feature into main");
+    });
+    let repository = opened.repository.clone();
+    wait_until(&mut opened.cx, "the rescan", |cx| {
+        repository.read_with(cx, |repository, _| {
+            repository
+                .cached_status()
+                .any(|entry| entry.status.is_conflicted())
+        })
+    });
+    opened.cx.run_until_parked();
+    assert!(shown_toasts().is_empty(), "{:?}", shown_toasts());
+    assert!(!has_notification(&mut opened, ToastKind::Conflicts));
     opened.workspace.read_with(&opened.cx, |workspace, cx| {
         assert!(workspace.active_modal::<BranchesPopup>(cx).is_none())
     });

@@ -876,3 +876,57 @@ async fn run_through_repository_job_queue(cx: &mut TestAppContext) {
             .is_err()
     );
 }
+
+#[test]
+fn unmerged_paths_list_the_conflicted_files() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    let runner = repo.runner();
+    assert_eq!(
+        block(runner.unmerged_paths()).expect("unmerged"),
+        Vec::new()
+    );
+    block(runner.merge("feature")).expect("merge");
+    assert_eq!(
+        block(runner.unmerged_paths()).expect("unmerged"),
+        paths(&["a.txt", "c.txt"])
+    );
+    block(runner.mark_resolved(paths(&["a.txt"]))).expect("add");
+    assert_eq!(
+        block(runner.unmerged_paths()).expect("unmerged"),
+        paths(&["c.txt"])
+    );
+}
+
+#[test]
+fn cherry_pick_abort_and_continue() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    let head = repo.head();
+    let runner = repo.runner();
+    assert_ne!(
+        block(runner.run(&["cherry-pick", "feature"]))
+            .expect("run")
+            .status,
+        0
+    );
+    block(runner.abort_cherry_pick()).expect("abort");
+    assert_eq!(repo.head(), head);
+    assert_eq!(block(runner.in_progress()).expect("in progress"), None);
+
+    block(runner.run(&["cherry-pick", "feature"])).expect("run");
+    let unresolved = block(runner.continue_cherry_pick()).expect("continue");
+    assert!(
+        matches!(unresolved, MergeOutcome::Conflicts(_)),
+        "{unresolved:?}"
+    );
+    repo.write("a.txt", "picked\n");
+    repo.write("c.txt", "picked\n");
+    repo.git(&["add", "a.txt", "c.txt"]);
+    assert_eq!(
+        block(runner.continue_cherry_pick()).expect("continue"),
+        MergeOutcome::Merged
+    );
+    assert_eq!(block(runner.in_progress()).expect("in progress"), None);
+    assert_ne!(repo.head(), head);
+}

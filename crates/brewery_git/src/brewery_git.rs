@@ -6,6 +6,7 @@
 pub mod branches_popup;
 pub mod cli;
 pub mod compare;
+pub mod conflicts_dialog;
 pub mod file_history;
 pub mod log_filter;
 pub mod log_filter_bar;
@@ -19,6 +20,7 @@ pub use cli::{
     ConflictSides, ConflictStages, GitCli, GitOutput, MergeOutcome, Operation, Side, StageBlob,
 };
 pub use compare::{CompareTarget, CompareWithRevision};
+pub use conflicts_dialog::{ConflictsDialog, ResolveConflicts};
 pub use file_history::{FileHistoryView, ShowFileHistory};
 pub use log_filter::LogFilter;
 pub use log_filter_bar::LogFilterBar;
@@ -29,10 +31,11 @@ pub use revision_diff_view::{NewSide, OldSide, ResolvedSide, RevisionDiffView};
 use gpui::App;
 
 /// Must run after `git_ui::init`: it replaces the branch picker builder and the file history
-/// opener that `git_ui` installs.
+/// opener that `git_ui` installs, and installs the git panel's conflict opener.
 pub fn init(cx: &mut App) {
     branches_popup::init(cx);
     log_panel::init(cx);
     file_history::init(cx);
     compare::init(cx);
+    conflicts_dialog::init(cx);
 }
