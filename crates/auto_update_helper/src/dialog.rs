@@ -27,7 +27,7 @@ use windows::{
 };
 
 use crate::{
-    brewery,
+    brewery, // brewery: Brewery strings
     updater::JOBS,
     windows_impl::{WM_JOB_UPDATED, WM_TERMINATE, show_error},
 };

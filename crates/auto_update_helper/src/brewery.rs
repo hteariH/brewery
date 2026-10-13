@@ -102,6 +102,17 @@ pub(crate) fn jobs() -> Vec<Job> {
     ]
 }
 
+/// After a rolled-back update, drops the installer's "ready" flag so the app does not run the
+/// helper again on every quit; the next update check downloads a fresh installer.
+pub(crate) fn forget_failed_update(app_dir: &Path) {
+    let flag = app_dir.join("updates").join("versions.txt");
+    if let Err(error) = std::fs::remove_file(&flag)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("Failed to remove {}: {error}", flag.display());
+    }
+}
+
 /// Removes `name` if present; nothing to undo, since it only held a previous version.
 fn remove_stale_dir(name: &'static Path) -> Job {
     Job {
@@ -126,29 +137,47 @@ pub(crate) enum ProcessKind {
     Bundled,
 }
 
+/// Brewery's own executables (lowercase, relative to the install dir, optionally under `old\`
+/// or `install\`): waited for, never killed.
+const APP_FILES: [&str; 5] = [
+    "brewery.exe",
+    r"bin\brewery.exe",
+    r"x64\openconsole.exe",
+    r"arm64\openconsole.exe",
+    r"tools\auto_update_helper.exe",
+];
+
 fn normalize(path: &Path) -> String {
     let path = path.to_string_lossy().replace('/', "\\");
-    let path = path.strip_prefix(r"\\?\").unwrap_or(&path);
+    let path = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(&path).to_string()
+    };
     path.trim_end_matches('\\').to_lowercase()
 }
 
 /// Whether a process with this image path belongs to the installation in `app_dir`, and how
-/// the helper treats it. Anything outside `app_dir` (the user's own JDKs, another channel's
-/// install) is `None` and never touched.
+/// the helper treats it. Only Brewery's own top-level entries count, because the install dir
+/// may be shared (a drive root, `C:\Apps`): `Bundled` needs a bundled dir as the first
+/// component (or right after `old\` / `install\`), `App` is one of `APP_FILES`.
+/// Everything else, including the user's own JDKs, is `None` and never touched.
 pub(crate) fn classify(image: &Path, app_dir: &Path) -> Option<ProcessKind> {
     let image = normalize(image);
     let app_dir = normalize(app_dir);
     let relative = image.strip_prefix(&app_dir)?.strip_prefix('\\')?;
-    let mut components: Vec<&str> = relative.split('\\').filter(|c| !c.is_empty()).collect();
-    components.pop()?;
-    let bundled = components
+    let relative = ["old\\", "install\\"]
         .iter()
-        .any(|component| BUNDLED_DIRS.contains(component));
-    Some(if bundled {
-        ProcessKind::Bundled
+        .find_map(|prefix| relative.strip_prefix(prefix))
+        .unwrap_or(relative);
+    let (first, rest) = relative.split_once('\\').unwrap_or(("", relative));
+    if BUNDLED_DIRS.contains(&first) && !rest.is_empty() {
+        Some(ProcessKind::Bundled)
+    } else if APP_FILES.contains(&relative) {
+        Some(ProcessKind::App)
     } else {
-        ProcessKind::App
-    })
+        None
+    }
 }
 
 struct OwnedHandle(HANDLE);
@@ -228,6 +257,17 @@ fn app_processes(app_dir: &Path) -> Vec<AppProcess> {
 /// which outlives the app by design) is terminated, since it locks `jre\` and the jars. The app
 /// itself and its CLI are never killed; the job retries and the rollback deal with them.
 pub(crate) fn stop_bundled_processes(app_dir: &Path, grace: Duration, kill_wait: Duration) {
+    // Not a Brewery install (or the helper was started from somewhere odd): kill nothing.
+    if !app_dir.join(APP_EXE).is_file() {
+        log::warn!(
+            "{} has no {APP_EXE}, not stopping any processes",
+            app_dir.display()
+        );
+        return;
+    }
+    // Resolve junctions and short names once, so the image paths (always long) match.
+    let canonical = std::fs::canonicalize(app_dir).ok();
+    let app_dir = canonical.as_deref().unwrap_or(app_dir);
     let deadline = Instant::now() + grace;
     let remaining = loop {
         let processes = app_processes(app_dir);
@@ -374,8 +414,11 @@ mod tests {
             .filter(|file| !file.starts_with("install\\extensions"))
             .collect();
         write(app_dir, &partial, "new");
+        write(app_dir, &["updates\\versions.txt"], "0.1.1");
 
         let error = perform_update_with(&jobs(), app_dir, None, false, &[]).unwrap_err();
+        // The flag is gone, so the next quit does not retry (and fail) the same update.
+        assert!(!app_dir.join("updates\\versions.txt").exists());
         assert_eq!(error.to_string(), "Autoupdate failed, rollback successful");
 
         for file in OLD_FILES {
@@ -425,7 +468,7 @@ mod tests {
     #[test]
     fn test_classify_processes() {
         let app = Path::new(r"C:\Users\me\AppData\Local\Programs\Brewery");
-        let cases: [(&str, Option<ProcessKind>); 11] = [
+        let cases: [(&str, Option<ProcessKind>); 17] = [
             (
                 r"C:\Users\me\AppData\Local\Programs\Brewery\jre\bin\java.exe",
                 Some(ProcessKind::Bundled),
@@ -458,10 +501,33 @@ mod tests {
                 r"C:\Users\me\AppData\Local\Programs\Brewery\bin\brewery.exe",
                 Some(ProcessKind::App),
             ),
-            // A file named like a bundled dir is not inside it.
             (
-                r"C:\Users\me\AppData\Local\Programs\Brewery\jre",
+                r"C:\Users\me\AppData\Local\Programs\Brewery\install\jdtls\bin\proxy.exe",
+                Some(ProcessKind::Bundled),
+            ),
+            (
+                r"C:\Users\me\AppData\Local\Programs\Brewery\tools\auto_update_helper.exe",
                 Some(ProcessKind::App),
+            ),
+            (
+                r"C:\Users\me\AppData\Local\Programs\Brewery\x64\OpenConsole.exe",
+                Some(ProcessKind::App),
+            ),
+            // A file named like a bundled dir is not inside it.
+            (r"C:\Users\me\AppData\Local\Programs\Brewery\jre", None),
+            // A bundled dir name deeper down is somebody else's (the install dir may be shared).
+            (
+                r"C:\Users\me\AppData\Local\Programs\Brewery\something\jre\bin\java.exe",
+                None,
+            ),
+            (
+                r"C:\Users\me\AppData\Local\Programs\Brewery\old\x\jre\bin\java.exe",
+                None,
+            ),
+            // Unknown files under the install dir are not waited for either.
+            (
+                r"C:\Users\me\AppData\Local\Programs\Brewery\other.exe",
+                None,
             ),
             // The user's own JDK, and a sibling directory sharing the prefix.
             (r"C:\Users\me\.jdks\temurin-21\bin\java.exe", None),
@@ -478,6 +544,39 @@ mod tests {
             classify(
                 Path::new(r"C:\Brewery\jre\bin\java.exe"),
                 Path::new(r"C:\Brewery\")
+            ),
+            Some(ProcessKind::Bundled)
+        );
+    }
+
+    #[test]
+    fn test_classify_shared_install_dirs() {
+        // Inno lets the user pick a drive root or a shared folder as the install dir.
+        let root = Path::new(r"D:\");
+        let cases: [(&str, Option<ProcessKind>); 5] = [
+            (r"D:\jre\bin\java.exe", Some(ProcessKind::Bundled)),
+            (r"D:\Brewery.exe", Some(ProcessKind::App)),
+            (r"D:\jdk1.8.0\jre\bin\java.exe", None),
+            (r"D:\Tools\something\jdtls\java.exe", None),
+            (r"D:\other.exe", None),
+        ];
+        for (image, expected) in cases {
+            assert_eq!(classify(Path::new(image), root), expected, "{image}");
+        }
+        let apps = Path::new(r"C:\Apps");
+        assert_eq!(
+            classify(Path::new(r"C:\Apps\jdk8\jre\bin\java.exe"), apps),
+            None
+        );
+        assert_eq!(
+            classify(Path::new(r"C:\Apps\jre\bin\java.exe"), apps),
+            Some(ProcessKind::Bundled)
+        );
+        // Long-path and UNC forms match their plain spelling.
+        assert_eq!(
+            classify(
+                Path::new(r"\\?\UNC\server\share\Brewery\jre\bin\java.exe"),
+                Path::new(r"\\server\share\Brewery")
             ),
             Some(ProcessKind::Bundled)
         );
@@ -533,6 +632,18 @@ mod tests {
             unrelated.0.try_wait().unwrap().is_none(),
             "java outside the app dir is never killed"
         );
+    }
+
+    #[test]
+    fn test_stop_bundled_processes_kills_nothing_without_brewery_exe() {
+        // A directory that is not a Brewery install (no Brewery.exe): nothing is killed.
+        let root = tempfile::tempdir().unwrap();
+        let app_dir = root.path().join("NotBrewery");
+        let mut java = spawn_copy_at(app_dir.join(r"jre\bin\java.exe"));
+
+        stop_bundled_processes(&app_dir, Duration::from_millis(300), Duration::from_secs(5));
+
+        assert!(java.0.try_wait().unwrap().is_none());
     }
 
     #[test]

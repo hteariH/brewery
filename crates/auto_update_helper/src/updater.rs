@@ -403,6 +403,7 @@ pub(crate) fn perform_update_with(
             }
         }
 
+        crate::brewery::forget_failed_update(app_dir); // brewery: no retry loop on every quit
         anyhow::bail!("Autoupdate failed, rollback successful");
     }
 
