@@ -1,0 +1,147 @@
+# Pinned dependencies of Brewery's offline bundle (M6c).
+#
+# Read by script/brewery/fetch_bundle_deps.py, which downloads each artifact,
+# refuses any SHA-256 mismatch and lays out target/bundle/<os>-<arch>/.
+#
+# Per artifact:
+#   version, license, source   what it is, its licence, where the pin came from
+#   into    "bundle" (default): placed in the bundle at `dest`
+#           "work": unpacked for build steps only (the JDK is jlinked into jre/)
+#   dest    path inside the bundle; "{exe}" becomes ".exe" on Windows
+#   format  "file" | "zip" | "tar.gz" (inferred from the URL when it ends in one)
+#   root    directory inside the archive that becomes `dest`
+#   member  single file inside the archive that becomes `dest`
+#   [artifacts.<name>.<os>-<arch>] or [artifacts.<name>.any]: url + sha256
+#
+# Every SHA-256 below was computed from a download on 2026-10-14 and matches
+# the checksum the publisher lists (Adoptium API, Eclipse .sha256 file, GitHub
+# release asset digest). Bumping a pin: change version/url, download the file,
+# `sha256sum` it, compare with the publisher's checksum, update sha256.
+#
+# The versions follow what the Java extension 6.8.28 (the version Brewery
+# auto-installs from the Zed gallery) downloads at runtime; see its src/
+# debugger.rs, jdtls.rs and proxy.rs at tag v6.8.28.
+
+schema = 1
+targets = ["windows-x64", "linux-x64", "linux-aarch64", "macos-aarch64", "macos-x64"]
+
+# Eclipse Temurin JDK 21, latest GA. Build input only: jlink (Task 2) turns it
+# into the bundle's jre/ on the target OS.
+# Pins from https://api.adoptium.net/v3/assets/latest/21/hotspot?image_type=jdk&vendor=eclipse&os=<os>&architecture=<arch>
+[artifacts.jdk]
+version = "21.0.12.1+1"
+license = "GPL-2.0-only WITH Classpath-exception-2.0"
+source = "https://github.com/adoptium/temurin21-binaries/releases/tag/jdk-21.0.12.1%2B1"
+# GPLv2 section 3: corresponding source for the redistributed binaries.
+source_code = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk-sources_21.0.12.1_1.tar.gz"
+source_tag = "https://github.com/adoptium/jdk21u/tree/jdk-21.0.12.1+1"
+into = "work"
+
+[artifacts.jdk.windows-x64]
+url = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_windows_hotspot_21.0.12.1_1.zip"
+sha256 = "f9d6e191ab098c0d416e7d588a24420a8621cd2f4720dab2459b8b7b2d2d8b4e"
+root = "jdk-21.0.12.1+1"
+
+[artifacts.jdk.linux-x64]
+url = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz"
+sha256 = "ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94"
+root = "jdk-21.0.12.1+1"
+
+[artifacts.jdk.linux-aarch64]
+url = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.12.1_1.tar.gz"
+sha256 = "23e37e026f12f3e706f18938ff611db3032d075b09d0879a25d06718c773e223"
+root = "jdk-21.0.12.1+1"
+
+[artifacts.jdk.macos-aarch64]
+url = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.12.1_1.tar.gz"
+sha256 = "3623232f33a9c3baadf304480b2535f9a3cba8a58d42ecbb438ba267315d9998"
+root = "jdk-21.0.12.1+1/Contents/Home"
+
+[artifacts.jdk.macos-x64]
+url = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_mac_hotspot_21.0.12.1_1.tar.gz"
+sha256 = "44db0f08196daf19a47f90d13388b0c943b67663cb537f998fe29e836fa842ce"
+root = "jdk-21.0.12.1+1/Contents/Home"
+
+# Eclipse JDT Language Server milestone (the build named in
+# https://download.eclipse.org/jdtls/milestones/1.61.0/latest.txt; checksum in
+# the matching .sha256 file). The tarball has no top-level directory.
+[artifacts.jdtls]
+version = "1.61.0-202609031315"
+license = "EPL-2.0"
+source = "https://download.eclipse.org/jdtls/milestones/1.61.0/"
+dest = "jdtls"
+
+[artifacts.jdtls.any]
+url = "https://download.eclipse.org/jdtls/milestones/1.61.0/jdt-language-server-1.61.0-202609031315.tar.gz"
+sha256 = "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64"
+
+# Project Lombok (the extension downloads https://projectlombok.org/downloads/lombok-<latest tag>.jar).
+[artifacts.lombok]
+version = "1.18.48"
+license = "MIT"
+source = "https://projectlombok.org/downloads/"
+dest = "lombok.jar"
+
+[artifacts.lombok.any]
+url = "https://projectlombok.org/downloads/lombok-1.18.48.jar"
+sha256 = "85477a4655ebb2c074a9099cfb749be454449fee564d4282610df1b85f7c508b"
+
+# java-debug jdtls plugin, Zed's fork, the exact URL hard-coded in the
+# extension's src/debugger.rs (JAVA_DEBUG_PLUGIN_FORK_URL).
+[artifacts.java-debug]
+version = "0.53.2"
+license = "EPL-1.0"
+source = "https://github.com/zed-industries/java-debug/releases/tag/0.53.2"
+dest = "java-debug.jar"
+
+[artifacts.java-debug.any]
+url = "https://github.com/zed-industries/java-debug/releases/download/0.53.2/com.microsoft.java.debug.plugin-0.53.2.jar"
+sha256 = "5275195905015ce786fc6318c8d039fef43a1fada1d03acdec24c69a3b9ba83c"
+
+# java-lsp-proxy from the zed-extensions/java release matching the extension
+# (src/proxy.rs downloads releases/download/<extension tag>/<platform asset>).
+# Each archive holds the single binary at its root.
+[artifacts.java-lsp-proxy]
+version = "v6.8.28"
+license = "Apache-2.0"
+source = "https://github.com/zed-extensions/java/releases/tag/v6.8.28"
+dest = "java-lsp-proxy{exe}"
+member = "java-lsp-proxy{exe}"
+executable = true
+
+[artifacts.java-lsp-proxy.windows-x64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/java-lsp-proxy-windows-x86_64.zip"
+sha256 = "7a415568131111e65b39f9d12f3df91aefbb2c3009385aefb9a6c007c745b350"
+
+[artifacts.java-lsp-proxy.linux-x64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/java-lsp-proxy-linux-x86_64.tar.gz"
+sha256 = "5946f7ee67523e35943263ee0ecae0d67589eeee00ab7da3b71515dd0ff974a8"
+
+[artifacts.java-lsp-proxy.linux-aarch64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/java-lsp-proxy-linux-aarch64.tar.gz"
+sha256 = "9999fe40f87930fca784a623fa1a3de3e43e98ee6b5b83ac384bf552ba6fafcd"
+
+[artifacts.java-lsp-proxy.macos-aarch64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/java-lsp-proxy-darwin-aarch64.tar.gz"
+sha256 = "5326d5e594cf1f9d3794506e9e5c24e5b72c6f2e62e67952feb8226f6534319e"
+
+[artifacts.java-lsp-proxy.macos-x64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/java-lsp-proxy-darwin-x86_64.tar.gz"
+sha256 = "0484e94fbfb15b669bae4967c9ee9b7fdcc24c3b3de6cabcd4d1200036db1884"
+
+# The Java extension itself, exactly the archive Zed installs: the gallery
+# endpoint extension_host uses for a pinned version
+# (GET /extensions/<id>/<version>/download, a 307 to a signed object URL).
+# The tar.gz unpacks to the installed directory (extension.toml,
+# extension.wasm, grammars/, languages/, debug_adapter_schemas/). The GitHub
+# release publishes no packaged extension, only the proxy and gradle bridge.
+[artifacts.java-extension]
+version = "6.8.28"
+license = "Apache-2.0"
+source = "https://github.com/zed-extensions/java/tree/v6.8.28"
+dest = "extensions/java"
+format = "tar.gz"
+
+[artifacts.java-extension.any]
+url = "https://api.zed.dev/extensions/java/6.8.28/download"
+sha256 = "9a9862c3e6a54105f1ebdf43e4479fd2999e85b444fc4295efe340835b4f30a9"
