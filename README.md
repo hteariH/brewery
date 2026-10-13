@@ -113,13 +113,15 @@ Limits in this version:
 ## Git
 
 The Commit tool window (left stripe, Alt+0) lists changed files with file and hunk
-staging, the commit message (Ctrl+K jumps to it), amend, push, pull and stash.
+staging, the commit message, amend, push, pull and stash. Ctrl+K (Cmd+K on macOS)
+opens it; pressed again inside the tool window, it moves to the commit message.
 
-The branch button in the title bar (or Ctrl+~) opens the Branches popup: recent,
+The branch button in the title bar (or Ctrl+~, Cmd+~ on macOS) opens the Branches popup: recent,
 local and remote branches, plus New Branch, Checkout Tag or Revision, Update Project
 and Push. Press the right arrow on a branch for checkout, new branch from it, rebase,
 merge into the current branch, rename and delete. When a merge or rebase stops on
-conflicts, Brewery says how many files conflict and opens the Commit tool window.
+conflicts, a notification says how many files conflict; its Show Conflicts button
+opens the Commit tool window.
 
 The Log tool window, file history, compare with branch or revision, and a 3-way
 merge editor come in the next updates.
