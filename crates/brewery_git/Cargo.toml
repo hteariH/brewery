@@ -23,6 +23,7 @@ git.workspace = true
 git_ui.workspace = true
 git_ui_core.workspace = true
 gpui.workspace = true
+imara-diff.workspace = true
 language.workspace = true
 log.workspace = true
 menu.workspace = true

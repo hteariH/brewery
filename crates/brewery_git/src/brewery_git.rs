@@ -10,6 +10,7 @@ pub mod file_history;
 pub mod log_filter;
 pub mod log_filter_bar;
 pub mod log_panel;
+pub mod merge3;
 pub mod revision_diff_view;
 
 pub use branches_popup::BranchesPopup;
