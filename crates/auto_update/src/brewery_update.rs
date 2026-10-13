@@ -25,6 +25,10 @@ pub const DEFAULT_MANIFEST_URL: &str =
 /// Overrides [`DEFAULT_MANIFEST_URL`] for testing updates (read once).
 pub const MANIFEST_URL_ENV: &str = "BREWERY_UPDATE_MANIFEST_URL";
 
+/// The Windows installer is saved under `updates\` with this name, then run with
+/// `/verysilent /update=true`.
+pub const WINDOWS_INSTALLER_FILE_NAME: &str = "Brewery-setup.exe";
+
 static MANIFEST_URL: LazyLock<String> =
     LazyLock::new(|| manifest_url_from(std::env::var(MANIFEST_URL_ENV).ok()));
 
@@ -371,6 +375,12 @@ mod tests {
         assert_eq!(update_action_for_os("linux"), UpdateAction::Notify);
         assert_eq!(update_action_for_os("macos"), UpdateAction::Notify);
         assert_eq!(update_action_for_os("freebsd"), UpdateAction::Notify);
+    }
+
+    #[test]
+    fn test_windows_installer_file_name() {
+        // The Windows install step saves the downloaded setup under this name.
+        assert_eq!(WINDOWS_INSTALLER_FILE_NAME, "Brewery-setup.exe");
     }
 
     #[test]

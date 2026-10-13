@@ -1021,7 +1021,7 @@ impl AutoUpdater {
         let filename = match OS {
             "macos" => anyhow::Ok("Zed.dmg"),
             "linux" => Ok("zed.tar.gz"),
-            "windows" => Ok("Zed.exe"),
+            "windows" => Ok(brewery_update::WINDOWS_INSTALLER_FILE_NAME), // brewery: setup name
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }?;
 
@@ -1609,10 +1609,16 @@ mod tests {
         dmg_tx.send("<fake-zed-update>".to_owned()).unwrap();
 
         let tmp_dir = Arc::new(tempdir().unwrap());
+        // brewery: the downloaded installer's name on Windows
+        let downloaded_name = Rc::new(std::cell::RefCell::new(None::<String>));
 
         cx.update(|cx| {
             let tmp_dir = tmp_dir.clone();
+            let downloaded_name = downloaded_name.clone();
             cx.set_global(InstallOverride(Rc::new(move |target_path, _cx| {
+                *downloaded_name.borrow_mut() = target_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
                 let tmp_dir = tmp_dir.clone();
                 let dest_path = tmp_dir.path().join("zed");
                 std::fs::copy(&target_path, &dest_path)?;
@@ -1642,6 +1648,12 @@ mod tests {
         let path = path.unwrap();
         assert_eq!(path, tmp_dir.path().join("zed"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                downloaded_name.borrow().as_deref(),
+                Some(brewery_update::WINDOWS_INSTALLER_FILE_NAME)
+            );
+        }
     }
 
     #[gpui::test]

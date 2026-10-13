@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// brewery: Brewery layout, strings and bundled-process shutdown
+#[cfg(target_os = "windows")]
+mod brewery;
 #[cfg(target_os = "windows")]
 mod dialog;
 #[cfg(target_os = "windows")]
@@ -8,7 +11,7 @@ mod updater;
 #[cfg(target_os = "windows")]
 fn main() {
     if let Err(e) = windows_impl::run() {
-        log::error!("Error: Zed update failed, {:?}", e);
+        log::error!("Error: Brewery update failed, {:?}", e); // brewery: name
         windows_impl::show_error(format!("Error: {:?}", e));
     }
 }
@@ -57,7 +60,7 @@ mod windows_impl {
             .context("No parent directory")?
             .to_path_buf();
 
-        log::info!("======= Starting Zed update =======");
+        log::info!("======= Starting Brewery update ======="); // brewery: name
         let (tx, rx) = std::sync::mpsc::channel();
         let hwnd = create_dialog_window(rx)?.0 as isize;
         let args = parse_args(std::env::args_os().skip(1));
@@ -123,7 +126,7 @@ mod windows_impl {
             MessageBoxW(
                 None,
                 &HSTRING::from(content),
-                windows::core::w!("Error: Zed update failed."),
+                &HSTRING::from(super::brewery::ERROR_TITLE), // brewery: name
                 MB_ICONERROR | MB_SYSTEMMODAL,
             )
         };
