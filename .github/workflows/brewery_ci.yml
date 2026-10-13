@@ -131,7 +131,7 @@ jobs:
       # extension_store_test::test_extension_store_with_test_extension builds a WASM test
       # extension and downloads toolchains; it times out on hosted runners. Run it locally.
       - name: Test Brewery hook-ins
-        run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension
+        run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension
       - name: Test workspace hook-ins
         run: cargo test --locked -p workspace --lib
       - name: Build the daemon jar
