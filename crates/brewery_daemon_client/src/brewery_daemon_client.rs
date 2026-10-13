@@ -23,11 +23,11 @@ pub use project_daemon::{
 pub use protocol::{
     AddDriverParams, BuildModule, BuildTask, BuildTool, CancelParams, CloseParams, ColumnInfo,
     ConnectionInfo, DB_AUTH_FAILED, DB_CONNECTION_FAILED, DB_FETCH_LIMIT_MAX, DB_INVALID_PARAMS,
-    DB_NOT_FOUND, DB_QUERY_FAILED, DbNode, DbNodeKind, DeleteConnectionParams, DriverInfo,
-    ExecuteParams, ExecuteResult, FetchParams, FetchResult, HttpMethod, IntrospectParams,
-    PROTOCOL_VERSION, ProjectModel, RunConfiguration, RunConfigurationKind, SaveConnectionParams,
-    SpringApp, SpringBean, SpringBeanKind, SpringEndpoint, SpringModel, TestConnectionParams,
-    TestConnectionResult,
+    DB_NOT_FOUND, DB_QUERY_FAILED, DbNode, DbNodeKind, DbSchema, DeleteConnectionParams,
+    DriverInfo, ExecuteParams, ExecuteResult, FetchParams, FetchResult, HttpMethod,
+    IntrospectParams, PROTOCOL_VERSION, ProjectModel, RunConfiguration, RunConfigurationKind,
+    SaveConnectionParams, SchemaInfo, SchemaParams, SpringApp, SpringBean, SpringBeanKind,
+    SpringEndpoint, SpringModel, TableInfo, TableKind, TestConnectionParams, TestConnectionResult,
 };
 
 use anyhow::{Context as _, Error, Result, bail};
@@ -35,10 +35,10 @@ use gpui::{AppContext as _, AsyncApp, BackgroundExecutor, Task};
 use parking_lot::Mutex;
 use protocol::{
     ConnectionsListParams, DbAddDriver, DbCancel, DbClose, DbConnections, DbDeleteConnection,
-    DbDrivers, DbExecute, DbFetch, DbIntrospect, DbSaveConnection, DbTestConnection, DriversParams,
-    GetProjectModel, GetRunConfigurations, GetSpringModel, Initialize, InitializeParams,
-    OpenProject, OpenProjectParams, ProjectChanged, ProjectModelParams, RunConfigurationsParams,
-    SpringChanged, SpringModelParams,
+    DbDrivers, DbExecute, DbFetch, DbGetSchema, DbIntrospect, DbSaveConnection, DbTestConnection,
+    DriversParams, GetProjectModel, GetRunConfigurations, GetSpringModel, Initialize,
+    InitializeParams, OpenProject, OpenProjectParams, ProjectChanged, ProjectModelParams,
+    RunConfigurationsParams, SpringChanged, SpringModelParams,
 };
 use std::ffi::OsString;
 use std::path::Path;
@@ -227,6 +227,7 @@ impl DaemonClient {
                 result_of(self.db_test_connection(params_of(params)?).await?)
             }
             DbIntrospect::METHOD => result_of(self.db_introspect(params_of(params)?).await?),
+            DbGetSchema::METHOD => result_of(self.db_schema(params_of(params)?).await?),
             DbExecute::METHOD => result_of(self.db_execute(params_of(params)?).await?),
             DbFetch::METHOD => result_of(self.db_fetch(params_of(params)?).await?),
             DbCancel::METHOD => result_of(self.db_cancel(params_of(params)?).await?),
@@ -266,6 +267,12 @@ impl DaemonClient {
 
     pub async fn db_introspect(&self, params: IntrospectParams) -> Result<Vec<DbNode>> {
         self.db_call::<DbIntrospect>(params, DB_TIMEOUT).await
+    }
+
+    /// Building a snapshot reads the metadata of every table, which can take a while on a big
+    /// database; the daemon answers from its cache afterwards.
+    pub async fn db_schema(&self, params: SchemaParams) -> Result<DbSchema> {
+        self.db_call::<DbGetSchema>(params, DB_TIMEOUT).await
     }
 
     /// A statement may run for as long as the user lets it; `db_cancel` is the way out.

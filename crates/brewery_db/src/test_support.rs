@@ -35,6 +35,59 @@ pub struct FakeState {
     /// Methods whose replies wait until the test releases them, oldest first.
     pub held_methods: RefCell<HashSet<String>>,
     pub held: RefCell<Vec<(String, oneshot::Sender<()>)>>,
+    /// Replaces the `db/schema` answer of `schema()`.
+    pub schema_reply: RefCell<Option<Value>>,
+}
+
+/// The `db/schema` snapshot of the fake: `public` with two tables and a view, `billing` with one
+/// table.
+pub fn schema() -> Value {
+    json!({
+        "schemas": [
+            {
+                "name": "public",
+                "tables": [
+                    {
+                        "name": "owners",
+                        "kind": "table",
+                        "columns": [
+                            { "name": "id", "type": "serial" },
+                            { "name": "email", "type": "varchar(50)" },
+                            { "name": "First Name", "type": "text" }
+                        ]
+                    },
+                    {
+                        "name": "owner_names",
+                        "kind": "view",
+                        "columns": [{ "name": "name", "type": "text" }]
+                    },
+                    {
+                        "name": "pets",
+                        "kind": "table",
+                        "columns": [
+                            { "name": "id", "type": "int4" },
+                            { "name": "owner_id", "type": "int4" },
+                            { "name": "name", "type": "text" }
+                        ]
+                    }
+                ]
+            },
+            {
+                "name": "billing",
+                "tables": [
+                    {
+                        "name": "invoices",
+                        "kind": "table",
+                        "columns": [
+                            { "name": "id", "type": "int8" },
+                            { "name": "total", "type": "numeric(10,2)" }
+                        ]
+                    }
+                ]
+            }
+        ],
+        "truncated": false
+    })
 }
 
 impl FakeState {
@@ -182,6 +235,7 @@ impl FakeState {
                     .collect();
                 Ok(json!({ "rows": rows, "done": end >= total }))
             }
+            "db/schema" => Ok(self.schema_reply.borrow().clone().unwrap_or_else(schema)),
             "db/cancel" | "db/close" => Ok(Value::Null),
             other => anyhow::bail!("unexpected {other}"),
         }

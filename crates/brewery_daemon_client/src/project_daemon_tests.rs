@@ -528,6 +528,42 @@ async fn database_calls_reach_the_daemon_as_json(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn the_schema_snapshot_reaches_the_daemon_as_json(cx: &mut TestAppContext) {
+    use crate::protocol::*;
+    let fake = Fake::default();
+    fake.db_replies.borrow_mut().insert(
+        DbGetSchema::METHOD,
+        Ok(fixture(include_str!(
+            "../../../brewery-daemon/protocol/fixtures/db-schema.result.json"
+        ))),
+    );
+    let project = project(cx, &fake).await;
+    let daemon = cx.update(|cx| ProjectDaemon::for_project(&project, cx));
+    cx.run_until_parked();
+
+    let schema = daemon
+        .read_with(cx, |d, cx| {
+            d.db_schema(
+                SchemaParams {
+                    connection_id: "c1".into(),
+                    refresh: Some(true),
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(schema.schemas[0].tables.len(), 2);
+    let calls = fake.db_calls.borrow();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "db/schema");
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({"connectionId": "c1", "refresh": true})
+    );
+}
+
+#[gpui::test]
 async fn a_database_error_keeps_the_daemon_code_and_message(cx: &mut TestAppContext) {
     use crate::protocol::*;
     let fake = Fake::default();

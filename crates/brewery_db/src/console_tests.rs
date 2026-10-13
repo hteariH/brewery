@@ -610,3 +610,131 @@ async fn renaming_the_data_source_renames_its_consoles(cx: &mut TestAppContext) 
         assert_eq!(console.tab_content_text(0, cx), "Main Postgres console");
     });
 }
+
+impl Console {
+    fn editor(&self, cx: &mut VisualTestContext) -> Entity<Editor> {
+        self.console
+            .read_with(cx, |console, _| console.editor().clone())
+    }
+
+    /// Puts the cursor at the `|` of `marked`, focuses the editor and types `typed` there.
+    fn type_at(&self, marked: &str, typed: &str, cx: &mut VisualTestContext) {
+        self.type_sql(marked, cx);
+        let editor = self.editor(cx);
+        editor.update_in(cx, |editor, window, cx| {
+            window.focus(&editor.focus_handle(cx), cx)
+        });
+        cx.simulate_input(typed);
+        cx.run_until_parked();
+    }
+
+    /// The items of the open completion menu, as `label detail`.
+    fn menu(&self, cx: &mut VisualTestContext) -> Vec<String> {
+        self.editor(cx).read_with(cx, |editor, _| {
+            editor
+                .current_completions()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|completion| {
+                    let detail = match completion.documentation {
+                        Some(project::lsp_store::CompletionDocumentation::SingleLine(detail)) => {
+                            detail.to_string()
+                        }
+                        _ => String::new(),
+                    };
+                    format!("{} {detail}", completion.label.text)
+                })
+                .collect()
+        })
+    }
+
+    fn accept(&self, cx: &mut VisualTestContext) {
+        let editor = self.editor(cx);
+        editor.update_in(cx, |editor, window, cx| {
+            editor
+                .confirm_completion(&editor::actions::ConfirmCompletion::default(), window, cx)
+                .expect("a completion to accept")
+                .detach();
+        });
+        cx.run_until_parked();
+    }
+
+    fn text(&self, cx: &mut VisualTestContext) -> String {
+        self.editor(cx).read_with(cx, |editor, cx| editor.text(cx))
+    }
+}
+
+#[gpui::test]
+async fn typing_a_table_name_offers_the_tables(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    // The schema is fetched on the first request; the menu shows once it arrives.
+    console.type_at("SELECT * FROM |", "ow", cx);
+    assert_eq!(
+        console.fixture.calls_of("db/schema"),
+        vec![json!({"connectionId": "c1"})]
+    );
+    assert_eq!(
+        console.menu(cx),
+        vec!["owners table · public", "owner_names view · public"]
+    );
+
+    console.accept(cx);
+    assert_eq!(console.text(cx), "SELECT * FROM owners");
+    assert_eq!(console.fixture.calls_of("db/schema").len(), 1);
+}
+
+#[gpui::test]
+async fn a_dot_after_an_alias_offers_its_columns(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_at("SELECT | FROM owners o", "o.", cx);
+    assert_eq!(
+        console.menu(cx),
+        vec!["id serial", "email varchar(50)", "First Name text"]
+    );
+
+    // A name that needs quotes is inserted quoted.
+    console.type_at("SELECT | FROM owners o", "o.Fi", cx);
+    console.accept(cx);
+    assert_eq!(console.text(cx), "SELECT o.\"First Name\" FROM owners o");
+}
+
+#[gpui::test]
+async fn a_schema_change_refreshes_the_completion(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_at("SELECT * FROM |", "ow", cx);
+    assert_eq!(console.fixture.calls_of("db/schema").len(), 1);
+
+    console.type_sql("CREATE TABLE vets (id int)", cx);
+    console.run(cx);
+    assert_eq!(
+        console.fixture.calls_of("db/schema").last(),
+        Some(&json!({"connectionId": "c1", "refresh": true}))
+    );
+
+    // So does Refresh in the Database tool window.
+    console.fixture.panel.update(cx, |panel, cx| {
+        panel.select(Some(RowKey::data_source("c1")), cx);
+        panel.refresh(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(console.fixture.calls_of("db/schema").len(), 3);
+
+    // A plain query does not.
+    console.type_sql("SELECT 1", cx);
+    console.run(cx);
+    assert_eq!(console.fixture.calls_of("db/schema").len(), 3);
+}
+
+#[gpui::test]
+async fn completion_without_a_schema_still_offers_keywords(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console
+        .fixture
+        .state
+        .fail("db/schema", "connection refused");
+    console.type_at("|", "SEL", cx);
+    assert_eq!(console.menu(cx), vec!["SELECT keyword"]);
+    // Inside a string literal there is nothing to complete.
+    console.type_at("SELECT 'ow|'", "n", cx);
+    assert!(console.menu(cx).is_empty());
+}

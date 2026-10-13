@@ -2,10 +2,13 @@
 //! source, the dialog that adds or edits a data source, and query consoles (an SQL editor tab
 //! with a paged result grid). Everything goes through `brewery-daemon` (`db/*` methods).
 
+pub mod completion;
 pub mod console;
 pub mod data_source_modal;
 pub mod panel;
 pub mod result_grid;
+pub mod schema_cache;
+pub mod sql_context;
 pub mod statements;
 pub mod tree;
 

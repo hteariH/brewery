@@ -1,13 +1,17 @@
 //! The query console: a workspace tab with an SQL editor bound to one data source and, below it,
 //! the result of the last statement (a paged grid, an update count or the daemon's error).
 
+use crate::completion::SqlCompletionProvider;
 use crate::panel::WAITING_FOR_DAEMON;
 use crate::result_grid::ResultGrid;
+use crate::schema_cache::SchemaCache;
+use crate::sql_context::is_schema_change;
 use crate::statements::statements_to_run;
 use crate::{CancelStatement, RunStatement};
 use brewery_daemon_client::{
     CancelParams, ConnectionInfo, ExecuteParams, ExecuteResult, ProjectDaemon, daemon_error_message,
 };
+use editor::actions::ShowCompletions;
 use editor::{Editor, MultiBufferOffset};
 use futures::StreamExt as _;
 use gpui::{
@@ -17,6 +21,7 @@ use gpui::{
 use language::Buffer;
 use project::Project;
 use std::any::TypeId;
+use std::rc::Rc;
 use ui::{Tooltip, prelude::*};
 use workspace::Workspace;
 use workspace::item::{Item, ItemEvent};
@@ -64,6 +69,9 @@ pub struct QueryConsole {
     run_id: u64,
     /// Gives up waiting for a cancelled statement that keeps running.
     cancel_timeout: Option<Task<()>>,
+    /// What SQL completion knows about the data source's schema.
+    schema_cache: Entity<SchemaCache>,
+    _schema_arrived: Subscription,
 }
 
 impl QueryConsole {
@@ -99,6 +107,10 @@ impl QueryConsole {
             })
             .detach();
         });
+        let schema_cache = SchemaCache::for_connection(&daemon, &connection.id, cx);
+        let completion =
+            SqlCompletionProvider::new(schema_cache.clone(), connection.driver_id.clone());
+        let waiting = completion.waiting();
         let editor = cx.new(|cx| {
             let mut editor = Editor::for_buffer(buffer, Some(project), window, cx);
             editor.set_placeholder_text(
@@ -106,7 +118,20 @@ impl QueryConsole {
                 window,
                 cx,
             );
+            editor.set_completion_provider(Some(Rc::new(completion)));
             editor
+        });
+        // The first completion request only starts fetching the schema; ask again once it is
+        // there, unless the user has moved on to another view.
+        let schema_arrived = cx.observe_in(&schema_cache, window, move |this, _, window, cx| {
+            if !waiting.replace(false) {
+                return;
+            }
+            this.editor.update(cx, |editor, cx| {
+                if editor.focus_handle(cx).is_focused(window) {
+                    editor.show_completions(&ShowCompletions, window, cx);
+                }
+            });
         });
         // Closing the tab while a statement runs, or with a result open, must not leave either
         // behind in the daemon.
@@ -119,6 +144,8 @@ impl QueryConsole {
             running: None,
             run_id: 0,
             cancel_timeout: None,
+            schema_cache,
+            _schema_arrived: schema_arrived,
         }
     }
 
@@ -192,6 +219,7 @@ impl QueryConsole {
             return;
         }
         self.close_cursor(cx);
+        let changes_schema = is_schema_change(&sql);
         self.outcome = Outcome::Empty;
         self.running = Some(false);
         self.run_id += 1;
@@ -213,7 +241,9 @@ impl QueryConsole {
                 .ok()
                 .and_then(|result| result.cursor_id.clone());
             let shown = this
-                .update(cx, |this, cx| this.finish_run(run_id, result, note, cx))
+                .update(cx, |this, cx| {
+                    this.finish_run(run_id, result, note, changes_schema, cx)
+                })
                 .unwrap_or(false);
             if !shown && let Some(cursor) = cursor {
                 let close = cx.update(|cx| daemon.read(cx).db_close(cursor, cx));
@@ -230,6 +260,7 @@ impl QueryConsole {
         run_id: u64,
         result: anyhow::Result<ExecuteResult>,
         note: Option<SharedString>,
+        changes_schema: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         if run_id != self.run_id || self.running.is_none() {
@@ -237,6 +268,15 @@ impl QueryConsole {
         }
         self.running = None;
         self.cancel_timeout = None;
+        if result.is_ok() {
+            self.schema_cache.update(cx, |cache, cx| {
+                if changes_schema {
+                    cache.refresh(cx);
+                } else {
+                    cache.retry_after_failure();
+                }
+            });
+        }
         self.outcome = match result {
             Ok(ExecuteResult {
                 cursor_id: Some(cursor_id),

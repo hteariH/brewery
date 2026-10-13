@@ -4,6 +4,7 @@
 use crate::ToggleDatabasePanel;
 use crate::console::{QueryConsole, open_console};
 use crate::data_source_modal::DataSourceModal;
+use crate::schema_cache::SchemaCache;
 use crate::statements::select_all_from;
 use crate::tree::{DbTree, Fetch, Row, RowKey, node_label};
 use anyhow::Result;
@@ -269,7 +270,23 @@ impl DatabasePanel {
             }
             return;
         }
-        let fetches = match self.selected.as_ref().map(|key| key.connection_id.clone()) {
+        let selected = self.selected.as_ref().map(|key| key.connection_id.clone());
+        // SQL completion in the consoles relies on the same schema.
+        if let Some(daemon) = self.daemon.clone() {
+            let ids: Vec<String> = match &selected {
+                Some(id) => vec![id.clone()],
+                None => self
+                    .tree
+                    .sources()
+                    .iter()
+                    .map(|source| source.id.clone())
+                    .collect(),
+            };
+            for id in ids {
+                SchemaCache::refresh_connection(&daemon, &id, cx);
+            }
+        }
+        let fetches = match selected {
             Some(id) => self.tree.refresh(&id),
             None => self.tree.refresh_all(),
         };
@@ -334,6 +351,9 @@ impl DatabasePanel {
                 .ok();
         });
         // The URL or the credentials may have changed: what was listed may no longer be right.
+        if let Some(daemon) = self.daemon.clone() {
+            SchemaCache::refresh_connection(&daemon, &saved.id, cx);
+        }
         for fetch in self.tree.refresh(&saved.id) {
             self.introspect(fetch, cx);
         }

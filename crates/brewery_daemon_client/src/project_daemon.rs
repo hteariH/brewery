@@ -7,10 +7,10 @@
 use crate::protocol::{
     AddDriverParams, CancelParams, CloseParams, ConnectionInfo, ConnectionsListParams, DbAddDriver,
     DbCancel, DbClose, DbConnections, DbDeleteConnection, DbDrivers, DbExecute, DbFetch,
-    DbIntrospect, DbNode, DbSaveConnection, DbTestConnection, DeleteConnectionParams, DriverInfo,
-    DriversParams, ExecuteParams, ExecuteResult, FetchParams, FetchResult, IntrospectParams,
-    ProjectModel, RunConfiguration, SaveConnectionParams, SpringModel, TestConnectionParams,
-    TestConnectionResult,
+    DbGetSchema, DbIntrospect, DbNode, DbSaveConnection, DbSchema, DbTestConnection,
+    DeleteConnectionParams, DriverInfo, DriversParams, ExecuteParams, ExecuteResult, FetchParams,
+    FetchResult, IntrospectParams, ProjectModel, RunConfiguration, SaveConnectionParams,
+    SchemaParams, SpringModel, TestConnectionParams, TestConnectionResult,
 };
 use crate::{DaemonClient, is_import_error};
 use anyhow::{Context as _, Error, Result, anyhow};
@@ -381,6 +381,10 @@ impl ProjectDaemon {
 
     pub fn db_introspect(&self, params: IntrospectParams, cx: &App) -> Task<Result<Vec<DbNode>>> {
         self.db_call(DbIntrospect::METHOD, params, cx)
+    }
+
+    pub fn db_schema(&self, params: SchemaParams, cx: &App) -> Task<Result<DbSchema>> {
+        self.db_call(DbGetSchema::METHOD, params, cx)
     }
 
     pub fn db_execute(&self, params: ExecuteParams, cx: &App) -> Task<Result<ExecuteResult>> {

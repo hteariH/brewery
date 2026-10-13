@@ -410,6 +410,50 @@ pub struct CloseParams {
     pub cursor_id: String,
 }
 
+/// `refresh: Some(true)` rebuilds the daemon's cached snapshot instead of returning it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaParams {
+    pub connection_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableKind {
+    Table,
+    View,
+    /// A kind a newer daemon added.
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableInfo {
+    pub name: String,
+    pub kind: TableKind,
+    pub columns: Vec<ColumnInfo>,
+}
+
+/// `name` is empty for databases without schemas (SQLite).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaInfo {
+    pub name: String,
+    pub tables: Vec<TableInfo>,
+}
+
+/// The whole schema of a connection, flattened for SQL completion (system schemas left out).
+/// `truncated` is set when the daemon stopped at its table limit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbSchema {
+    pub schemas: Vec<SchemaInfo>,
+    pub truncated: bool,
+}
+
 pub enum DbDrivers {}
 impl Request for DbDrivers {
     type Params = DriversParams;
@@ -480,6 +524,13 @@ impl Request for DbCancel {
     const METHOD: &'static str = "db/cancel";
 }
 
+pub enum DbGetSchema {}
+impl Request for DbGetSchema {
+    type Params = SchemaParams;
+    type Result = DbSchema;
+    const METHOD: &'static str = "db/schema";
+}
+
 pub enum DbClose {}
 impl Request for DbClose {
     type Params = CloseParams;
@@ -505,6 +556,42 @@ mod tests {
         include_str!("../../../brewery-daemon/protocol/fixtures/db-fetch.result.json");
     const DB_INTROSPECT: &str =
         include_str!("../../../brewery-daemon/protocol/fixtures/db-introspect.result.json");
+    const DB_SCHEMA: &str =
+        include_str!("../../../brewery-daemon/protocol/fixtures/db-schema.result.json");
+
+    #[test]
+    fn db_schema_fixture_round_trips() {
+        assert_eq!(DbGetSchema::METHOD, "db/schema");
+        let schema: DbSchema = round_trips(DB_SCHEMA);
+        assert!(!schema.truncated);
+        assert_eq!(schema.schemas.len(), 1);
+        let public = &schema.schemas[0];
+        assert_eq!(public.name, "public");
+        assert_eq!(public.tables[0].name, "owners");
+        assert_eq!(public.tables[0].kind, TableKind::Table);
+        assert_eq!(public.tables[0].columns[1].name, "email");
+        assert_eq!(public.tables[0].columns[1].type_name, "varchar(50)");
+        assert_eq!(public.tables[1].kind, TableKind::View);
+        let unknown: TableKind = serde_json::from_str("\"materializedView\"").unwrap();
+        assert_eq!(unknown, TableKind::Other);
+
+        assert_eq!(
+            serde_json::to_value(SchemaParams {
+                connection_id: "c1".into(),
+                refresh: None
+            })
+            .unwrap(),
+            serde_json::json!({"connectionId": "c1"})
+        );
+        assert_eq!(
+            serde_json::to_value(SchemaParams {
+                connection_id: "c1".into(),
+                refresh: Some(true)
+            })
+            .unwrap(),
+            serde_json::json!({"connectionId": "c1", "refresh": true})
+        );
+    }
 
     #[test]
     fn db_error_codes_match_the_daemon() {

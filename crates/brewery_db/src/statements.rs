@@ -70,7 +70,7 @@ pub fn split_statements(text: &str) -> Vec<Range<usize>> {
 }
 
 /// Where a `/*` comment starting at `start` ends (after its `*/`, or at the end of the text).
-fn block_comment_end(bytes: &[u8], start: usize) -> usize {
+pub(crate) fn block_comment_end(bytes: &[u8], start: usize) -> usize {
     let mut depth = 0usize;
     let mut ix = start;
     while ix < bytes.len() {
@@ -98,7 +98,7 @@ fn is_identifier_byte(byte: u8) -> bool {
 
 /// The opening `$tag$` (or `$$`) of a dollar-quoted body at `start`. Not a tag: `$1` parameters
 /// and `$` inside identifiers such as `a$b`.
-fn dollar_tag(text: &str, start: usize) -> Option<&str> {
+pub(crate) fn dollar_tag(text: &str, start: usize) -> Option<&str> {
     let bytes = text.as_bytes();
     if start > 0 && (is_identifier_byte(bytes[start - 1]) || bytes[start - 1] == b'$') {
         return None;
@@ -153,7 +153,7 @@ pub fn statements_to_run(text: &str, selection: Range<usize>) -> Vec<Range<usize
 
 /// Keywords (reserved or not) of the supported databases. Quoting a word that would have worked
 /// bare is harmless, so the list errs on the long side.
-const RESERVED: &[&str] = &[
+pub(crate) const RESERVED: &[&str] = &[
     "all",
     "analyse",
     "analyze",
