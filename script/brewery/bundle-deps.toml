@@ -12,6 +12,10 @@
 #   root    directory inside the archive that becomes `dest`
 #   member  single file inside the archive that becomes `dest`
 #   [artifacts.<name>.<os>-<arch>] or [artifacts.<name>.any]: url + sha256
+#   licence text for licenses/<name>/ (exactly one of):
+#     license_file    file next to this one (upstream LICENSE at the pinned tag)
+#     license_member  file inside the bundled jar
+#     license_dir     directory inside the bundle (the jlinked JRE's legal/java.base)
 #
 # Every SHA-256 below was computed from a download on 2026-10-14 and matches
 # the checksum the publisher lists (Adoptium API, Eclipse .sha256 file, GitHub
@@ -35,6 +39,7 @@ source = "https://github.com/adoptium/temurin21-binaries/releases/tag/jdk-21.0.1
 # GPLv2 section 3: corresponding source for the redistributed binaries.
 source_code = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk-sources_21.0.12.1_1.tar.gz"
 source_tag = "https://github.com/adoptium/jdk21u/tree/jdk-21.0.12.1+1"
+license_dir = "jre/legal/java.base"
 into = "work"
 
 [artifacts.jdk.windows-x64]
@@ -69,6 +74,8 @@ root = "jdk-21.0.12.1+1/Contents/Home"
 version = "1.61.0-202609031315"
 license = "EPL-2.0"
 source = "https://download.eclipse.org/jdtls/milestones/1.61.0/"
+# LICENSE of github.com/eclipse-jdtls/eclipse.jdt.ls at tag v1.61.0.
+license_file = "licenses/eclipse.jdt.ls-LICENSE.txt"
 dest = "jdtls"
 
 [artifacts.jdtls.any]
@@ -80,6 +87,7 @@ sha256 = "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64"
 version = "1.18.48"
 license = "MIT"
 source = "https://projectlombok.org/downloads/"
+license_member = "LICENSE"
 dest = "lombok.jar"
 
 [artifacts.lombok.any]
@@ -92,6 +100,8 @@ sha256 = "85477a4655ebb2c074a9099cfb749be454449fee564d4282610df1b85f7c508b"
 version = "0.53.2"
 license = "EPL-1.0"
 source = "https://github.com/zed-industries/java-debug/releases/tag/0.53.2"
+# LICENSE.txt of github.com/zed-industries/java-debug at tag 0.53.2.
+license_file = "licenses/java-debug-LICENSE.txt"
 dest = "java-debug.jar"
 
 [artifacts.java-debug.any]
@@ -105,6 +115,8 @@ sha256 = "5275195905015ce786fc6318c8d039fef43a1fada1d03acdec24c69a3b9ba83c"
 version = "v6.8.28"
 license = "Apache-2.0"
 source = "https://github.com/zed-extensions/java/releases/tag/v6.8.28"
+# LICENSE of github.com/zed-extensions/java at tag v6.8.28 (proxy and extension).
+license_file = "licenses/zed-extensions-java-LICENSE.txt"
 dest = "java-lsp-proxy{exe}"
 member = "java-lsp-proxy{exe}"
 executable = true
@@ -139,6 +151,7 @@ sha256 = "0484e94fbfb15b669bae4967c9ee9b7fdcc24c3b3de6cabcd4d1200036db1884"
 version = "6.8.28"
 license = "Apache-2.0"
 source = "https://github.com/zed-extensions/java/tree/v6.8.28"
+license_file = "licenses/zed-extensions-java-LICENSE.txt"
 dest = "extensions/java"
 format = "tar.gz"
 

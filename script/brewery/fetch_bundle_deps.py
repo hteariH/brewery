@@ -6,14 +6,14 @@ OS/arch), downloads each artifact once into a cache, refuses anything whose
 SHA-256 does not match, and lays out
 
     <out>/<os>-<arch>/
-        jre/                         (jlink step, M6c Task 2)
-        jdtls/                       (+ brewery-jdtls launchers, Task 2)
+        jre/                         (jlink of the pinned JDK, on the target OS)
+        jdtls/                       (+ brewery-jdtls[.cmd] launcher)
         lombok.jar
         java-debug.jar
         java-lsp-proxy[.exe]
         extensions/java/
         brewery-daemon/brewery-daemon.jar   (with --daemon-jar)
-        licenses/                    (filled in Task 2)
+        licenses/                    (every component's licence + README.txt)
 
 The bundle is assembled in a hidden staging directory next to the target and
 swapped in only when every step succeeded, so a failed run never leaves a
@@ -36,6 +36,7 @@ import posixpath
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -91,6 +92,12 @@ class Artifact:
     root: str  # directory inside the archive that becomes dest ("" = whole archive)
     member: str  # single file inside the archive that becomes dest ("" = none)
     executable: bool
+    # Exactly one licence source per artifact (checked by collect_licenses):
+    license_file: str = ""  # text file, relative to the deps file's directory
+    license_member: str = ""  # file inside the bundled jar/zip (Lombok's LICENSE)
+    license_dir: str = ""  # directory inside the bundle (the JRE's legal/java.base)
+    source_code: str = ""  # GPL corresponding source (the JDK)
+    source_tag: str = ""
 
 
 @dataclass(frozen=True)
@@ -175,6 +182,14 @@ def _resolve(name: str, table: dict, target: str) -> Artifact:
             _safe_relpath(value, f"artifact {name}: {what}")
     if fmt == "file" and (root or member):
         raise DepsError(f"artifact {name}: root/member need an archive format")
+    licence = {}
+    for key in ("license_file", "license_member", "license_dir", "source_code", "source_tag"):
+        value = table.get(key, "")
+        if not isinstance(value, str):
+            raise DepsError(f"artifact {name}: {key} must be a string")
+        if value and key.startswith("license_"):
+            _safe_relpath(value, f"artifact {name}: {key}")
+        licence[key] = value
     return Artifact(
         name=name,
         version=table["version"],
@@ -188,6 +203,7 @@ def _resolve(name: str, table: dict, target: str) -> Artifact:
         root=root.strip("/"),
         member=member,
         executable=bool(table.get("executable", False)),
+        **licence,
     )
 
 
@@ -392,23 +408,217 @@ class BundleContext:
     artifacts: dict = field(default_factory=dict)  # name -> Artifact
     deps_dir: Path = SCRIPT_DIR
     log: Callable = print
+    launchers_dir: Path = SCRIPT_DIR / "jdtls"
 
 
-def build_jre(ctx: BundleContext) -> None:
-    """M6c Task 2: jlink ctx.work["jdk"] into ctx.bundle / "jre" (keep legal/).
+def host_target() -> str:
+    """<os>-<arch> of the machine running the fetcher."""
+    return target_name(normalize_os(sys.platform), normalize_arch(platform.machine()))
 
-    Must run on the target OS (jlink does not cross-link here)."""
-    ctx.log(f"  todo    jre: jlink from {ctx.work.get('jdk')} not implemented yet (M6c Task 2)")
+
+# The JRE serves the daemon and jdtls only (projects build with the user's JDK).
+# Daemon (jdeps on the shadow jar): java.se, jdk.net, jdk.security.auth,
+# jdk.unsupported; Gradle Tooling API, JDBC and keyring need jdk.crypto.ec,
+# jdk.zipfs and jdk.management. jdtls starts with --add-modules=ALL-SYSTEM and
+# needs jdk.jdi, jdk.attach and jdk.jdwp.agent for java-debug, java.instrument
+# for the Lombok javaagent, jdk.localedata and jdk.charsets; jdk.compiler is
+# looked up by some plugins. See docs/superpowers/plans/m6-gap-analysis.md 4.2.
+JRE_MODULES = (
+    "java.se",
+    "jdk.unsupported",
+    "jdk.crypto.ec",
+    "jdk.zipfs",
+    "jdk.net",
+    "jdk.management",
+    "jdk.security.auth",
+    "jdk.jdi",
+    "jdk.attach",
+    "jdk.jdwp.agent",
+    "java.instrument",
+    "jdk.localedata",
+    "jdk.charsets",
+    "jdk.jfr",
+    "jdk.httpserver",
+    "jdk.compiler",
+)
+JLINK_FLAGS = ("--strip-debug", "--no-man-pages", "--no-header-files", "--compress=zip-6")
+
+# jdtls's shared configuration per target: the first is the one the launcher uses,
+# the second the syntax server's. Every other config_* directory is dropped.
+JDTLS_CONFIGS = {
+    "windows-x64": ("config_win", "config_ss_win"),
+    "linux-x64": ("config_linux", "config_ss_linux"),
+    "linux-aarch64": ("config_linux_arm", "config_ss_linux_arm"),
+    "macos-x64": ("config_mac", "config_ss_mac"),
+    "macos-aarch64": ("config_mac_arm", "config_ss_mac_arm"),
+}
+
+
+def _exe(ctx: BundleContext) -> str:
+    return ".exe" if ctx.os == "windows" else ""
+
+
+def _run_checked(run: Callable, cmd: list, what: str) -> subprocess.CompletedProcess:
+    try:
+        proc = run([str(c) for c in cmd], capture_output=True, text=True, timeout=900)
+    except (OSError, subprocess.SubprocessError) as err:
+        raise FetchError(f"{what} failed to start: {err}") from err
+    if proc.returncode != 0:
+        output = "\n".join(s for s in (proc.stdout, proc.stderr) if s).strip()
+        raise FetchError(f"{what} exited with {proc.returncode}: {output}")
+    return proc
+
+
+def build_jre(ctx: BundleContext, run: Callable = subprocess.run, host: str | None = None) -> None:
+    """jlink ctx.work["jdk"] into ctx.bundle / "jre" (legal/ kept) and check the image runs.
+
+    jlink only links for the platform it runs on, so the target must be the host."""
+    host = host or host_target()
+    if host != ctx.target:
+        raise FetchError(
+            f"jre: jlink must run on the target OS ({ctx.target}); this machine is {host}"
+        )
+    jdk = ctx.work.get("jdk")
+    if jdk is None:
+        raise FetchError("jre: no unpacked JDK (artifact jdk with into = \"work\")")
+    exe = _exe(ctx)
+    jlink = Path(jdk) / "bin" / f"jlink{exe}"
+    jmods = Path(jdk) / "jmods"
+    jre = ctx.bundle / "jre"
+    if jre.exists():
+        raise FetchError(f"jre: {jre} already exists in the bundle")
+    ctx.log(f"  jlink   {len(JRE_MODULES)} modules -> jre/")
+    _run_checked(
+        run,
+        [jlink, "--module-path", jmods, "--add-modules", ",".join(JRE_MODULES), *JLINK_FLAGS,
+         "--output", jre],
+        "jlink",
+    )
+    if not (jre / "release").is_file():
+        raise FetchError(f"jre: jlink produced no {jre / 'release'}")
+    if not (jre / "legal" / "java.base").is_dir():
+        raise FetchError("jre: jlink produced no legal/java.base")
+    java = jre / "bin" / f"java{exe}"
+    version = _run_checked(run, [java, "-version"], "jre/bin/java -version")
+    first = (version.stderr or version.stdout).strip().splitlines()
+    ctx.log(f"  jre     {first[0] if first else 'java -version ok'}")
+    listing = _run_checked(run, [java, "--list-modules"], "jre/bin/java --list-modules")
+    present = {line.split("@", 1)[0].strip() for line in listing.stdout.splitlines()}
+    missing = [m for m in JRE_MODULES if m not in present]
+    if missing:
+        raise FetchError(f"jre: image lacks modules {', '.join(missing)}")
 
 
 def write_jdtls_launchers(ctx: BundleContext) -> None:
-    """M6c Task 2: copy script/brewery/jdtls/brewery-jdtls{,.cmd} into ctx.bundle / "jdtls"."""
-    ctx.log("  todo    jdtls launchers not implemented yet (M6c Task 2)")
+    """Install the Brewery jdtls launcher for the target and drop other platforms' configs.
+
+    Windows gets brewery-jdtls.cmd (CRLF, which cmd.exe's label lookup wants), every
+    other OS brewery-jdtls (LF, executable). The repo copies are LF."""
+    jdtls = ctx.bundle / "jdtls"
+    configs = JDTLS_CONFIGS.get(ctx.target)
+    if configs is None:
+        raise FetchError(f"jdtls: no config directory known for {ctx.target}")
+    if not (jdtls / configs[0]).is_dir():
+        raise FetchError(f"jdtls: {configs[0]} missing from the jdtls archive")
+    for entry in jdtls.iterdir():
+        if entry.is_dir() and entry.name.startswith("config_") and entry.name not in configs:
+            rmtree(entry)
+    if ctx.os == "windows":
+        name, newline = "brewery-jdtls.cmd", b"\r\n"
+    else:
+        name, newline = "brewery-jdtls", b"\n"
+    src = Path(ctx.launchers_dir) / name
+    if not src.is_file():
+        raise FetchError(f"jdtls: launcher {src} not found")
+    lines = src.read_bytes().replace(b"\r\n", b"\n").split(b"\n")
+    dest = jdtls / name
+    dest.write_bytes(newline.join(lines))
+    if ctx.os != "windows":
+        _make_executable(dest)
+    ctx.log(f"  launch  jdtls/{name}")
+
+
+def _license_text(ctx: BundleContext, art: Artifact) -> dict:
+    """{file name: bytes} for one artifact's licence; FetchError when it has none."""
+    sources = [s for s in (art.license_file, art.license_member, art.license_dir) if s]
+    if len(sources) != 1:
+        raise FetchError(
+            f"licenses: artifact {art.name} needs exactly one of license_file, "
+            "license_member, license_dir in the deps file"
+        )
+    if art.license_file:
+        path = Path(ctx.deps_dir) / art.license_file
+        if not path.is_file():
+            raise FetchError(f"licenses: {art.name}: {path} not found")
+        return {"LICENSE": path.read_bytes()}
+    if art.license_member:
+        jar = ctx.bundle / art.dest
+        try:
+            with zipfile.ZipFile(jar) as zf:
+                return {"LICENSE": zf.read(art.license_member)}
+        except (OSError, KeyError, zipfile.BadZipFile) as err:
+            raise FetchError(f"licenses: {art.name}: no {art.license_member} in {jar.name}: {err}")
+    legal = ctx.bundle / art.license_dir
+    if not (legal / "LICENSE").is_file():
+        raise FetchError(f"licenses: {art.name}: {art.license_dir}/LICENSE not found (legal/ missing?)")
+    # copyfile-style reads follow the Linux image's relative symlinks.
+    return {p.name: p.read_bytes() for p in sorted(legal.iterdir()) if p.is_file()}
 
 
 def collect_licenses(ctx: BundleContext) -> None:
-    """M6c Task 2: write licence texts for every artifact into ctx.bundle / "licenses"."""
-    ctx.log("  todo    licences not collected yet (M6c Task 2)")
+    """licenses/<component>/ with each licence text, plus README.txt indexing them.
+
+    The JRE keeps its own legal/ too; licenses/jre/SOURCE.txt names the GPLv2
+    corresponding source. The daemon's THIRD-PARTY-NOTICES.txt comes out of its jar."""
+    lic = ctx.bundle / "licenses"
+    lic.mkdir(exist_ok=True)
+    index = [
+        "Third-party components bundled with Brewery",
+        "",
+        "Each directory here holds the licence of one component. The Java runtime in",
+        "jre/ also carries its per-module notices in jre/legal/.",
+        "",
+    ]
+    for art in ctx.artifacts.values():
+        component = "jre" if art.name == "jdk" else art.name
+        texts = _license_text(ctx, art)
+        dest = lic / component
+        dest.mkdir(exist_ok=True)
+        for file_name, data in texts.items():
+            (dest / file_name).write_bytes(data)
+        index += [f"{component} {art.version}", f"  License: {art.license}", f"  Source:  {art.source}"]
+        if art.source_code or art.source_tag:
+            source = [
+                f"Corresponding source for the Java runtime in jre/ ({art.version}),",
+                "built from the Eclipse Temurin JDK with jlink:",
+                "",
+            ]
+            if art.source_code:
+                source.append(f"Source archive: {art.source_code}")
+                index.append(f"  Corresponding source: {art.source_code}")
+            if art.source_tag:
+                source.append(f"Source tag:     {art.source_tag}")
+            source.append(f"Binaries:       {art.source}")
+            (dest / "SOURCE.txt").write_text("\n".join(source) + "\n", encoding="utf-8")
+        index.append(f"  Files:   licenses/{component}/")
+        index.append("")
+    daemon = ctx.bundle / "brewery-daemon" / "brewery-daemon.jar"
+    if daemon.is_file():
+        try:
+            with zipfile.ZipFile(daemon) as zf:
+                notices = zf.read("THIRD-PARTY-NOTICES.txt")
+        except (OSError, KeyError, zipfile.BadZipFile) as err:
+            raise FetchError(f"licenses: no THIRD-PARTY-NOTICES.txt in {daemon.name}: {err}")
+        (lic / "brewery-daemon").mkdir(exist_ok=True)
+        (lic / "brewery-daemon" / "THIRD-PARTY-NOTICES.txt").write_bytes(notices)
+        index += [
+            "brewery-daemon",
+            "  License: Apache-2.0 (Brewery); its dependencies are listed with their",
+            "  licences in licenses/brewery-daemon/THIRD-PARTY-NOTICES.txt",
+            "",
+        ]
+    (lic / "README.txt").write_text("\n".join(index), encoding="utf-8", newline="\n")
+    ctx.log(f"  legal   licenses/ ({len(ctx.artifacts)} components)")
 
 
 DEFAULT_STEPS = (build_jre, write_jdtls_launchers, collect_licenses)
@@ -501,7 +711,10 @@ def main(argv: list | None = None) -> int:
     try:
         target = target_name(normalize_os(args.os), normalize_arch(args.arch))
         deps = load_deps(args.deps)
-        build_bundle(deps, target, args.out, args.cache, daemon_jar=args.daemon_jar, log=log)
+        build_bundle(
+            deps, target, args.out, args.cache, daemon_jar=args.daemon_jar,
+            steps=DEFAULT_STEPS, log=log,
+        )
     except (DepsError, FetchError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1

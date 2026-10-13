@@ -8,11 +8,14 @@ import contextlib
 import hashlib
 import io
 import os
+import re
 import tarfile
 import tempfile
 import threading
+import subprocess
 import unittest
 import zipfile
+from unittest import mock
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -96,7 +99,7 @@ class BundleFixture(unittest.TestCase):
                     "config_linux/config.ini": b"linux",
                 }
             ),
-            "lombok-1.0.jar": b"lombok-bytes",
+            "lombok-1.0.jar": make_zip({"LICENSE": b"lombok MIT text", "lombok/Main.class": b"x"}),
             "java-debug-0.1.jar": b"debug-bytes",
             "proxy-windows.zip": make_zip({"java-lsp-proxy.exe": b"win-proxy"}),
             "proxy-linux.tar.gz": make_tar_gz({"java-lsp-proxy": b"linux-proxy"}),
@@ -118,6 +121,11 @@ class BundleFixture(unittest.TestCase):
         self.server = FixtureServer(self.served)
         self.addCleanup(self.server.close)
         self.deps_path = self.tmp / "deps.toml"
+        lic = self.tmp / "licenses"
+        lic.mkdir()
+        (lic / "jdtls.txt").write_text("EPL-2.0 text\n", encoding="utf-8")
+        (lic / "java-debug.txt").write_text("EPL-1.0 text\n", encoding="utf-8")
+        (lic / "apache.txt").write_text("Apache-2.0 text\n", encoding="utf-8")
         self.write_deps()
 
     def h(self, name: str) -> str:
@@ -138,6 +146,9 @@ targets = ["windows-x64", "linux-x64"]
 version = "21+1"
 license = "GPL-2.0-only WITH Classpath-exception-2.0"
 source = "https://example.invalid/adoptium"
+source_code = "https://example.invalid/adoptium/jdk-sources.tar.gz"
+source_tag = "https://example.invalid/adoptium/tree/jdk-21+1"
+license_dir = "jre/legal/java.base"
 into = "work"
 
 [artifacts.jdk.windows-x64]
@@ -154,6 +165,7 @@ root = "jdk-21+1"
 version = "1.0"
 license = "EPL-2.0"
 source = "https://example.invalid/jdtls"
+license_file = "licenses/jdtls.txt"
 dest = "jdtls"
 
 [artifacts.jdtls.any]
@@ -164,6 +176,7 @@ sha256 = "{sha('jdtls.tar.gz')}"
 version = "1.0"
 license = "MIT"
 source = "https://example.invalid/lombok"
+license_member = "LICENSE"
 dest = "lombok.jar"
 
 [artifacts.lombok.any]
@@ -174,6 +187,7 @@ sha256 = "{sha('lombok-1.0.jar')}"
 version = "0.1"
 license = "EPL-1.0"
 source = "https://example.invalid/java-debug"
+license_file = "licenses/java-debug.txt"
 dest = "java-debug.jar"
 
 [artifacts.java-debug.any]
@@ -184,6 +198,7 @@ sha256 = "{sha('java-debug-0.1.jar')}"
 version = "v1"
 license = "Apache-2.0"
 source = "https://example.invalid/proxy"
+license_file = "licenses/apache.txt"
 dest = "java-lsp-proxy{{exe}}"
 member = "java-lsp-proxy{{exe}}"
 executable = true
@@ -200,6 +215,7 @@ sha256 = "{sha('proxy-linux.tar.gz')}"
 version = "1.0"
 license = "Apache-2.0"
 source = "https://example.invalid/gallery"
+license_file = "licenses/apache.txt"
 dest = "extensions/java"
 format = "tar.gz"
 
@@ -371,7 +387,7 @@ class BuildTest(BundleFixture):
             b"launcher",
         )
         self.assertTrue((b / "jdtls/config_win/config.ini").is_file())
-        self.assertEqual((b / "lombok.jar").read_bytes(), b"lombok-bytes")
+        self.assertEqual((b / "lombok.jar").read_bytes(), self.artifacts["lombok-1.0.jar"])
         self.assertEqual((b / "java-debug.jar").read_bytes(), b"debug-bytes")
         self.assertEqual((b / "java-lsp-proxy.exe").read_bytes(), b"win-proxy")
         self.assertTrue((b / "extensions/java/extension.toml").is_file())
@@ -445,7 +461,7 @@ class BuildTest(BundleFixture):
         entry.write_bytes(b"tampered")
         self.build()
         self.assertEqual(self.server.hits("/lombok-1.0.jar"), before + 1)
-        self.assertEqual(entry.read_bytes(), b"lombok-bytes")
+        self.assertEqual(entry.read_bytes(), self.artifacts["lombok-1.0.jar"])
 
     def test_rebuild_is_idempotent_and_drops_stale_files(self):
         bundle = self.build()
@@ -480,7 +496,274 @@ class BuildTest(BundleFixture):
         self.assertFalse(self.out.exists() and any(self.out.iterdir()))
 
 
+def find_test_jdk() -> Path | None:
+    """A full JDK 21+ (with jlink and jmods) for the real-jlink tests, or None."""
+    exe = ".exe" if os.name == "nt" else ""
+    for var in ("BREWERY_TEST_JDK", "JAVA_HOME"):
+        home = os.environ.get(var)
+        if home and (Path(home) / "bin" / f"jlink{exe}").is_file() and (Path(home) / "jmods").is_dir():
+            return Path(home)
+    return None
+
+
+class FakeJlink:
+    """Stands in for subprocess.run: records commands and fakes jlink and java."""
+
+    def __init__(self, modules=None, jlink_rc=0, make_release=True):
+        self.calls = []
+        self.modules = fbd.JRE_MODULES if modules is None else modules
+        self.jlink_rc = jlink_rc
+        self.make_release = make_release
+
+    def __call__(self, cmd, **kwargs):
+        cmd = [str(c) for c in cmd]
+        self.calls.append(cmd)
+        name = Path(cmd[0]).name
+        if name.startswith("jlink"):
+            if self.jlink_rc:
+                return subprocess.CompletedProcess(cmd, self.jlink_rc, "", "Error: module not found: jdk.bogus")
+            out = Path(cmd[cmd.index("--output") + 1])
+            (out / "bin").mkdir(parents=True)
+            (out / "bin" / "java").write_bytes(b"")
+            (out / "bin" / "java.exe").write_bytes(b"")
+            legal = out / "legal" / "java.base"
+            legal.mkdir(parents=True)
+            (legal / "LICENSE").write_text("GPLv2 text\n", encoding="utf-8")
+            (legal / "ASSEMBLY_EXCEPTION").write_text("assembly exception\n", encoding="utf-8")
+            if self.make_release:
+                (out / "release").write_text('JAVA_VERSION="21.0.12"\n', encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "-version" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", 'openjdk version "21.0.12" 2026-07-21 LTS\n')
+        if "--list-modules" in cmd:
+            listing = "".join(f"{m}@21.0.12\n" for m in self.modules)
+            return subprocess.CompletedProcess(cmd, 0, listing, "")
+        raise AssertionError(f"unexpected command {cmd}")
+
+
+class JreStepTest(BundleFixture):
+    def run_step(self, fake, target="windows-x64", host=None):
+        def step(ctx):
+            fbd.build_jre(ctx, run=fake, host=host or target)
+
+        return self.build(target, steps=[step])
+
+    def test_jlink_gets_the_module_list_and_flags(self):
+        fake = FakeJlink()
+        bundle = self.run_step(fake)
+        jlink = fake.calls[0]
+        self.assertTrue(Path(jlink[0]).name.startswith("jlink"))
+        # jlink comes from the unpacked JDK (a work dir), not from PATH.
+        self.assertEqual(Path(jlink[0]).parent.parent.name, "jdk")
+        modules = jlink[jlink.index("--add-modules") + 1].split(",")
+        for m in (
+            "java.se", "jdk.unsupported", "jdk.crypto.ec", "jdk.zipfs", "jdk.net",
+            "jdk.management", "jdk.jdi", "jdk.attach", "jdk.jdwp.agent", "java.instrument",
+            "jdk.localedata", "jdk.charsets", "jdk.jfr", "jdk.httpserver", "jdk.compiler",
+            "jdk.security.auth",
+        ):
+            self.assertIn(m, modules)
+        for flag in ("--strip-debug", "--no-man-pages", "--no-header-files", "--compress=zip-6"):
+            self.assertIn(flag, jlink)
+        self.assertEqual(Path(jlink[jlink.index("--output") + 1]).name, "jre")
+        # jre/ lands in the bundle with its legal/ directory.
+        self.assertTrue((bundle / "jre" / "release").is_file())
+        self.assertTrue((bundle / "jre" / "legal" / "java.base" / "LICENSE").is_file())
+        # The image is checked by running it.
+        self.assertTrue(any("-version" in c for c in fake.calls[1:]))
+        self.assertTrue(any("--list-modules" in c for c in fake.calls[1:]))
+
+    def test_refuses_to_cross_link(self):
+        with self.assertRaisesRegex(fbd.FetchError, "target OS"):
+            self.run_step(FakeJlink(), target="linux-x64", host="windows-x64")
+        self.assertFalse(self.out.exists() and any(self.out.iterdir()))
+
+    def test_jlink_failure_is_a_fetch_error_with_its_output(self):
+        with self.assertRaisesRegex(fbd.FetchError, "jdk.bogus"):
+            self.run_step(FakeJlink(jlink_rc=1))
+        self.assertFalse(self.out.exists() and any(self.out.iterdir()))
+
+    def test_image_without_release_file_is_rejected(self):
+        with self.assertRaisesRegex(fbd.FetchError, "release"):
+            self.run_step(FakeJlink(make_release=False))
+
+    def test_image_missing_a_module_is_rejected(self):
+        fake = FakeJlink(modules=[m for m in fbd.JRE_MODULES if m != "jdk.jdi"])
+        with self.assertRaisesRegex(fbd.FetchError, "jdk.jdi"):
+            self.run_step(fake)
+
+
+@unittest.skipUnless(find_test_jdk(), "needs a full JDK 21 in BREWERY_TEST_JDK or JAVA_HOME")
+class RealJlinkTest(unittest.TestCase):
+    def test_real_jlink_builds_a_runnable_jre(self):
+        jdk = find_test_jdk()
+        tmp = Path(tempfile.mkdtemp(prefix="fbd-jlink-"))
+        self.addCleanup(fbd.rmtree, tmp)
+        bundle = tmp / "bundle"
+        bundle.mkdir()
+        target = fbd.host_target()
+        os_name, _, arch = target.partition("-")
+        ctx = fbd.BundleContext(
+            target=target, os=os_name, arch=arch, bundle=bundle,
+            work={"jdk": jdk}, log=lambda *_: None,
+        )
+        fbd.build_jre(ctx)
+        exe = ".exe" if os.name == "nt" else ""
+        java = bundle / "jre" / "bin" / f"java{exe}"
+        out = subprocess.run([java, "-version"], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("version", out.stderr)
+        self.assertTrue((bundle / "jre" / "legal" / "java.base").is_dir())
+        self.assertFalse((bundle / "jre" / "include").exists())
+        self.assertFalse((bundle / "jre" / "jmods").exists())
+
+
+class LauncherStepTest(BundleFixture):
+    def setUp(self):
+        super().setUp()
+        jdtls = make_tar_gz(
+            {
+                "plugins/org.eclipse.equinox.launcher_1.0.jar": b"launcher",
+                "config_win/config.ini": b"win",
+                "config_ss_win/config.ini": b"ss-win",
+                "config_linux/config.ini": b"linux",
+                "config_linux_arm/config.ini": b"linux-arm",
+                "config_mac/config.ini": b"mac",
+                "bin/jdtls.py": b"python",
+            }
+        )
+        self.artifacts["jdtls.tar.gz"] = jdtls
+        (self.served / "jdtls.tar.gz").write_bytes(jdtls)
+        self.write_deps()
+
+    def configs(self, bundle):
+        return sorted(p.name for p in (bundle / "jdtls").iterdir() if p.name.startswith("config_"))
+
+    def test_windows_gets_the_cmd_launcher_with_crlf_and_only_its_config(self):
+        bundle = self.build("windows-x64", steps=[fbd.write_jdtls_launchers])
+        cmd = bundle / "jdtls" / "brewery-jdtls.cmd"
+        data = cmd.read_bytes()
+        self.assertGreater(data.count(b"\r\n"), 10)
+        self.assertEqual(data.count(b"\n"), data.count(b"\r\n"), "every line ends in CRLF")
+        self.assertFalse((bundle / "jdtls" / "brewery-jdtls").exists())
+        self.assertEqual(self.configs(bundle), ["config_ss_win", "config_win"])
+
+    def test_linux_gets_the_sh_launcher_with_lf_and_exec_bit(self):
+        bundle = self.build("linux-x64", steps=[fbd.write_jdtls_launchers])
+        sh = bundle / "jdtls" / "brewery-jdtls"
+        data = sh.read_bytes()
+        self.assertTrue(data.startswith(b"#!/bin/sh\n"))
+        self.assertNotIn(b"\r", data)
+        if os.name != "nt":
+            self.assertTrue(os.access(sh, os.X_OK))
+        self.assertFalse((bundle / "jdtls" / "brewery-jdtls.cmd").exists())
+        self.assertEqual(self.configs(bundle), ["config_linux"])
+
+    def test_missing_platform_config_is_an_error(self):
+        def step(ctx):
+            # The fixture has no config_mac_arm.
+            ctx.target, ctx.os, ctx.arch = "macos-aarch64", "macos", "aarch64"
+            fbd.write_jdtls_launchers(ctx)
+
+        with self.assertRaisesRegex(fbd.FetchError, "config_mac_arm"):
+            self.build("linux-x64", steps=[step])
+
+
+class LicenseStepTest(BundleFixture):
+    def fake_jre(self, ctx):
+        legal = ctx.bundle / "jre" / "legal" / "java.base"
+        legal.mkdir(parents=True)
+        (legal / "LICENSE").write_text("GPLv2 text\n", encoding="utf-8")
+        (legal / "ASSEMBLY_EXCEPTION").write_text("assembly exception\n", encoding="utf-8")
+        (legal / "ADDITIONAL_LICENSE_INFO").write_text("additional info\n", encoding="utf-8")
+
+    def daemon_jar(self, with_notices=True) -> Path:
+        files = {"dev/brewery/daemon/MainKt.class": b"x"}
+        if with_notices:
+            files["THIRD-PARTY-NOTICES.txt"] = b"Third-party notices for the dependencies\n"
+        jar = self.tmp / "brewery-daemon-all.jar"
+        jar.write_bytes(make_zip(files))
+        return jar
+
+    def test_every_component_gets_its_licence_and_an_index(self):
+        bundle = self.build(steps=[self.fake_jre, fbd.collect_licenses], daemon_jar=self.daemon_jar())
+        lic = bundle / "licenses"
+        self.assertEqual((lic / "jre" / "LICENSE").read_text(encoding="utf-8"), "GPLv2 text\n")
+        self.assertTrue((lic / "jre" / "ASSEMBLY_EXCEPTION").is_file())
+        self.assertTrue((lic / "jre" / "ADDITIONAL_LICENSE_INFO").is_file())
+        source = (lic / "jre" / "SOURCE.txt").read_text(encoding="utf-8")
+        self.assertIn("https://example.invalid/adoptium/jdk-sources.tar.gz", source)
+        self.assertIn("https://example.invalid/adoptium/tree/jdk-21+1", source)
+        self.assertEqual((lic / "jdtls" / "LICENSE").read_text(encoding="utf-8"), "EPL-2.0 text\n")
+        self.assertEqual((lic / "java-debug" / "LICENSE").read_text(encoding="utf-8"), "EPL-1.0 text\n")
+        self.assertEqual((lic / "lombok" / "LICENSE").read_bytes(), b"lombok MIT text")
+        self.assertEqual(
+            (lic / "java-lsp-proxy" / "LICENSE").read_text(encoding="utf-8"), "Apache-2.0 text\n"
+        )
+        self.assertEqual(
+            (lic / "java-extension" / "LICENSE").read_text(encoding="utf-8"), "Apache-2.0 text\n"
+        )
+        self.assertIn(
+            b"Third-party notices",
+            (lic / "brewery-daemon" / "THIRD-PARTY-NOTICES.txt").read_bytes(),
+        )
+        index = (lic / "README.txt").read_text(encoding="utf-8")
+        for name, version, license in (
+            ("jre", "21+1", "GPL-2.0-only WITH Classpath-exception-2.0"),
+            ("jdtls", "1.0", "EPL-2.0"),
+            ("lombok", "1.0", "MIT"),
+            ("java-debug", "0.1", "EPL-1.0"),
+            ("java-lsp-proxy", "v1", "Apache-2.0"),
+            ("java-extension", "1.0", "Apache-2.0"),
+        ):
+            self.assertRegex(index, rf"(?m)^{re.escape(name)} {re.escape(version)}$")
+            self.assertIn(license, index)
+        self.assertIn("brewery-daemon", index)
+
+    def test_without_daemon_jar_there_are_no_daemon_notices(self):
+        bundle = self.build(steps=[self.fake_jre, fbd.collect_licenses])
+        self.assertFalse((bundle / "licenses" / "brewery-daemon").exists())
+
+    def test_daemon_jar_without_notices_is_an_error(self):
+        with self.assertRaisesRegex(fbd.FetchError, "THIRD-PARTY-NOTICES"):
+            self.build(steps=[self.fake_jre, fbd.collect_licenses], daemon_jar=self.daemon_jar(False))
+
+    def test_missing_jre_legal_is_an_error(self):
+        with self.assertRaisesRegex(fbd.FetchError, "legal"):
+            self.build(steps=[fbd.collect_licenses])
+
+    def test_artifact_without_licence_source_is_an_error(self):
+        text = self.deps_path.read_text(encoding="utf-8").replace(
+            'license_file = "licenses/java-debug.txt"\n', ""
+        )
+        self.deps_path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(fbd.FetchError, "java-debug"):
+            self.build(steps=[self.fake_jre, fbd.collect_licenses])
+
+    def test_real_deps_name_a_licence_for_every_artifact(self):
+        deps = fbd.load_deps(REAL_DEPS)
+        for target in deps.targets:
+            for art in fbd.select(deps, target):
+                sources = [s for s in (art.license_file, art.license_member, art.license_dir) if s]
+                self.assertEqual(len(sources), 1, art.name)
+                if art.license_file:
+                    path = REAL_DEPS.parent / art.license_file
+                    self.assertTrue(path.is_file(), path)
+                    self.assertNotIn(b"\r", path.read_bytes())
+        jdk = fbd.select(deps, "linux-x64")[0]
+        self.assertEqual(jdk.name, "jdk")
+        self.assertTrue(jdk.source_code.startswith("https://"))
+        self.assertTrue(jdk.source_tag.startswith("https://"))
+
+
 class CliTest(BundleFixture):
+    def setUp(self):
+        super().setUp()
+        # The fixture JDK is fake: the CLI tests cover argument handling, not jlink.
+        patcher = mock.patch.object(fbd, "DEFAULT_STEPS", ())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_main_builds_requested_target(self):
         code = fbd.main(
             [
