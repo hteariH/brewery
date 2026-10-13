@@ -107,8 +107,8 @@ fn children(dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Walks the documented search order: `BREWERY_DAEMON_JAVA`, `JAVA_HOME`, `java` on
-/// PATH, `~/.jdks/*`, then the platform's usual install directories. Lazy, so slower
+/// Walks the documented search order: `BREWERY_DAEMON_JAVA`, the JRE bundled with
+/// Brewery, `JAVA_HOME`, `java` on PATH, `~/.jdks/*`, then the platform's usual install directories. Lazy, so slower
 /// sources are only read when earlier ones did not qualify.
 pub fn find_java(min_major: u32) -> Result<PathBuf> {
     find_java_in(min_major, |name| std::env::var_os(name))
@@ -132,6 +132,14 @@ pub fn find_java_with_env(min_major: u32, env: &HashMap<String, String>) -> Resu
 }
 
 fn find_java_in(min_major: u32, var: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf> {
+    find_java_in_bundle(min_major, var, brewery_bundle::bundled_jre_home())
+}
+
+fn find_java_in_bundle(
+    min_major: u32,
+    var: impl Fn(&str) -> Option<OsString>,
+    bundled_jre: Option<PathBuf>,
+) -> Result<PathBuf> {
     let mut rejected: Vec<JdkCandidate> = Vec::new();
     let mut consider = |candidate: Option<JdkCandidate>| -> Option<PathBuf> {
         let candidate = candidate?;
@@ -154,6 +162,11 @@ fn find_java_in(min_major: u32, var: impl Fn(&str) -> Option<OsString>) -> Resul
         if let Some(java) = consider(candidate) {
             return Ok(java);
         }
+    }
+    if let Some(home) = bundled_jre
+        && let Some(java) = consider(candidate_from_home(&home))
+    {
+        return Ok(java);
     }
     if let Some(value) = var("JAVA_HOME").filter(|v| !v.is_empty())
         && let Some(java) = consider(candidate_from_home(Path::new(&value)))
@@ -203,8 +216,9 @@ fn find_java_in(min_major: u32, var: impl Fn(&str) -> Option<OsString>) -> Resul
     )
 }
 
-/// Daemon jar: `BREWERY_DAEMON_JAR`, then next to the executable, then (development)
-/// the Gradle build output found by walking up from the executable.
+/// Daemon jar: `BREWERY_DAEMON_JAR`, then the bundled jar (flat, `libexec/` or macOS
+/// `.app` layout), then (development) the Gradle build output found by walking up from
+/// the executable.
 pub fn find_daemon_jar() -> Result<PathBuf> {
     if let Some(value) = std::env::var_os("BREWERY_DAEMON_JAR").filter(|v| !v.is_empty()) {
         let path = PathBuf::from(value);
@@ -217,19 +231,17 @@ pub fn find_daemon_jar() -> Result<PathBuf> {
         );
     }
     let exe = std::env::current_exe().context("cannot determine the executable path")?;
-    let exe_dir = exe.parent().context("executable has no parent directory")?;
-    find_daemon_jar_from(exe_dir).context(
+    find_daemon_jar_from(&exe).context(
         "brewery-daemon.jar not found (set BREWERY_DAEMON_JAR, or build it with \
         `./gradlew shadowJar` in brewery-daemon/)",
     )
 }
 
-fn find_daemon_jar_from(exe_dir: &Path) -> Option<PathBuf> {
-    let bundled = exe_dir.join("brewery-daemon").join("brewery-daemon.jar");
-    if bundled.is_file() {
+fn find_daemon_jar_from(exe: &Path) -> Option<PathBuf> {
+    if let Some(bundled) = brewery_bundle::bundled_daemon_jar_from_exe(exe) {
         return Some(bundled);
     }
-    exe_dir.ancestors().find_map(|dir| {
+    exe.parent()?.ancestors().find_map(|dir| {
         let dev = dir
             .join("brewery-daemon")
             .join("build")
@@ -330,13 +342,14 @@ mod tests {
         let root = std::env::temp_dir().join(format!("brewery-jar-test-{}", std::process::id()));
         let exe_dir = root.join("target").join("debug");
         std::fs::create_dir_all(&exe_dir).unwrap();
-        assert_eq!(find_daemon_jar_from(&exe_dir), None);
+        let exe = exe_dir.join("brewery.exe");
+        assert_eq!(find_daemon_jar_from(&exe), None);
 
         let dev = root.join("brewery-daemon").join("build").join("libs");
         std::fs::create_dir_all(&dev).unwrap();
         std::fs::write(dev.join("brewery-daemon-all.jar"), b"").unwrap();
         assert_eq!(
-            find_daemon_jar_from(&exe_dir),
+            find_daemon_jar_from(&exe),
             Some(dev.join("brewery-daemon-all.jar"))
         );
 
@@ -344,8 +357,72 @@ mod tests {
         std::fs::create_dir_all(&bundled).unwrap();
         std::fs::write(bundled.join("brewery-daemon.jar"), b"").unwrap();
         assert_eq!(
-            find_daemon_jar_from(&exe_dir),
+            find_daemon_jar_from(&exe),
             Some(bundled.join("brewery-daemon.jar"))
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn jar_lookup_finds_the_jar_in_linux_and_macos_layouts() {
+        let root = std::env::temp_dir().join(format!("brewery-jar-layouts-{}", std::process::id()));
+        let linux = root.join("opt").join("brewery");
+        let linux_jar = linux.join("brewery-daemon").join("brewery-daemon.jar");
+        let mac = root.join("Brewery.app").join("Contents");
+        let mac_jar = mac
+            .join("Resources")
+            .join("brewery-daemon")
+            .join("brewery-daemon.jar");
+        for jar in [&linux_jar, &mac_jar] {
+            std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+            std::fs::write(jar, b"").unwrap();
+        }
+        assert_eq!(
+            find_daemon_jar_from(&linux.join("libexec").join("brewery-editor")),
+            Some(linux_jar)
+        );
+        assert_eq!(
+            find_daemon_jar_from(&mac.join("MacOS").join("zed")),
+            Some(mac_jar)
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bundled_jre_beats_java_home() {
+        let root = std::env::temp_dir().join(format!("brewery-bundled-jre-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let bundled = fake_jdk(&root, "jre", "21.0.5");
+        let system = fake_jdk(&root, "system", "23.0.1");
+        let env = HashMap::from([(
+            "JAVA_HOME".to_string(),
+            system.to_string_lossy().into_owned(),
+        )]);
+        let lookup = |name: &str| env.get(name).map(OsString::from);
+
+        assert_eq!(
+            find_java_in_bundle(21, lookup, Some(bundled.clone())).unwrap(),
+            bundled.join("bin").join(java_exe_name())
+        );
+        // Without a bundle, or with one that is too old, JAVA_HOME is used.
+        assert_eq!(
+            find_java_in_bundle(21, lookup, None).unwrap(),
+            system.join("bin").join(java_exe_name())
+        );
+        let old = fake_jdk(&root, "old-jre", "17.0.1");
+        assert_eq!(
+            find_java_in_bundle(21, lookup, Some(old)).unwrap(),
+            system.join("bin").join(java_exe_name())
+        );
+        // An explicit BREWERY_DAEMON_JAVA still wins over the bundle.
+        let explicit = fake_jdk(&root, "explicit", "22.0.0");
+        let env = HashMap::from([(
+            "BREWERY_DAEMON_JAVA".to_string(),
+            explicit.to_string_lossy().into_owned(),
+        )]);
+        assert_eq!(
+            find_java_in_bundle(21, |n| env.get(n).map(OsString::from), Some(bundled)).unwrap(),
+            explicit.join("bin").join(java_exe_name())
         );
         std::fs::remove_dir_all(&root).ok();
     }
