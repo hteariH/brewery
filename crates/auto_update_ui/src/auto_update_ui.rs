@@ -1,4 +1,4 @@
-use auto_update::{AutoUpdater, release_notes_url};
+use auto_update::{AutoUpdater, brewery_update, release_notes_url};
 use db::kvp::Dismissable;
 use editor::{Editor, MultiBuffer};
 use gpui::{
@@ -34,6 +34,7 @@ actions!(
 
 pub fn init(cx: &mut App) {
     notify_if_app_was_updated(cx);
+    notify_when_update_is_available(cx);
     cx.observe_new(|workspace: &mut Workspace, _window, cx| {
         workspace.register_action(|workspace, _: &ViewReleaseNotesLocally, window, cx| {
             view_release_notes_locally(workspace, window, cx);
@@ -93,10 +94,13 @@ fn view_release_notes_locally(
 ) {
     let release_channel = ReleaseChannel::global(cx);
 
-    if matches!(
-        release_channel,
-        ReleaseChannel::Nightly | ReleaseChannel::Dev
-    ) {
+    // brewery: release notes live on GitHub Releases; there is no notes API to render locally
+    if brewery_update::RELEASE_NOTES_IN_BROWSER
+        || matches!(
+            release_channel,
+            ReleaseChannel::Nightly | ReleaseChannel::Dev
+        )
+    {
         if let Some(url) = release_notes_url(cx) {
             cx.open_url(&url);
         }
@@ -203,7 +207,9 @@ impl Dismissable for DeltaAnnouncement {
 
 fn announcement_for_version(version: &Version, cx: &App) -> Option<AnnouncementContent> {
     let version_with_delta = Version::new(1, 22, 0);
-    if *version < version_with_delta
+    // brewery: Zed's product announcements never show in Brewery
+    if !brewery_update::SHOW_ZED_ANNOUNCEMENTS
+        || *version < version_with_delta
         || DisableAiSettings::get_global(cx).disable_ai
         || DeltaAnnouncement::dismissed(cx)
     {
@@ -341,6 +347,52 @@ fn show_update_notification(cx: &mut App) {
     }
 }
 
+// brewery: Linux and macOS are told about a newer Brewery release instead of installing it
+struct UpdateAvailableNotification;
+
+fn notify_when_update_is_available(cx: &mut App) {
+    let Some(updater) = AutoUpdater::get(cx) else {
+        return;
+    };
+    let mut last_shown_seq = 0;
+    cx.observe(&updater, move |updater, cx| {
+        let Some((seq, update)) = updater.read(cx).available_update() else {
+            return;
+        };
+        if seq == last_shown_seq {
+            return;
+        }
+        last_shown_seq = seq;
+        show_update_available_notification(update, cx);
+    })
+    .detach();
+}
+
+fn show_update_available_notification(update: brewery_update::AvailableUpdate, cx: &mut App) {
+    let title = brewery_update::available_update_title(&update.version);
+    let message = brewery_update::available_update_message(std::env::consts::OS);
+    let notes_url = update.notes_url;
+    show_app_notification(
+        NotificationId::unique::<UpdateAvailableNotification>(),
+        cx,
+        move |cx| {
+            let notes_url = notes_url.clone();
+            cx.new(|cx| {
+                MessageNotification::new(message, cx)
+                    .with_title(title.clone())
+                    .primary_message("Release notes")
+                    .primary_on_click(move |_window, cx| {
+                        cx.open_url(&notes_url);
+                        cx.emit(DismissEvent);
+                    })
+                    .secondary_message("Dismiss")
+                    .secondary_on_click(|_window, cx| cx.emit(DismissEvent))
+                    .show_suppress_button(false)
+            })
+        },
+    );
+}
+
 /// Shows a notification across all workspaces if an update was previously automatically installed
 /// and this notification had not yet been shown.
 pub fn notify_if_app_was_updated(cx: &mut App) {
@@ -370,4 +422,23 @@ pub fn notify_if_app_was_updated(cx: &mut App) {
         anyhow::Ok(())
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // brewery: the Delta announcement must not fire, even with AI features switched on
+    #[gpui::test]
+    fn test_zed_announcement_never_shows(cx: &mut App) {
+        // `disable_ai` saturates, so switch it off in the defaults themselves.
+        let defaults =
+            settings::default_settings().replace("\"disable_ai\": true", "\"disable_ai\": false");
+        assert_ne!(defaults, settings::default_settings());
+        let store = settings::SettingsStore::new(cx, &defaults);
+        cx.set_global(store);
+        cx.set_global(db::AppDatabase::test_new());
+        assert!(!DisableAiSettings::get_global(cx).disable_ai);
+        assert!(announcement_for_version(&Version::new(99, 0, 0), cx).is_none());
+    }
 }

@@ -12,6 +12,8 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use smol::io::AsyncReadExt as _;
 
+use release_channel::ReleaseChannel;
+
 use crate::ReleaseAsset;
 
 /// The manifest of the newest non-draft, non-pre-release GitHub Release.
@@ -36,6 +38,71 @@ fn manifest_url_from(env_value: Option<String>) -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_MANIFEST_URL.to_string())
+}
+
+/// What Brewery does with a newer release on an OS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateAction {
+    /// Download and install it (Windows: the Inno installer and the update helper).
+    Install,
+    /// Only tell the user. Linux packages are managed by the package manager and the
+    /// macOS assets are zips Zed's dmg installer cannot apply.
+    Notify,
+}
+
+/// Windows installs updates; every other OS gets a notification.
+pub fn update_action_for_os(os: &str) -> UpdateAction {
+    match os {
+        "windows" => UpdateAction::Install,
+        _ => UpdateAction::Notify,
+    }
+}
+
+/// A newer release this build does not install itself (see [`UpdateAction::Notify`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AvailableUpdate {
+    pub version: Version,
+    pub notes_url: String,
+}
+
+/// The GitHub release page of a Brewery version.
+pub fn release_notes_url(version: &Version) -> String {
+    let mut version = version.clone();
+    version.build = semver::BuildMetadata::EMPTY;
+    format!("{}/releases/tag/v{version}", brewery_core::REPOSITORY_URL)
+}
+
+/// What "View Release Notes" opens on a channel.
+pub fn release_notes_url_for_channel(channel: ReleaseChannel, version: &Version) -> String {
+    match channel {
+        ReleaseChannel::Stable | ReleaseChannel::Preview => release_notes_url(version),
+        ReleaseChannel::Nightly | ReleaseChannel::Dev => {
+            format!("{}/commits/main/", brewery_core::REPOSITORY_URL)
+        }
+    }
+}
+
+/// Zed's product announcements (e.g. Delta) are not Brewery's to make.
+pub const SHOW_ZED_ANNOUNCEMENTS: bool = false;
+
+/// Release notes open the GitHub release page; Zed's notes API is not used.
+pub const RELEASE_NOTES_IN_BROWSER: bool = true;
+
+/// Linux builds point at the package manager first.
+pub const LINUX_UPDATE_HINT: &str =
+    "Update Brewery with your package manager or from GitHub Releases.";
+
+/// Headline of the "update available" notification.
+pub fn available_update_title(version: &Version) -> String {
+    format!("Brewery {version} is available")
+}
+
+/// Body of the "update available" notification on an OS.
+pub fn available_update_message(os: &str) -> &'static str {
+    match os {
+        "linux" => LINUX_UPDATE_HINT,
+        _ => "Download it from GitHub Releases.",
+    }
 }
 
 /// `latest.json`. Unknown keys are ignored.
@@ -114,6 +181,7 @@ pub fn select_release(
         version: manifest.version.clone(),
         url: asset.url.clone(),
         sha256: asset.sha256.clone(),
+        notes_url: manifest.notes_url.clone(),
     })
 }
 
@@ -260,6 +328,56 @@ mod tests {
 
         let release = select_release(&manifest, "linux", "x86_64", &v("0.1.0")).unwrap();
         assert_eq!(release.sha256, None);
+        assert_eq!(
+            release.notes_url.as_deref(),
+            Some("https://github.com/hteariH/brewery/releases/tag/v0.1.1")
+        );
+    }
+
+    #[test]
+    fn test_only_windows_installs_updates() {
+        assert_eq!(update_action_for_os("windows"), UpdateAction::Install);
+        assert_eq!(update_action_for_os("linux"), UpdateAction::Notify);
+        assert_eq!(update_action_for_os("macos"), UpdateAction::Notify);
+        assert_eq!(update_action_for_os("freebsd"), UpdateAction::Notify);
+    }
+
+    #[test]
+    fn test_release_notes_urls() {
+        assert_eq!(
+            release_notes_url(&v("0.1.1")),
+            "https://github.com/hteariH/brewery/releases/tag/v0.1.1"
+        );
+        for channel in [ReleaseChannel::Stable, ReleaseChannel::Preview] {
+            assert_eq!(
+                release_notes_url_for_channel(channel, &v("0.2.0-rc.1+abc")),
+                "https://github.com/hteariH/brewery/releases/tag/v0.2.0-rc.1",
+                "{channel:?}"
+            );
+        }
+        for channel in [ReleaseChannel::Nightly, ReleaseChannel::Dev] {
+            assert_eq!(
+                release_notes_url_for_channel(channel, &v("0.1.0")),
+                "https://github.com/hteariH/brewery/commits/main/",
+                "{channel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_available_update_texts() {
+        assert_eq!(
+            available_update_title(&v("0.1.1")),
+            "Brewery 0.1.1 is available"
+        );
+        assert_eq!(
+            available_update_message("linux"),
+            "Update Brewery with your package manager or from GitHub Releases."
+        );
+        assert_eq!(
+            available_update_message("macos"),
+            "Download it from GitHub Releases."
+        );
     }
 
     #[test]

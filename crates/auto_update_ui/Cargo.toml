@@ -10,7 +10,6 @@ workspace = true
 
 [lib]
 path = "src/auto_update_ui.rs"
-test = false
 doctest = false
 
 [dependencies]
@@ -33,3 +32,8 @@ ui.workspace = true
 util.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
+
+[dev-dependencies]
+db = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }

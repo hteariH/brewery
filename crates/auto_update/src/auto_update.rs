@@ -190,6 +190,10 @@ pub struct AutoUpdater {
     update_check_type: UpdateCheckType,
     _wake_subscription: gpui::Subscription,
     dismissed_status: Option<AutoUpdateStatus>,
+    // brewery: a newer release this OS is only told about, and a counter the UI
+    // uses to show its notification once per new version or manual check
+    available_update: Option<brewery_update::AvailableUpdate>,
+    available_update_seq: u64,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -199,6 +203,9 @@ pub struct ReleaseAsset {
     // brewery: checksum from the GitHub Releases manifest, verified after download
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    // brewery: release page from the manifest
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes_url: Option<String>,
 }
 
 struct MacOsUnmounter<'a> {
@@ -280,7 +287,10 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
     })
     .detach();
 
-    let version = release_channel::AppVersion::global(cx);
+    // brewery: compare against Brewery's own version, not Zed's AppVersion, and read
+    // the manifest URL override at startup
+    let version = brewery_core::brewery_version();
+    let _ = brewery_update::manifest_url();
     let auto_updater = cx.new(|cx| {
         let updater = AutoUpdater::new(version, client, cx);
 
@@ -320,7 +330,8 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            // brewery: product name
+            "Brewery was installed via a package manager.",
             Some(&message),
             &["OK"],
             cx,
@@ -350,23 +361,14 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
 
 pub fn release_notes_url(cx: &mut App) -> Option<String> {
     let release_channel = ReleaseChannel::try_global(cx)?;
-    let url = match release_channel {
-        ReleaseChannel::Stable | ReleaseChannel::Preview => {
-            let auto_updater = AutoUpdater::get(cx)?;
-            let auto_updater = auto_updater.read(cx);
-            let mut current_version = auto_updater.current_version.clone();
-            current_version.pre = semver::Prerelease::EMPTY;
-            current_version.build = semver::BuildMetadata::EMPTY;
-            let release_channel = release_channel.dev_name();
-            let path = format!("/releases/{release_channel}/{current_version}");
-            auto_updater.client.http_client().build_url(&path)
-        }
-        ReleaseChannel::Nightly => {
-            "https://github.com/zed-industries/zed/commits/nightly/".to_string()
-        }
-        ReleaseChannel::Dev => "https://github.com/zed-industries/zed/commits/main/".to_string(),
-    };
-    Some(url)
+    // brewery: Brewery's GitHub release page for the running Brewery version
+    let current_version = AutoUpdater::get(cx)
+        .map(|updater| updater.read(cx).current_version.clone())
+        .unwrap_or_else(brewery_core::brewery_version);
+    Some(brewery_update::release_notes_url_for_channel(
+        release_channel,
+        &current_version,
+    ))
 }
 
 pub fn view_release_notes(_: &ViewReleaseNotes, cx: &mut App) -> Option<()> {
@@ -474,6 +476,8 @@ impl AutoUpdater {
             update_check_type: UpdateCheckType::Automatic,
             _wake_subscription: wake_subscription,
             dismissed_status: None,
+            available_update: None,
+            available_update_seq: 0,
         }
     }
 
@@ -579,6 +583,24 @@ impl AutoUpdater {
 
     pub fn status(&self) -> AutoUpdateStatus {
         self.status.clone()
+    }
+
+    /// brewery: the newer release this OS only notifies about, with a counter that
+    /// grows when the UI should show it (new version or manual check).
+    pub fn available_update(&self) -> Option<(u64, brewery_update::AvailableUpdate)> {
+        self.available_update
+            .clone()
+            .map(|update| (self.available_update_seq, update))
+    }
+
+    // brewery: Windows installs; Linux and macOS only notify (tests may override)
+    fn update_action(cx: &AsyncApp) -> brewery_update::UpdateAction {
+        #[cfg(test)]
+        if let Some(action) = cx.try_read_global::<tests::UpdateActionOverride, _>(|g, _| g.0) {
+            return action;
+        }
+        let _ = cx;
+        brewery_update::update_action_for_os(OS)
     }
 
     pub fn dismissed_status(&self) -> Option<AutoUpdateStatus> {
@@ -767,7 +789,11 @@ impl AutoUpdater {
                 )
             });
 
-        Self::check_dependencies()?;
+        // brewery: rsync is only needed to install, and only Windows installs
+        let update_action = Self::update_action(cx);
+        if update_action == brewery_update::UpdateAction::Install {
+            Self::check_dependencies()?;
+        }
 
         this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Checking;
@@ -822,6 +848,30 @@ impl AutoUpdater {
             });
             return Ok(());
         };
+
+        // brewery: Linux and macOS record the release for a notification instead of
+        // downloading it (package-managed installs; macOS assets are not dmgs)
+        if update_action == brewery_update::UpdateAction::Notify {
+            let notes_url = fetched_release_data
+                .notes_url
+                .clone()
+                .unwrap_or_else(|| brewery_update::release_notes_url(&newer_version));
+            this.update(cx, |this, cx| {
+                let update = brewery_update::AvailableUpdate {
+                    version: newer_version,
+                    notes_url,
+                };
+                if this.update_check_type.is_manual()
+                    || this.available_update.as_ref() != Some(&update)
+                {
+                    this.available_update_seq += 1;
+                }
+                this.available_update = Some(update);
+                this.status = AutoUpdateStatus::Idle;
+                cx.notify();
+            });
+            return Ok(());
+        }
 
         this.update(cx, |this, cx| {
             this.status = AutoUpdateStatus::Downloading {
@@ -1427,6 +1477,26 @@ mod tests {
     pub(super) struct InstallOverride(pub Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>>);
     impl Global for InstallOverride {}
 
+    // brewery: lets one test binary exercise both the Windows and the Linux/macOS path
+    pub(super) struct UpdateActionOverride(pub brewery_update::UpdateAction);
+    impl Global for UpdateActionOverride {}
+
+    // brewery: Stable polls at startup now; tests drive their checks by hand instead
+    fn disable_automatic_checks(cx: &mut App) {
+        use gpui::BorrowAppContext as _;
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store
+                .set_user_settings(r#"{ "auto_update": false }"#, cx)
+                .unwrap();
+        });
+    }
+
+    // brewery: the next patch release after the running Brewery version
+    fn next_brewery_version() -> semver::Version {
+        let current = brewery_core::brewery_version();
+        semver::Version::new(current.major, current.minor, current.patch + 1)
+    }
+
     #[gpui::test]
     fn test_auto_update_defaults_to_true(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -1455,6 +1525,9 @@ mod tests {
 
             let current_version = semver::Version::new(0, 100, 0);
             release_channel::init_test(current_version, ReleaseChannel::Stable, cx);
+            // brewery: the install path runs on Windows; force it on every OS here
+            cx.set_global(UpdateActionOverride(brewery_update::UpdateAction::Install));
+            disable_automatic_checks(cx);
 
             let clock = Arc::new(FakeSystemClock::new());
             let release_available = Arc::clone(&release_available);
@@ -1467,12 +1540,14 @@ mod tests {
                 if *req.uri() == *brewery_update::DEFAULT_MANIFEST_URL {
                     let key = brewery_update::platform_key(OS, ARCH).unwrap();
                     if release_available {
+                        let newer = next_brewery_version();
                         return Ok(Response::builder().status(200).body(
-                            format!(r#"{{"version":"0.100.1","assets":{{"{key}":{{"url":"https://test.example/new-download","sha256":"8db332cc94a1b4c638f6a6a30296ed6481ad6f0f187158e23127a27e7807e96c"}}}}}}"#).into()
+                            format!(r#"{{"version":"{newer}","assets":{{"{key}":{{"url":"https://test.example/new-download","sha256":"8db332cc94a1b4c638f6a6a30296ed6481ad6f0f187158e23127a27e7807e96c"}}}}}}"#).into()
                         ).unwrap());
                     } else {
+                        let current = brewery_core::BREWERY_VERSION;
                         return Ok(Response::builder().status(200).body(
-                            format!(r#"{{"version":"0.100.0","assets":{{"{key}":{{"url":"https://test.example/old-download"}}}}}}"#).into()
+                            format!(r#"{{"version":"{current}","assets":{{"{key}":{{"url":"https://test.example/old-download"}}}}}}"#).into()
                         ).unwrap());
                     }
                 } else if req.uri().path() == "/new-download" {
@@ -1498,7 +1573,8 @@ mod tests {
 
         auto_updater.read_with(cx, |updater, _| {
             assert_eq!(updater.status(), AutoUpdateStatus::Idle);
-            assert_eq!(updater.current_version(), semver::Version::new(0, 100, 0));
+            // brewery: BREWERY_VERSION, not Zed's AppVersion (0.100.0 here)
+            assert_eq!(updater.current_version(), brewery_core::brewery_version());
         });
 
         release_available.store(true, atomic::Ordering::SeqCst);
@@ -1517,7 +1593,7 @@ mod tests {
         assert_eq!(
             status,
             AutoUpdateStatus::Downloading {
-                version: semver::Version::new(0, 100, 1),
+                version: next_brewery_version(),
                 progress: None,
             }
         );
@@ -1548,7 +1624,7 @@ mod tests {
         assert_eq!(
             status,
             AutoUpdateStatus::Updated {
-                version: semver::Version::new(0, 100, 1)
+                version: next_brewery_version()
             }
         );
         let will_restart = cx.expect_restart();
@@ -1587,6 +1663,7 @@ mod tests {
             version: "1.0.0".to_string(),
             url: "https://test.example/download".to_string(),
             sha256: None,
+            notes_url: None,
         };
 
         let reported = Rc::new(std::cell::RefCell::new(Vec::<f32>::new()));
@@ -1648,6 +1725,7 @@ mod tests {
             version: "1.0.0".to_string(),
             url: "https://test.example/download".to_string(),
             sha256: None,
+            notes_url: None,
         };
 
         let reported = Rc::new(std::cell::RefCell::new(Vec::<Option<f32>>::new()));
@@ -1687,6 +1765,7 @@ mod tests {
             sha256: Some(
                 "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4".to_string(),
             ),
+            notes_url: None,
         };
         download_release(&target_path, good, client.clone(), |_| {})
             .await
@@ -1697,6 +1776,7 @@ mod tests {
             version: "0.1.1".to_string(),
             url: "https://test.example/download".to_string(),
             sha256: Some("0".repeat(64)),
+            notes_url: None,
         };
         let error = download_release(&target_path, bad, client, |_| {})
             .await
@@ -1721,6 +1801,8 @@ mod tests {
                 ReleaseChannel::Stable,
                 cx,
             );
+            // brewery: no startup manifest check, so every request below is the lookup's
+            disable_automatic_checks(cx);
             let requested = requested.clone();
             let fake_client_http = FakeHttpClient::create(move |req| {
                 requested.lock().push(req.uri().to_string());
@@ -1768,6 +1850,104 @@ mod tests {
                 .all(|uri| !uri.contains("github.com")),
             "{:?}",
             requested.lock()
+        );
+    }
+
+    // brewery: on Linux and macOS a newer manifest becomes a notification, not a download
+    #[gpui::test]
+    async fn test_newer_release_notifies_instead_of_installing(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let requested = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let newer = next_brewery_version();
+
+        cx.update(|cx| {
+            settings::init(cx);
+            release_channel::init_test(
+                semver::Version::new(0, 100, 0),
+                ReleaseChannel::Stable,
+                cx,
+            );
+            cx.set_global(UpdateActionOverride(brewery_update::UpdateAction::Notify));
+            disable_automatic_checks(cx);
+            let requested = requested.clone();
+            let newer = newer.clone();
+            let fake_client_http = FakeHttpClient::create(move |req| {
+                requested.lock().push(req.uri().to_string());
+                let is_manifest = *req.uri() == *brewery_update::DEFAULT_MANIFEST_URL;
+                let key = brewery_update::platform_key(OS, ARCH).unwrap();
+                let body = format!(
+                    r#"{{"version":"{newer}","notes_url":"https://github.com/hteariH/brewery/releases/tag/v{newer}","assets":{{"{key}":{{"url":"https://test.example/new-download"}}}}}}"#
+                );
+                async move {
+                    if is_manifest {
+                        return Ok(Response::builder().status(200).body(body.into()).unwrap());
+                    }
+                    Ok(Response::builder().status(404).body("".into()).unwrap())
+                }
+            });
+            let client = Client::new(Arc::new(FakeSystemClock::new()), fake_client_http, cx);
+            crate::init(client, cx);
+        });
+        let auto_updater = cx.update(|cx| AutoUpdater::get(cx).expect("auto updater should exist"));
+        cx.background_executor.run_until_parked();
+        auto_updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.available_update(), None)
+        });
+
+        auto_updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
+        cx.background_executor.run_until_parked();
+        let expected = brewery_update::AvailableUpdate {
+            version: newer.clone(),
+            notes_url: format!("https://github.com/hteariH/brewery/releases/tag/v{newer}"),
+        };
+        let first_seq = auto_updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+            let (seq, update) = updater
+                .available_update()
+                .expect("update should be available");
+            assert_eq!(update, expected);
+            seq
+        });
+
+        // Another automatic check of the same version does not show it again ...
+        auto_updater.update(cx, |updater, cx| {
+            updater.poll(UpdateCheckType::Automatic, cx)
+        });
+        cx.background_executor.run_until_parked();
+        auto_updater.read_with(cx, |updater, _| {
+            assert_eq!(
+                updater.available_update(),
+                Some((first_seq, expected.clone()))
+            );
+        });
+
+        // ... a manual check does.
+        auto_updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
+        cx.background_executor.run_until_parked();
+        auto_updater.read_with(cx, |updater, _| {
+            assert_eq!(updater.status(), AutoUpdateStatus::Idle);
+            assert_eq!(
+                updater.available_update(),
+                Some((first_seq + 1, expected.clone()))
+            );
+        });
+
+        assert!(
+            requested
+                .lock()
+                .iter()
+                .all(|uri| uri == brewery_update::DEFAULT_MANIFEST_URL),
+            "nothing but the manifest may be fetched: {:?}",
+            requested.lock()
+        );
+
+        let notes_url = cx.update(|cx| release_notes_url(cx));
+        assert_eq!(
+            notes_url,
+            Some(format!(
+                "https://github.com/hteariH/brewery/releases/tag/v{}",
+                brewery_core::BREWERY_VERSION
+            ))
         );
     }
 

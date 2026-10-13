@@ -200,8 +200,9 @@ impl ReleaseChannel {
 
     /// Returns whether we want to poll for updates for this [`ReleaseChannel`]
     pub fn poll_for_updates(&self) -> bool {
-        // brewery: never poll Zed's update server; M6 switches to GitHub Releases
-        false
+        // brewery: Stable and Preview poll Brewery's GitHub Releases manifest (never Zed's
+        // server); Windows installs, Linux and macOS only notify (see auto_update)
+        matches!(self, ReleaseChannel::Stable | ReleaseChannel::Preview)
     }
 
     /// Returns the display name for this [`ReleaseChannel`].
@@ -308,12 +309,14 @@ mod tests {
         );
     }
 
-    // brewery: Zed's update server ships Zed, not Brewery
+    // brewery: Stable and Preview poll Brewery's GitHub Releases manifest on every OS
+    // (Windows installs, Linux and macOS only notify); Dev and Nightly never poll.
     #[test]
-    fn test_brewery_never_polls_zed_updates() {
-        for channel in ReleaseChannel::ALL {
-            assert!(!channel.poll_for_updates(), "{channel:?} polls for updates");
-        }
+    fn test_brewery_polls_stable_and_preview_only() {
+        assert!(ReleaseChannel::Stable.poll_for_updates());
+        assert!(ReleaseChannel::Preview.poll_for_updates());
+        assert!(!ReleaseChannel::Nightly.poll_for_updates());
+        assert!(!ReleaseChannel::Dev.poll_for_updates());
     }
 
     // brewery: identity guard against upstream merges

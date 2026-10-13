@@ -15,7 +15,8 @@ fn test_brewery_cloud_defaults_are_off() {
     assert_eq!(d["telemetry"]["diagnostics"], off);
     assert_eq!(d["telemetry"]["metrics"], off);
     assert_eq!(d["disable_ai"], Value::Bool(true));
-    assert_eq!(d["auto_update"], off);
+    // brewery: updates come from Brewery's GitHub Releases, not Zed's cloud
+    assert_eq!(d["auto_update"], Value::Bool(true));
     assert_eq!(d["collaboration_panel"]["button"], off);
     assert_eq!(d["title_bar"]["show_sign_in"], off);
     assert_eq!(d["title_bar"]["show_user_menu"], off);
