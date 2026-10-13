@@ -1,0 +1,22 @@
+{
+  "version": "0.1.1",
+  "notes_url": "https://github.com/hteariH/brewery/releases/tag/v0.1.1",
+  "published_at": "2026-10-13T00:00:00Z",
+  "assets": {
+    "windows-x86_64": {
+      "url": "https://github.com/hteariH/brewery/releases/download/v0.1.1/Brewery-0.1.1-x86_64-setup.exe",
+      "sha256": "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
+      "size": 123
+    },
+    "linux-x86_64": {
+      "url": "https://github.com/hteariH/brewery/releases/download/v0.1.1/brewery-linux-x86_64.tar.gz"
+    },
+    "linux-aarch64": {
+      "url": "https://github.com/hteariH/brewery/releases/download/v0.1.1/brewery-linux-aarch64.tar.gz",
+      "sha256": "8F434346648F6B96DF89DDA901C5176B10A6D83961DD3C1AC88B59B2DC327AA4"
+    },
+    "macos-aarch64": {
+      "url": "https://github.com/hteariH/brewery/releases/download/v0.1.1/Brewery-aarch64.zip"
+    }
+  }
+}

@@ -32,6 +32,9 @@ use std::{
 use util::command::new_command;
 use workspace::Workspace;
 
+// brewery: app updates from GitHub Releases
+pub mod brewery_update;
+
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
 
 #[derive(Debug)]
@@ -193,6 +196,9 @@ pub struct AutoUpdater {
 pub struct ReleaseAsset {
     pub version: String,
     pub url: String,
+    // brewery: checksum from the GitHub Releases manifest, verified after download
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 struct MacOsUnmounter<'a> {
@@ -685,6 +691,19 @@ impl AutoUpdater {
     ) -> Result<ReleaseAsset> {
         let client = this.read_with(cx, |this, _| this.client.clone());
 
+        // brewery: the app updates from the GitHub Releases manifest (no telemetry);
+        // the SSH remote server ("zed-remote-server") stays on Zed's cloud.
+        if asset == "zed" {
+            return brewery_update::get_app_release_asset(
+                client.http_client().as_ref(),
+                brewery_update::manifest_url(),
+                os,
+                arch,
+                &brewery_core::brewery_version(),
+            )
+            .await;
+        }
+
         let (system_id, metrics_id, is_staff) = if client.telemetry().metrics_enabled() {
             (
                 client.telemetry().system_id(),
@@ -756,19 +775,39 @@ impl AutoUpdater {
             cx.notify();
         });
 
-        let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
-        let fetched_version = fetched_release_data.clone().version;
-        let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
-        let newer_version = Self::check_if_fetched_version_is_newer(
+        // brewery: a manifest without this platform's asset means "no update available"
+        let fetched_release_data = match Self::get_release_asset(
+            &this,
             release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version,
-            previous_status.clone(),
-        )?;
+            None,
+            "zed",
+            OS,
+            ARCH,
+            cx,
+        )
+        .await
+        {
+            Err(error) if error.is::<brewery_update::NoUpdateAvailable>() => None,
+            result => Some(result?),
+        };
+        let newer_release = match fetched_release_data {
+            Some(fetched_release_data) => {
+                let fetched_version = fetched_release_data.clone().version;
+                let app_commit_sha =
+                    Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
+                Self::check_if_fetched_version_is_newer(
+                    release_channel,
+                    app_commit_sha,
+                    installed_version,
+                    fetched_version,
+                    previous_status.clone(),
+                )?
+                .map(|newer_version| (fetched_release_data, newer_version))
+            }
+            None => None,
+        };
 
-        let Some(newer_version) = newer_version else {
+        let Some((fetched_release_data, newer_version)) = newer_release else {
             this.update(cx, |this, cx| {
                 this.status = match previous_status {
                     AutoUpdateStatus::Updated { .. } => previous_status,
@@ -1118,6 +1157,11 @@ async fn download_release(
         }
     }
     target_file.flush().await?;
+    // brewery: corruption guard; a mismatch deletes the file
+    drop(target_file);
+    if let Some(expected) = &release.sha256 {
+        brewery_update::verify_sha256(target_path, expected).await?;
+    }
     if total_bytes.is_some() && last_reported_percent != Some(100) {
         on_progress(Some(1.0));
     }
@@ -1419,14 +1463,16 @@ mod tests {
                 let release_available = release_available.load(atomic::Ordering::Relaxed);
                 let dmg_rx = dmg_rx.clone();
                 async move {
-                if req.uri().path() == "/releases/stable/latest/asset" {
+                // brewery: the app release comes from the GitHub Releases manifest
+                if *req.uri() == *brewery_update::DEFAULT_MANIFEST_URL {
+                    let key = brewery_update::platform_key(OS, ARCH).unwrap();
                     if release_available {
                         return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.1","url":"https://test.example/new-download"}"#.into()
+                            format!(r#"{{"version":"0.100.1","assets":{{"{key}":{{"url":"https://test.example/new-download","sha256":"8db332cc94a1b4c638f6a6a30296ed6481ad6f0f187158e23127a27e7807e96c"}}}}}}"#).into()
                         ).unwrap());
                     } else {
                         return Ok(Response::builder().status(200).body(
-                            r#"{"version":"0.100.0","url":"https://test.example/old-download"}"#.into()
+                            format!(r#"{{"version":"0.100.0","assets":{{"{key}":{{"url":"https://test.example/old-download"}}}}}}"#).into()
                         ).unwrap());
                     }
                 } else if req.uri().path() == "/new-download" {
@@ -1446,13 +1492,17 @@ mod tests {
 
         cx.background_executor.run_until_parked();
 
+        // brewery: drive checks manually; polling is switched on separately
+        auto_updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
+        cx.background_executor.run_until_parked();
+
         auto_updater.read_with(cx, |updater, _| {
             assert_eq!(updater.status(), AutoUpdateStatus::Idle);
             assert_eq!(updater.current_version(), semver::Version::new(0, 100, 0));
         });
 
         release_available.store(true, atomic::Ordering::SeqCst);
-        cx.background_executor.advance_clock(POLL_INTERVAL);
+        auto_updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
         cx.background_executor.run_until_parked();
 
         loop {
@@ -1536,6 +1586,7 @@ mod tests {
         let release = ReleaseAsset {
             version: "1.0.0".to_string(),
             url: "https://test.example/download".to_string(),
+            sha256: None,
         };
 
         let reported = Rc::new(std::cell::RefCell::new(Vec::<f32>::new()));
@@ -1596,6 +1647,7 @@ mod tests {
         let release = ReleaseAsset {
             version: "1.0.0".to_string(),
             url: "https://test.example/download".to_string(),
+            sha256: None,
         };
 
         let reported = Rc::new(std::cell::RefCell::new(Vec::<Option<f32>>::new()));
@@ -1616,6 +1668,107 @@ mod tests {
 
         let downloaded_len = std::fs::metadata(&target_path).unwrap().len();
         assert_eq!(downloaded_len, content_length as u64);
+    }
+
+    // brewery: SHA-256 from the manifest is checked after download
+    #[gpui::test]
+    async fn test_download_release_rejects_bad_sha256(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+
+        let client = FakeHttpClient::create(|_req| async move {
+            Ok(Response::builder().status(200).body("hi".into()).unwrap())
+        });
+        let temp_dir = tempdir().unwrap();
+        let target_path = temp_dir.path().join("Brewery-setup.exe");
+
+        let good = ReleaseAsset {
+            version: "0.1.1".to_string(),
+            url: "https://test.example/download".to_string(),
+            sha256: Some(
+                "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4".to_string(),
+            ),
+        };
+        download_release(&target_path, good, client.clone(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "hi");
+
+        let bad = ReleaseAsset {
+            version: "0.1.1".to_string(),
+            url: "https://test.example/download".to_string(),
+            sha256: Some("0".repeat(64)),
+        };
+        let error = download_release(&target_path, bad, client, |_| {})
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("SHA-256"), "{error:#}");
+        assert!(
+            !target_path.exists(),
+            "a file with a bad hash must be deleted"
+        );
+    }
+
+    // brewery: the SSH remote server still comes from Zed's cloud, with Zed's version
+    #[gpui::test]
+    async fn test_remote_server_release_stays_on_zed_cloud(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let requested = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+
+        cx.update(|cx| {
+            settings::init(cx);
+            release_channel::init_test(
+                semver::Version::new(0, 100, 0),
+                ReleaseChannel::Stable,
+                cx,
+            );
+            let requested = requested.clone();
+            let fake_client_http = FakeHttpClient::create(move |req| {
+                requested.lock().push(req.uri().to_string());
+                let path = req.uri().path().to_string();
+                let query = req.uri().query().unwrap_or_default().to_string();
+                async move {
+                    if path == "/releases/stable/0.100.0/asset"
+                        && query.contains("asset=zed-remote-server")
+                    {
+                        return Ok(Response::builder()
+                            .status(200)
+                            .body(
+                                r#"{"version":"0.100.0","url":"https://test.example/remote-server"}"#
+                                    .into(),
+                            )
+                            .unwrap());
+                    }
+                    Ok(Response::builder().status(404).body("".into()).unwrap())
+                }
+            });
+            let client = Client::new(Arc::new(FakeSystemClock::new()), fake_client_http, cx);
+            crate::init(client, cx);
+        });
+
+        let url = cx
+            .update(|cx| {
+                cx.spawn(async move |cx| {
+                    AutoUpdater::get_remote_server_release_url(
+                        ReleaseChannel::Stable,
+                        Some(semver::Version::new(0, 100, 0)),
+                        "linux",
+                        "x86_64",
+                        cx,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(url.as_deref(), Some("https://test.example/remote-server"));
+        assert!(
+            requested
+                .lock()
+                .iter()
+                .all(|uri| !uri.contains("github.com")),
+            "{:?}",
+            requested.lock()
+        );
     }
 
     #[test]

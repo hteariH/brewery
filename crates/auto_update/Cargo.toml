@@ -14,6 +14,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+brewery_core.workspace = true # brewery:
 client.workspace = true
 db.workspace = true
 futures-lite.workspace = true
@@ -26,6 +27,7 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
+sha2.workspace = true # brewery:
 smol.workspace = true
 tempfile.workspace = true
 util.workspace = true
@@ -37,6 +39,7 @@ which.workspace = true
 [dev-dependencies]
 ctor.workspace = true
 clock= { workspace = true, "features" = ["test-support"] }
+db = { workspace = true, features = ["test-support"] } # brewery: test_auto_update_downloads writes the KVP store
 futures.workspace = true
 gpui = { workspace = true, "features" = ["test-support"] }
 parking_lot.workspace = true
