@@ -44,6 +44,57 @@ class Introspector(private val connection: Connection, private val includeSystem
         }
     }
 
+    /**
+     * Every namespace with its tables, views and columns, for SQL completion. Metadata calls only: `getTables`
+     * and one `getColumns` per schema/catalog (not per table). At most [maxTables] tables and views are
+     * included, namespaces in name order, tables before views; the rest sets `truncated`.
+     */
+    fun snapshot(maxTables: Int): DbSchema {
+        val namespaces = if (depth == 0) listOf(emptyList()) else namespaces().map { it.path }
+        var remaining = maxTables
+        var truncated = false
+        val schemas = namespaces.map { ns ->
+            val found = tableList(ns)
+            val kept = found.take(remaining.coerceAtLeast(0))
+            if (kept.size < found.size) truncated = true
+            remaining -= kept.size
+            val columns = if (kept.isEmpty()) emptyMap() else allColumns(ns, kept.mapTo(HashSet()) { it.first })
+            SchemaInfo(ns.firstOrNull().orEmpty(), kept.map { (name, view) -> TableInfo(name, if (view) "view" else "table", columns[name].orEmpty()) })
+        }
+        return DbSchema(schemas, truncated)
+    }
+
+    /** Tables then views of [ns] by name, as (name, isView). */
+    private fun tableList(ns: List<String>): List<Pair<String, Boolean>> {
+        val tables = mutableListOf<String>()
+        val views = mutableListOf<String>()
+        meta.getTables(catalogOf(ns), schemaPatternOf(ns), null, tableTypes()).use { rs ->
+            while (rs.next()) {
+                if (!rs.inNamespace(ns)) continue
+                val name = rs.getString("TABLE_NAME") ?: continue
+                if (!includeSystem && dialect.isSystemTable(name)) continue
+                (if (rs.getString("TABLE_TYPE").orEmpty().endsWith("VIEW", ignoreCase = true)) views else tables) += name
+            }
+        }
+        return tables.sortedBy { it.lowercase() }.map { it to false } + views.sortedBy { it.lowercase() }.map { it to true }
+    }
+
+    /** The columns of all tables of [ns] named in [wanted] with a single `getColumns` call. */
+    private fun allColumns(ns: List<String>, wanted: Set<String>): Map<String, List<ColumnInfo>> {
+        val byTable = HashMap<String, MutableList<Pair<Int, ColumnInfo>>>()
+        meta.getColumns(catalogOf(ns), schemaPatternOf(ns), "%", "%").use { rs ->
+            while (rs.next()) {
+                if (!rs.inNamespace(ns)) continue
+                val table = rs.getString("TABLE_NAME") ?: continue
+                if (table !in wanted) continue
+                val name = rs.getString("COLUMN_NAME") ?: continue
+                val type = typeLabel(rs.getString("TYPE_NAME").orEmpty(), rs.getInt("DATA_TYPE"), rs.getInt("COLUMN_SIZE"), rs.getInt("DECIMAL_DIGITS"), rs.wasNull())
+                byTable.getOrPut(table) { mutableListOf() } += rs.getInt("ORDINAL_POSITION") to ColumnInfo(name, type)
+            }
+        }
+        return byTable.mapValues { (_, cols) -> cols.sortedBy { it.first }.map { it.second } }
+    }
+
     private fun namespaces(): List<DbNode> {
         val catalogs = dialect.namespace == Dialect.Namespace.CATALOG
         val names = mutableListOf<String>()

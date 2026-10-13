@@ -1,0 +1,19 @@
+{
+  "schemas": [
+    {
+      "name": "public",
+      "tables": [
+        {
+          "name": "owners",
+          "kind": "table",
+          "columns": [
+            { "name": "id", "type": "serial" },
+            { "name": "email", "type": "varchar(50)" }
+          ]
+        },
+        { "name": "owner_names", "kind": "view", "columns": [{ "name": "name", "type": "text" }] }
+      ]
+    }
+  ],
+  "truncated": false
+}

@@ -29,6 +29,14 @@ object SqlText {
         }
     }
 
+    private val DDL_WORDS = setOf("CREATE", "ALTER", "DROP", "RENAME", "TRUNCATE")
+
+    /**
+     * True when any statement of [sql] (split at `;` outside strings and comments) starts with
+     * CREATE / ALTER / DROP / RENAME / TRUNCATE, i.e. may change the schema.
+     */
+    fun isDdl(sql: String): Boolean = sanitize(sql).split(';').any { firstWords(it).first in DDL_WORDS }
+
     /**
      * [sql] with everything that is not code blanked out: string literals ('..' with '' escapes, E'..' with
      * backslash escapes), PostgreSQL dollar-quoted strings, "quoted" and `quoted` identifiers, `--` comments and

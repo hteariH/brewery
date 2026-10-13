@@ -23,6 +23,8 @@ class DbService(
     private val streamingTtlMs: Long = CursorManager.DEFAULT_STREAM_TTL_MS,
     /** Whether unfinished cursors must be ended before any other command (MariaDB/MySQL driver behaviour). */
     private val expireUnfinishedBeforeCommands: (Connection) -> Boolean = ::isMariaDb,
+    /** Most tables and views one `db/schema` snapshot holds; tests inject a small value. */
+    private val maxSchemaTables: Int = SchemaSnapshot.MAX_TABLES,
 ) : AutoCloseable {
     private val projectKey: String = try {
         root.toRealPath().toString()
@@ -51,6 +53,7 @@ class DbService(
         val saved = store.saveConnection(connection)
         // URL, user or options may have changed: the next use opens a fresh session.
         sessions.close(saved.id)
+        schemas.invalidate(saved.id)
         var warning: String? = null
         try {
             when {
@@ -71,6 +74,7 @@ class DbService(
     fun delete(id: String) {
         if (!store.deleteConnection(id)) throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
         sessions.close(id)
+        schemas.invalidate(id)
         try {
             secrets.remove(account(id))
         } catch (_: SecretStoreUnavailable) {
@@ -141,6 +145,30 @@ class DbService(
             }
         }
 
+    private val schemas = SchemaCache()
+    /** How many snapshots were built (cache misses and refreshes); tests use it to prove a cache hit. */
+    internal val schemaBuilds = java.util.concurrent.atomic.AtomicInteger()
+
+    /**
+     * The completion snapshot of connection [connectionId] (see [Introspector.snapshot]), cached until [refresh],
+     * DDL through [execute], or save/delete of the connection. A cache hit does not touch the session at all.
+     * A build runs on the session thread with metadata calls only; like [introspect], on MariaDB/MySQL it first
+     * expires the session's unfinished streaming cursors (fetch -> -32013), and nothing else is dropped:
+     * PostgreSQL cursors and the streaming transaction survive, SQLite has no streaming.
+     */
+    fun schema(connectionId: String, refresh: Boolean?): DbSchema =
+        schemas.get(connectionId, refresh == true) {
+            sessions.runIn(connectionId) { session, c ->
+                cursorManagers[connectionId]?.takeIf { it.session === session }?.expireUnfinishedIfNeeded(c)
+                try {
+                    schemaBuilds.incrementAndGet()
+                    Introspector(c).snapshot(maxSchemaTables)
+                } catch (e: SQLException) {
+                    throw queryFailure(e)
+                }
+            }
+        }
+
     // cursor id -> the manager (one per live session) that owns it
     private val cursorIndex = ConcurrentHashMap<String, CursorManager>()
     private val cursorManagers = ConcurrentHashMap<String, CursorManager>()
@@ -158,6 +186,9 @@ class DbService(
         sessions.runIn(connectionId) { session, c -> cursorsOf(connectionId, session).execute(c, sql) }
     } catch (e: SQLException) {
         throw queryFailure(e)
+    } finally {
+        // Also after a failure: a script may have changed the schema before it failed.
+        if (SqlText.isDdl(sql)) schemas.invalidate(connectionId)
     }
 
     fun fetch(cursorId: String, offset: Int, limit: Int): DbFetchResult {

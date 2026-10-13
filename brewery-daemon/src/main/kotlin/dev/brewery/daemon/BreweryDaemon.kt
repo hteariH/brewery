@@ -16,6 +16,8 @@ import dev.brewery.daemon.db.DbFetchResult
 import dev.brewery.daemon.db.DbIntrospectParams
 import dev.brewery.daemon.db.DbNode
 import dev.brewery.daemon.db.DbException
+import dev.brewery.daemon.db.DbSchema
+import dev.brewery.daemon.db.DbSchemaParams
 import dev.brewery.daemon.db.DbService
 import dev.brewery.daemon.db.DbTestResult
 import dev.brewery.daemon.db.DriverInfo
@@ -192,6 +194,9 @@ class BreweryDaemon(
 
     override fun dbIntrospect(params: DbIntrospectParams): CompletableFuture<List<DbNode>> =
         dbCall { it.introspect(params.connectionId, params.path ?: emptyList(), params.includeSystem == true) }
+
+    override fun dbSchema(params: DbSchemaParams): CompletableFuture<DbSchema> =
+        dbCall { it.schema(params.connectionId, params.refresh) }
 
     override fun dbExecute(params: DbExecuteParams): CompletableFuture<DbExecuteResult> =
         dbCall { it.execute(params.connectionId, params.sql) }

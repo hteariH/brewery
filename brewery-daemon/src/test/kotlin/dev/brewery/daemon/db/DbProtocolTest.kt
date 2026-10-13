@@ -132,6 +132,22 @@ class DbProtocolTest {
     }
 
     @Test
+    fun `schema over the wire`() {
+        open()
+        val file = Files.createTempFile("brewery", ".db")
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$file").use {
+            it.createStatement().executeUpdate("CREATE TABLE t (id INTEGER NOT NULL PRIMARY KEY, v TEXT)")
+        }
+        val saved = await(server.dbConnectionsSave(DbConnectionsSaveParams(ConnectionInfo("", "L", "sqlite", "jdbc:sqlite:$file", null, false, emptyMap()), null)))
+        val schema = await(server.dbSchema(DbSchemaParams(saved.id, null)))
+        assertEquals(false, schema.truncated)
+        assertEquals(listOf("INTEGER", "TEXT"), schema.schemas.single().tables.single().columns.map { it.type })
+        await(server.dbExecute(DbExecuteParams(saved.id, "CREATE TABLE u (x INTEGER)")))
+        assertEquals(listOf("t", "u"), await(server.dbSchema(DbSchemaParams(saved.id, false))).schemas.single().tables.map { it.name })
+        assertEquals(-32013, errorCode(server.dbSchema(DbSchemaParams("missing", true))))
+    }
+
+    @Test
     fun `execute fetch cancel close over the wire`() {
         open()
         val file = Files.createTempFile("brewery", ".db")
@@ -193,5 +209,9 @@ class DbProtocolTest {
         assertEquals(null, nodes[0].detail)
         assertEquals("serial NOT NULL PK", nodes[3].detail)
         assertEquals(listOf("public", "owners", "columns", "id"), nodes[3].path)
+        val schema = gson.fromJson(fixture("db-schema.result.json"), DbSchema::class.java)
+        assertEquals(false, schema.truncated)
+        assertEquals(listOf("owners" to "table", "owner_names" to "view"), schema.schemas.single().tables.map { it.name to it.kind })
+        assertEquals(ColumnInfo("email", "varchar(50)"), schema.schemas.single().tables[0].columns[1])
     }
 }

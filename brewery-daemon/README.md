@@ -29,6 +29,15 @@ The daemon owns database access for the editor's Database tool window.
   `.brewery/db.json`. The file never contains passwords.
 - `db/introspect { connectionId, path }`: lazy schema tree (catalogs or schemas, tables,
   views, sequences, then `columns`, `indexes` and `foreignKeys` folders).
+- `db/schema { connectionId, refresh? }`: flat snapshot for SQL completion (schemas, each
+  with tables and views, each with columns and types; at most 5000 tables, then
+  `truncated: true`). SQLite has one schema named `""`, MariaDB/MySQL catalogs are
+  schemas, system schemas are left out. The snapshot is cached per connection until
+  `refresh: true`, a DDL statement (`CREATE`, `ALTER`, `DROP`, `RENAME`, `TRUNCATE`)
+  through `db/execute`, or save/delete of the connection. A cache hit does not touch the
+  database. A build uses metadata calls only (one `getColumns` per schema); like
+  `db/introspect`, on MariaDB/MySQL it first expires unfinished streaming cursors of
+  that connection (`db/fetch` then returns -32013). PostgreSQL cursors are not affected.
 - `db/execute`, `db/fetch`, `db/cancel`, `db/close`: SQL runs on one thread per
   connection. Query results stay on the server as cursors and are pulled in pages
   (fetch size 500); `fetch` only moves forward. Values arrive as strings: binary as

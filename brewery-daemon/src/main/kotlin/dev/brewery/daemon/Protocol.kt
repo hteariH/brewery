@@ -21,6 +21,8 @@ import dev.brewery.daemon.db.DbFetchParams
 import dev.brewery.daemon.db.DbFetchResult
 import dev.brewery.daemon.db.DbIntrospectParams
 import dev.brewery.daemon.db.DbNode
+import dev.brewery.daemon.db.DbSchema
+import dev.brewery.daemon.db.DbSchemaParams
 import dev.brewery.daemon.db.DbTestResult
 import dev.brewery.daemon.db.DriverInfo
 import dev.brewery.daemon.run.RunConfiguration
@@ -85,6 +87,7 @@ interface BreweryServer {
     @JsonRequest("db/connections/delete") fun dbConnectionsDelete(params: DbConnectionsDeleteParams): CompletableFuture<Any?>
     @JsonRequest("db/connections/test") fun dbConnectionsTest(params: DbConnectionsTestParams): CompletableFuture<DbTestResult>
     @JsonRequest("db/introspect") fun dbIntrospect(params: DbIntrospectParams): CompletableFuture<List<DbNode>>
+    @JsonRequest("db/schema") fun dbSchema(params: DbSchemaParams): CompletableFuture<DbSchema>
     @JsonRequest("db/execute") fun dbExecute(params: DbExecuteParams): CompletableFuture<DbExecuteResult>
     @JsonRequest("db/fetch") fun dbFetch(params: DbFetchParams): CompletableFuture<DbFetchResult>
     @JsonRequest("db/cancel") fun dbCancel(params: DbCancelParams): CompletableFuture<Any?>
