@@ -128,11 +128,14 @@ commit details. Filter it by branch, user, date, path, and text or hash. On very
 large repositories without a commit-graph file, Brewery offers to write one, which
 makes the Log load faster.
 
-File history (Git > View History on a file) opens as a tab in the Log tool window.
+File history opens as a tab in the Log tool window. Open it with View History in the
+Project panel's context menu, View File History in the editor or Commit tool window
+context menu, or `git: file history` in the command palette.
 Select a commit, then Compare with Local, Show Diff for that commit, or Get to put
 that version back into the working copy. Renamed files are followed.
 
-Compare with Branch or Revision compares the open file side by side with a branch,
+Compare with Branch or Revision (`brewery: compare with revision` in the command
+palette) compares the open file side by side with a branch,
 tag or any revision, or the whole project when no file is focused. The project
 compare shows the changes since the merge base with that branch. "Compare with
 current" in the Branches popup opens the same view.
