@@ -38,9 +38,9 @@ Everything else it leaves to you and lists.
 `git fast-import` in a temp dir and times the Log tool window on it: `git log`, Zed's graph
 loader, lane assignment, memory, and redraws scrolled to the top, middle and end, before and
 after `git commit-graph write --reachable`. Run it optimised, as debug numbers are several
-times slower:
+times slower. Turning off debug info keeps that build quick and small:
 
-    cargo test --profile release-fast -p brewery_git -- --ignored log_scale --nocapture
+    CARGO_PROFILE_RELEASE_FAST_DEBUG=0 cargo test --profile release-fast -p brewery_git -- --ignored log_scale --nocapture
 
 `BREWERY_LOG_SCALE_COMMITS=200000` changes the size. The last results are under
 "Measurements" in `docs/superpowers/plans/2026-10-13-m5b-log-tool-window.md`.
