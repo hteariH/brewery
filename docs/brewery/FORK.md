@@ -93,5 +93,9 @@ and `toolsuto_update_helper.exe` swaps the files on quit, including the `jre`,
 processes started from those directories and then stops them. On Linux and macOS
 Brewery only shows a notification with a link to the release notes; packages update
 through the package manager. Don't set `ZED_UPDATE_EXPLANATION` in builds: it turns
-the check off completely. To test against a draft release, set
-`BREWERY_UPDATE_MANIFEST_URL` to another manifest URL.
+the check off completely. To test updates, set `BREWERY_UPDATE_MANIFEST_URL` to an
+HTTPS URL of a test manifest (for example a file in a public test release or a gist);
+draft release files are not public, so they don't work. Brewery logs when the
+override is active. Anyone who can set that variable can point Brewery at another
+installer, so treat it like any other environment variable that changes what runs.
+On Windows an installer without `sha256` in the manifest is refused.
