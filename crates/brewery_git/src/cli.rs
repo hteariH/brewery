@@ -664,7 +664,7 @@ impl GitRunner {
 }
 
 /// Refuses user strings git would read as options.
-fn check_revision(value: &str, what: &str) -> Result<()> {
+pub(crate) fn check_revision(value: &str, what: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("empty {what}");
     }
