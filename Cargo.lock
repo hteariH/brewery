@@ -2470,6 +2470,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewery_git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fs",
+ "git",
+ "gpui",
+ "project",
+ "release_channel",
+ "semver",
+ "settings",
+ "smol",
+ "tempfile",
+ "util",
+ "which",
+ "worktree",
+]
+
+[[package]]
 name = "brewery_run_widget"
 version = "0.1.0"
 dependencies = [
@@ -22565,6 +22584,7 @@ dependencies = [
  "brewery_build",
  "brewery_core",
  "brewery_db",
+ "brewery_git",
  "brewery_search_everywhere",
  "brewery_services",
  "brewery_spring_config",
