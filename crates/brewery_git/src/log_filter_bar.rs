@@ -30,6 +30,41 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(20);
 /// The filter changed; read it with `LogFilterBar::filter`.
 pub struct LogFilterChanged;
 
+/// A commit author, or the current git user.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Person {
+    pub name: String,
+    pub email: String,
+}
+
+impl Person {
+    /// Parses `Name <email>` (git's `%aN <%aE>`).
+    pub fn parse(ident: &str) -> Option<Self> {
+        let (name, email) = ident.trim().rsplit_once(" <")?;
+        let email = email.strip_suffix('>')?;
+        let name = name.trim();
+        (!name.is_empty()).then(|| Self {
+            name: name.to_string(),
+            email: email.trim().to_string(),
+        })
+    }
+
+    /// The `--author` value that matches this person only. Authors match as fixed substrings
+    /// of `Name <email>`, so `<email>` with its brackets is an exact email match; without an
+    /// email, `Name <` at least anchors the end of the name.
+    pub fn filter_value(&self) -> String {
+        if self.email.is_empty() {
+            format!("{} <", self.name)
+        } else {
+            format!("<{}>", self.email)
+        }
+    }
+
+    pub fn ident(&self) -> String {
+        format!("{} <{}>", self.name, self.email)
+    }
+}
+
 /// What the panel reports about the filtered graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FilterStatus {
@@ -41,10 +76,10 @@ pub struct LogFilterBar {
     filter: LogFilter,
     repo: Option<Entity<Repository>>,
     enabled: bool,
-    /// `user.name` from git config: the "me" User choice.
-    me: Option<String>,
-    /// Author names of recent commits, sorted.
-    authors: Vec<String>,
+    /// `user.name` and `user.email` from git config: the "me" User choice.
+    me: Option<Person>,
+    /// Authors of recent commits, sorted, one per identity.
+    authors: Vec<Person>,
     status: Option<FilterStatus>,
     error: Option<SharedString>,
     text_editor: Entity<Editor>,
@@ -79,12 +114,22 @@ impl LogFilterBar {
         &self.filter
     }
 
-    pub fn me(&self) -> Option<&str> {
-        self.me.as_deref()
+    pub fn me(&self) -> Option<&Person> {
+        self.me.as_ref()
     }
 
-    pub fn authors(&self) -> &[String] {
+    pub fn authors(&self) -> &[Person] {
         &self.authors
+    }
+
+    #[cfg(test)]
+    pub(crate) fn user_label_for_test(&self) -> String {
+        self.user_label()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn text_editor_for_test(&self) -> Entity<Editor> {
+        self.text_editor.clone()
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -165,17 +210,21 @@ impl LogFilterBar {
         if !self.enabled {
             return Task::ready(());
         }
-        let me = GitCli::run(
-            &repo,
-            vec!["config".into(), "--get".into(), "user.name".into()],
-            Some(GIT_TIMEOUT),
-            cx,
-        );
+        let config = |key: &str, cx: &mut Context<Self>| {
+            GitCli::run(
+                &repo,
+                vec!["config".into(), "--get".into(), key.into()],
+                Some(GIT_TIMEOUT),
+                cx,
+            )
+        };
+        let me_name = config("user.name", cx);
+        let me_email = config("user.email", cx);
         let authors = GitCli::run(
             &repo,
             [
                 "log",
-                "--format=%aN",
+                "--format=%aN <%aE>",
                 &format!("--max-count={AUTHOR_SCAN_LIMIT}"),
                 "--ignore-missing",
                 "--branches",
@@ -190,23 +239,27 @@ impl LogFilterBar {
             cx,
         );
         cx.spawn(async move |this, cx| {
-            let me = match me.await {
+            let value = async |task: Task<anyhow::Result<crate::GitOutput>>| match task.await {
                 Ok(output) if output.success() => {
-                    Some(output.stdout.trim().to_string()).filter(|name| !name.is_empty())
+                    Some(output.stdout.trim().to_string()).filter(|value| !value.is_empty())
                 }
                 Ok(_) => None,
                 Err(error) => {
-                    log::debug!("git config user.name: {error:#}");
+                    log::debug!("git config for the Log filter: {error:#}");
                     None
                 }
             };
+            let name = value(me_name).await;
+            let email = value(me_email).await;
+            let me = name.map(|name| Person {
+                name,
+                email: email.unwrap_or_default(),
+            });
             let authors = match authors.await {
                 Ok(output) if output.success() => output
                     .stdout
                     .lines()
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .map(String::from)
+                    .filter_map(Person::parse)
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect(),
@@ -256,6 +309,12 @@ impl LogFilterBar {
     pub fn toggle_branch(&mut self, name: &str, cx: &mut Context<Self>) {
         let name = name.trim().to_string();
         if name.is_empty() {
+            return;
+        }
+        if name.starts_with('-') {
+            // git would read it as an option: never let it into the filter.
+            self.error = Some(format!("not a branch name: {name}").into());
+            cx.notify();
             return;
         }
         self.change(|filter| toggle(&mut filter.branches, name), cx);
@@ -328,7 +387,28 @@ impl LogFilterBar {
     }
 
     fn user_label(&self) -> String {
-        summary("User", &self.filter.authors)
+        let names = self
+            .filter
+            .authors
+            .iter()
+            .map(|value| self.author_name(value))
+            .collect::<Vec<_>>();
+        summary("User", &names)
+    }
+
+    /// The name to show for an author filter value (`<email>` for picked people).
+    fn author_name(&self, value: &str) -> String {
+        if self
+            .me
+            .as_ref()
+            .is_some_and(|me| me.filter_value() == value)
+        {
+            return "me".into();
+        }
+        self.authors
+            .iter()
+            .find(|person| person.filter_value() == value)
+            .map_or_else(|| value.to_string(), |person| person.name.clone())
     }
 
     fn date_label(&self) -> String {
@@ -376,15 +456,19 @@ impl LogFilterBar {
                 let mut choices = Vec::new();
                 if let Some(me) = &self.me {
                     choices.push(Choice {
-                        label: format!("me ({me})").into(),
-                        value: me.clone(),
+                        label: format!("me ({})", me.ident()).into(),
+                        value: me.filter_value(),
                     });
                 }
+                let me_value = self.me.as_ref().map(Person::filter_value);
                 for author in &self.authors {
-                    if Some(author) != self.me.as_ref() {
+                    let value = author.filter_value();
+                    if Some(&value) != me_value.as_ref()
+                        && !choices.iter().any(|c| c.value == value)
+                    {
                         choices.push(Choice {
-                            label: author.clone().into(),
-                            value: author.clone(),
+                            label: author.ident().into(),
+                            value,
                         });
                     }
                 }

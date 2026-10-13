@@ -422,7 +422,7 @@ fn alt_9_toggles_the_log_in_the_jetbrains_keymaps(cx: &mut TestAppContext) {
 // Filters.
 
 use crate::log_filter::{DateBound, LogFilter};
-use crate::log_filter_bar::{ChoiceKind, LogFilterBar};
+use crate::log_filter_bar::{ChoiceKind, LogFilterBar, Person};
 use git::repository::{LogOrder, LogSource, RepoPath};
 use picker::PickerDelegate as _;
 use project::git_store::Repository;
@@ -747,8 +747,16 @@ async fn user_filter_shows_the_count_and_reset_restores_the_log(cx: &mut TestApp
         bar.read_with(cx, |bar, _| bar.me().is_some() && !bar.authors().is_empty())
     });
     bar.read_with(cx, |bar, _| {
-        assert_eq!(bar.me(), Some("Brewery Test"), "me = user.name");
-        assert_eq!(bar.authors(), ["Alice", "Bob"]);
+        let me = bar.me().expect("me");
+        assert_eq!(
+            (me.name.as_str(), me.email.as_str()),
+            ("Brewery Test", "test@brewery.dev"),
+            "me = user.name and user.email"
+        );
+        assert_eq!(
+            bar.authors().iter().map(Person::ident).collect::<Vec<_>>(),
+            ["Alice <alice@example.com>", "Bob <bob@example.com>"]
+        );
     });
 
     // User = Bob, picked in the User list.
@@ -758,14 +766,16 @@ async fn user_filter_shows_the_count_and_reset_restores_the_log(cx: &mut TestApp
     picker.update_in(cx, |picker, window, cx| picker.set_query("bob", window, cx));
     cx.run_until_parked();
     picker.update_in(cx, |picker, window, cx| {
-        assert_eq!(picker.delegate.match_count(), 1, "Bob only");
+        // Bob, then the typed text as a substring choice.
+        assert_eq!(picker.delegate.match_count(), 2);
         picker.delegate.set_selected_index(0, window, cx);
         picker.delegate.confirm(false, window, cx);
     });
     cx.run_until_parked();
     assert_eq!(
         bar.read_with(cx, |bar, _| bar.filter().authors.clone()),
-        vec!["Bob".to_string()]
+        vec!["<bob@example.com>".to_string()],
+        "a picked person filters by exact email"
     );
     let bob = panel_source(&fixture, cx).expect("filtered");
     assert_eq!(wait_for_graph(&fixture, cx), history.shas(&[2, 3]));
@@ -777,7 +787,7 @@ async fn user_filter_shows_the_count_and_reset_restores_the_log(cx: &mut TestApp
 
     // Another user: the Bob graph's data is dropped, the unfiltered one is kept.
     bar.update(cx, |bar, cx| {
-        bar.toggle_author("Bob", cx);
+        bar.toggle_author("<bob@example.com>", cx);
         bar.toggle_author("Alice", cx);
     });
     cx.run_until_parked();
@@ -995,3 +1005,112 @@ async fn no_commit_graph_notice_when_it_would_not_help(app: &mut TestAppContext)
 
 #[path = "log_scale_tests.rs"]
 mod scale;
+
+#[gpui::test]
+async fn me_and_picked_users_match_exact_people(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.git(&["config", "user.name", "Max"]);
+    repo.git(&["config", "user.email", "max@x"]);
+    let commit = |name: &str, email: &str, path: &str| {
+        std::fs::write(repo.work.join(path), name).expect("write");
+        repo.git(&["add", "--", path]);
+        repo.git_with_env(
+            &["commit", "--quiet", "-m", path],
+            &[("GIT_AUTHOR_NAME", name), ("GIT_AUTHOR_EMAIL", email)],
+        );
+        repo.git(&["rev-parse", "HEAD"])
+    };
+    let max = commit("Max", "max@x", "a.txt");
+    let maxim = commit("Maxim", "maxim@x", "b.txt");
+    let (fixture, cx) = open_real(&repo, cx).await;
+    cx.dispatch_action(ToggleLogPanel);
+    wait_for_graph(&fixture, cx);
+    let bar = bar(&fixture, cx);
+    wait_until(cx, "the User choices", |cx| {
+        bar.read_with(cx, |bar, _| bar.me().is_some() && bar.authors().len() == 2)
+    });
+
+    let pick = |query: &str, cx: &mut VisualTestContext| {
+        let picker = bar.update_in(cx, |bar, window, cx| {
+            bar.choice_picker(ChoiceKind::User, window, cx)
+        });
+        picker.update_in(cx, |picker, window, cx| picker.set_query(query, window, cx));
+        cx.run_until_parked();
+        picker.update_in(cx, |picker, window, cx| {
+            picker.delegate.set_selected_index(0, window, cx);
+            picker.delegate.confirm(false, window, cx);
+        });
+        cx.run_until_parked();
+    };
+    let only = |shas: &[&String]| {
+        shas.iter()
+            .map(|sha| sha.to_string())
+            .collect::<BTreeSet<_>>()
+    };
+
+    // "me" (Max) is not Maxim, although "Max" is a substring of "Maxim".
+    pick("me (", cx);
+    assert_eq!(
+        bar.read_with(cx, |bar, _| bar.filter().authors.clone()),
+        vec!["<max@x>".to_string()]
+    );
+    assert_eq!(wait_for_graph(&fixture, cx), only(&[&max]));
+    assert_eq!(
+        bar.read_with(cx, |bar, _| bar.user_label_for_test()),
+        "User: me"
+    );
+
+    // Maxim picked from the list: Maxim only.
+    bar.update_in(cx, |bar, window, cx| bar.reset(window, cx));
+    cx.run_until_parked();
+    pick("maxim@", cx);
+    assert_eq!(wait_for_graph(&fixture, cx), only(&[&maxim]));
+    assert_eq!(
+        bar.read_with(cx, |bar, _| bar.user_label_for_test()),
+        "User: Maxim"
+    );
+
+    // Typed text stays a substring: both.
+    bar.update_in(cx, |bar, window, cx| bar.reset(window, cx));
+    cx.run_until_parked();
+    bar.update(cx, |bar, cx| bar.toggle_author("max", cx));
+    cx.run_until_parked();
+    assert_eq!(wait_for_graph(&fixture, cx), only(&[&max, &maxim]));
+}
+
+#[gpui::test]
+async fn enter_in_the_text_field_applies_it(cx: &mut TestAppContext) {
+    init_test(cx);
+    let history = History::new();
+    let (fixture, cx) = open_history(&history, cx).await;
+    let bar = bar(&fixture, cx);
+    let editor = bar.read_with(cx, |bar, _| bar.text_editor_for_test());
+    editor.update_in(cx, |editor, window, cx| {
+        editor.set_text("fix", window, cx);
+        window.focus(&editor.focus_handle(cx), cx);
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(menu::Confirm);
+    cx.run_until_parked();
+    assert_eq!(
+        bar.read_with(cx, |bar, _| bar.filter().text.clone()),
+        Some("fix".to_string())
+    );
+    assert_eq!(wait_for_graph(&fixture, cx), history.shas(&[1, 4]));
+}
+
+#[gpui::test]
+async fn an_option_like_branch_never_enters_the_filter(cx: &mut TestAppContext) {
+    init_test(cx);
+    let history = History::new();
+    let (fixture, cx) = open_history(&history, cx).await;
+    let bar = bar(&fixture, cx);
+    bar.update(cx, |bar, cx| bar.toggle_branch("-foo", cx));
+    cx.run_until_parked();
+    bar.read_with(cx, |bar, _| {
+        assert!(bar.filter().is_empty(), "no Reset, no Branch: -foo label");
+        assert_eq!(bar.error().cloned(), Some("not a branch name: -foo".into()));
+    });
+    assert_eq!(panel_source(&fixture, cx), None);
+}

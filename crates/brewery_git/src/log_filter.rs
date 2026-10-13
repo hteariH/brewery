@@ -7,7 +7,11 @@
 //! - every pattern is a fixed string. `--fixed-strings` and `--regexp-ignore-case` are global
 //!   to git's limiting patterns (author and grep alike), and the graph search adds the first
 //!   anyway; a regex-escaped author would break under it. Authors therefore match as
-//!   case-insensitive substrings of `Name <email>`.
+//!   case-insensitive substrings of `Name <email>`. People picked in the User list (and "me")
+//!   are passed as `<email>`, brackets included, which is an exact email match; typed text
+//!   stays a substring.
+//! - for the same reason the graph search's "case sensitive" toggle has no effect while an
+//!   author or text filter is set (`--regexp-ignore-case` is global too).
 //! - a text filter adds `--all-match`, so a graph search on a text-filtered log finds commits
 //!   matching both the filter and the query (git ORs several `--grep`s otherwise).
 //! - each user value is one argv element (`--author=<v>`, `--grep=<v>`), never split and never
