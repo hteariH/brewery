@@ -37,8 +37,10 @@ The daemon owns database access for the editor's Database tool window.
   through `db/execute`, or save/delete of the connection. A cache hit does not touch the
   database, and concurrent misses share one build. A build uses metadata calls only and
   never ends streaming cursors: on MariaDB/MySQL (whose driver drains a pending result
-  when another command runs) it uses a short-lived separate connection on its own thread;
-  elsewhere it runs on the connection's session. When there are more than 5000 tables the
+  when another command runs) it uses a short-lived separate connection on its own thread
+  (chosen from the saved URL, no probe connection; if that connection cannot be opened it
+  falls back to the session and ends unfinished cursors like `db/introspect`); elsewhere it
+  runs on the connection's session. When there are more than 5000 tables the
   limit is shared fairly between schemas. Changes made outside the editor, or by
   statements such as `SELECT ... INTO`, `CALL` or `ATTACH`, show up after `refresh: true`.
 - `db/execute`, `db/fetch`, `db/cancel`, `db/close`: SQL runs on one thread per

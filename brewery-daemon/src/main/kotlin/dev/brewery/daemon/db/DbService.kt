@@ -25,6 +25,8 @@ class DbService(
     private val expireUnfinishedBeforeCommands: (Connection) -> Boolean = ::isMariaDb,
     /** Most tables and views one `db/schema` snapshot holds; tests inject a small value. */
     private val maxSchemaTables: Int = SchemaSnapshot.MAX_TABLES,
+    /** Whether snapshots of a saved connection are built on a separate connection (its driver drains pending results); decided without connecting. */
+    private val snapshotOnSeparateConnection: (ConnectionInfo) -> Boolean = { isMariaDbUrl(it.url) },
 ) : AutoCloseable {
     private val projectKey: String = try {
         root.toRealPath().toString()
@@ -149,37 +151,42 @@ class DbService(
     /** How many snapshots were built (cache misses and refreshes); tests use it to prove a cache hit. */
     internal val schemaBuilds = java.util.concurrent.atomic.AtomicInteger()
 
-    // Per connection id: whether snapshots are built on a separate connection (see [schema]); forgotten on save/delete.
-    private val separateBuild = ConcurrentHashMap<String, Boolean>()
     private val metadataThreads = ConcurrentHashMap<String, java.util.concurrent.ExecutorService>()
+    @Volatile private var closing = false
+
+    /** Opens the connection a snapshot is built on when it must not use the session; tests replace it. */
+    internal var openMetadataConnection: (String) -> Connection = ::openSaved
+
+    /** Number of per-connection snapshot threads alive; only connections built on a separate connection have one. */
+    internal val metadataThreadCount: Int get() = metadataThreads.size
 
     /**
      * The completion snapshot of connection [connectionId] (see [Introspector.snapshot]), cached until [refresh],
      * DDL through [execute], or save/delete of the connection. A cache hit does not touch any connection, and
      * concurrent misses share one build.
      *
-     * A build never expires streaming cursors, because completion calls it automatically. Where the driver drains
-     * a pending streaming result when another command runs (the `expireUnfinishedBeforeCommands` policy, i.e.
-     * MariaDB/MySQL) the snapshot is built on a short-lived separate connection (same saved settings, opened with
-     * [openSaved] and closed afterwards) on a thread of its own per connection, so the session and its cursors are
-     * not touched at all. Elsewhere (PostgreSQL, SQLite, generic) it runs on the session thread: metadata queries
-     * leave PostgreSQL portals and the streaming transaction alone, and a separate connection would not see a
-     * private SQLite database such as `:memory:`. The policy is decided once per connection id on the first build
-     * (that costs one extra connection for the check), and forgotten when the connection is saved or deleted.
+     * Completion calls this automatically, so a build must not end streaming cursors. The path is chosen from
+     * the saved connection (its URL), without connecting. Where the driver drains a pending streaming result when
+     * another command runs (MariaDB/MySQL) the snapshot is built on a short-lived separate connection (same saved
+     * settings, closed afterwards, network timeout [METADATA_TIMEOUT_MS]) on a thread of its own per connection,
+     * created only for such connections; the session and its cursors are not touched. If that connection cannot be
+     * opened (server connection limit, ...) the build falls back to the session, which then ends the session's
+     * unfinished cursors exactly like [introspect] does (fetch -> -32013). Every other database (PostgreSQL,
+     * SQLite, generic) builds on the session thread: metadata queries leave PostgreSQL portals and the streaming
+     * transaction alone, and a separate connection would not see a private SQLite database such as `:memory:`.
      */
     fun schema(connectionId: String, refresh: Boolean?): DbSchema =
         schemas.get(connectionId, refresh == true) { buildSnapshot(connectionId) }
 
     private fun buildSnapshot(id: String): DbSchema {
-        val known = separateBuild[id]
-        if (known != false) {
-            val built = onMetadataThread(id) { c ->
-                val separate = known ?: runCatching { expireUnfinishedBeforeCommands(c) }.getOrDefault(false).also { separateBuild[id] = it }
-                if (separate) snapshotOf(c) else null
-            }
-            if (built != null) return built
+        val saved = store.connection(id) ?: throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
+        if (snapshotOnSeparateConnection(saved)) {
+            onMetadataThread(id) { snapshotOf(it) }?.let { return it }
         }
-        return sessions.runIn(id) { _, c -> snapshotOf(c) }
+        return sessions.runIn(id) { session, c ->
+            cursorManagers[id]?.takeIf { it.session === session }?.expireUnfinishedIfNeeded(c)
+            snapshotOf(c)
+        }
     }
 
     private fun snapshotOf(c: Connection): DbSchema = try {
@@ -189,14 +196,33 @@ class DbService(
         throw queryFailure(e)
     }
 
-    /** Runs [block] with a fresh connection of saved connection [id] on that id's metadata thread; closes it afterwards. */
-    private fun <T> onMetadataThread(id: String, block: (Connection) -> T): T {
+    /**
+     * Runs [block] with a fresh connection of saved connection [id] on that id's metadata thread and closes it
+     * afterwards. Null when the connection cannot be opened (the caller falls back); other failures propagate.
+     */
+    private fun onMetadataThread(id: String, block: (Connection) -> DbSchema): DbSchema? {
+        val task = Callable<DbSchema?> {
+            val c = try {
+                openMetadataConnection(id)
+            } catch (e: DbException) {
+                if (e.code == DbErrorCodes.CONNECTION_FAILED || e.code == DbErrorCodes.AUTH_FAILED) return@Callable null
+                throw e
+            }
+            c.use {
+                runCatching { it.setNetworkTimeout({ r -> r.run() }, METADATA_TIMEOUT_MS) }
+                block(it)
+            }
+        }
         val future = try {
-            metadataThreads.computeIfAbsent(id) {
-                Executors.newSingleThreadExecutor { r -> Thread(r, "brewery-db-metadata").apply { isDaemon = true } }
-            }.submit(Callable { openSaved(id).use(block) })
+            submitMetadata(id, task)
         } catch (_: java.util.concurrent.RejectedExecutionException) {
-            throw DbException(DbErrorCodes.CONNECTION_FAILED, "The database service is shutting down")
+            // Raced with save/delete shutting this id's thread down: one retry on a fresh one.
+            try {
+                if (closing) throw java.util.concurrent.RejectedExecutionException()
+                submitMetadata(id, task)
+            } catch (_: java.util.concurrent.RejectedExecutionException) {
+                throw DbException(DbErrorCodes.CONNECTION_FAILED, "The database service is shutting down")
+            }
         }
         try {
             return future.get()
@@ -205,9 +231,13 @@ class DbService(
         }
     }
 
+    private fun <T> submitMetadata(id: String, task: Callable<T>) =
+        metadataThreads.computeIfAbsent(id) {
+            Executors.newSingleThreadExecutor { r -> Thread(r, "brewery-db-metadata").apply { isDaemon = true } }
+        }.submit(task)
+
     private fun forgetSchema(id: String) {
         schemas.invalidate(id)
-        separateBuild.remove(id)
         metadataThreads.remove(id)?.shutdown()
     }
 
@@ -263,6 +293,7 @@ class DbService(
     }
 
     override fun close() {
+        closing = true
         sessions.close()
         metadataThreads.values.forEach { it.shutdownNow() }
         testThreads.shutdownNow()
@@ -278,6 +309,7 @@ class DbService(
     private companion object {
         const val TEST_TIMEOUT_SECONDS = 20L
         const val MAX_MESSAGE = 2000
+        const val METADATA_TIMEOUT_MS = 60_000
     }
 }
 
@@ -291,8 +323,10 @@ fun connectionFailure(error: Throwable): DbException {
 /** PostgreSQL only streams a result set (fetch size) inside a transaction. */
 fun isPostgres(connection: Connection): Boolean = connection.metaData.url?.startsWith("jdbc:postgresql:") == true
 
+/** True for a MariaDB or MySQL JDBC URL, judged from the URL text alone. */
+fun isMariaDbUrl(url: String): Boolean = url.startsWith("jdbc:mariadb:") || url.startsWith("jdbc:mysql:")
+
 /** MariaDB and MySQL URLs (the driver is Connector/J for MariaDB); it drains pending streaming results before the next command. */
 fun isMariaDb(connection: Connection): Boolean {
-    val url = connection.metaData.url ?: return false
-    return url.startsWith("jdbc:mariadb:") || url.startsWith("jdbc:mysql:")
+    return connection.metaData.url?.let(::isMariaDbUrl) == true
 }

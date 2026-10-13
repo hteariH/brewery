@@ -136,6 +136,15 @@ class SchemaSnapshotTest {
         assertSame(fresh, cache.get("c", false) { fresh })
     }
 
+    /** Waits until the thread in [ref] is parked on the in-flight build (so it really joined it). */
+    private fun awaitWaiting(ref: java.util.concurrent.atomic.AtomicReference<Thread>) {
+        val deadline = System.nanoTime() + 10_000_000_000L
+        while (ref.get()?.state != Thread.State.WAITING) {
+            check(System.nanoTime() < deadline) { "joiner never waited" }
+            Thread.sleep(5)
+        }
+    }
+
     @Test
     fun `concurrent misses share one build`() {
         val cache = SchemaCache()
@@ -147,8 +156,9 @@ class SchemaSnapshotTest {
         try {
             val first = pool.submit<DbSchema> { cache.get("c", false) { builds.incrementAndGet(); started.countDown(); release.await(); result } }
             started.await()
-            val others = (1..5).map { pool.submit<DbSchema> { cache.get("c", false) { builds.incrementAndGet(); result } } }
-            Thread.sleep(100)
+            val joiner = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val others = (1..5).map { pool.submit<DbSchema> { joiner.set(Thread.currentThread()); cache.get("c", false) { builds.incrementAndGet(); result } } }
+            awaitWaiting(joiner)
             release.countDown()
             assertSame(result, first.get(10, java.util.concurrent.TimeUnit.SECONDS))
             others.forEach { assertSame(result, it.get(10, java.util.concurrent.TimeUnit.SECONDS)) }
@@ -167,8 +177,9 @@ class SchemaSnapshotTest {
         try {
             val first = pool.submit<DbSchema> { cache.get("c", false) { started.countDown(); release.await(); throw DbException(DbErrorCodes.CONNECTION_FAILED, "down") } }
             started.await()
-            val second = pool.submit<DbSchema> { cache.get("c", false) { error("must join the first build") } }
-            Thread.sleep(100)
+            val joiner = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val second = pool.submit<DbSchema> { joiner.set(Thread.currentThread()); cache.get("c", false) { error("must join the first build") } }
+            awaitWaiting(joiner)
             release.countDown()
             for (f in listOf(first, second)) {
                 val e = assertFailsWith<java.util.concurrent.ExecutionException> { f.get(10, java.util.concurrent.TimeUnit.SECONDS) }
@@ -214,15 +225,56 @@ class SchemaSnapshotTest {
     }
 
     @Test
-    fun `without the unfinished-cursor policy the build runs on the session`() {
+    fun `a build for a non mariadb url runs on the session without a probe connection or thread`() {
+        service.openMetadataConnection = { error("no extra connection expected") }
         service.schema(connectionId, false)
+        service.schema(connectionId, true)
         assertEquals(1, service.sessions.openCount)
+        assertEquals(0, service.metadataThreadCount)
+    }
+
+    @Test
+    fun `the path is chosen from the url`() {
+        assertTrue(isMariaDbUrl("jdbc:mariadb://h/db"))
+        assertTrue(isMariaDbUrl("jdbc:mysql://h/db"))
+        assertTrue(!isMariaDbUrl("jdbc:postgresql://h/db"))
+        assertTrue(!isMariaDbUrl("jdbc:sqlite:x.db"))
+    }
+
+    @Test
+    fun `a separate connection that cannot be opened falls back to the session`() {
+        service.close()
+        service = DbService(root, InMemorySecretStore(), manageTransactions = { false }, expireUnfinishedBeforeCommands = { true }, snapshotOnSeparateConnection = { true })
+        service.openMetadataConnection = { throw DbException(DbErrorCodes.CONNECTION_FAILED, "too many connections") }
+        DriverManager.getConnection("jdbc:sqlite:$db").use { c ->
+            c.createStatement().use { st -> st.executeUpdate("INSERT INTO owners (id, name) VALUES (1, 'a'), (2, 'b')") }
+        }
+        val cursor = service.execute(connectionId, "SELECT id FROM owners").cursorId!!
+        assertEquals(1, service.fetch(cursor, 0, 1).rows.size)
+        val snapshot = service.schema(connectionId, false)
+        assertEquals(listOf("owners", "pets", "pet_names"), snapshot.schemas.single().tables.map { it.name })
+        assertEquals(1, service.schemaBuilds.get())
+        // The documented price of the fallback: like introspection it ends unfinished cursors.
+        assertEquals(-32013, assertFailsWith<DbException> { service.fetch(cursor, 1, 1) }.code)
+        // Not remembered as broken: a later build tries the separate connection again.
+        var attempts = 0
+        service.openMetadataConnection = { attempts++; throw DbException(DbErrorCodes.AUTH_FAILED, "no") }
+        service.schema(connectionId, true)
+        assertEquals(1, attempts)
+    }
+
+    @Test
+    fun `other failures of the separate connection are not swallowed`() {
+        service.close()
+        service = DbService(root, InMemorySecretStore(), snapshotOnSeparateConnection = { true })
+        service.openMetadataConnection = { throw DbException(DbErrorCodes.NOT_FOUND, "gone") }
+        assertEquals(DbErrorCodes.NOT_FOUND, assertFailsWith<DbException> { service.schema(connectionId, false) }.code)
     }
 
     @Test
     fun `with the mariadb policy the build uses a separate connection and keeps cursors alive`() {
         service.close()
-        service = DbService(root, InMemorySecretStore(), manageTransactions = { false }, expireUnfinishedBeforeCommands = { true })
+        service = DbService(root, InMemorySecretStore(), manageTransactions = { false }, expireUnfinishedBeforeCommands = { true }, snapshotOnSeparateConnection = { true })
         DriverManager.getConnection("jdbc:sqlite:$db").use { c ->
             c.createStatement().use { st -> st.executeUpdate("INSERT INTO owners (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')") }
         }
@@ -244,7 +296,7 @@ class SchemaSnapshotTest {
     @Test
     fun `the separate connection path maps errors like the session path`() {
         service.close()
-        service = DbService(root, InMemorySecretStore(), expireUnfinishedBeforeCommands = { true })
+        service = DbService(root, InMemorySecretStore(), expireUnfinishedBeforeCommands = { true }, snapshotOnSeparateConnection = { true })
         assertEquals(DbErrorCodes.NOT_FOUND, assertFailsWith<DbException> { service.schema("missing", false) }.code)
         val bad = service.save(ConnectionInfo("", "bad", "sqlite", "jdbc:sqlite:/no/such/dir/x.db", null, false, emptyMap()), null)
         assertEquals(DbErrorCodes.CONNECTION_FAILED, assertFailsWith<DbException> { service.schema(bad.id, false) }.code)
