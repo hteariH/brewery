@@ -2548,6 +2548,15 @@ impl GitGraph {
         }
     }
 
+    // brewery: read by the Log tool window, which hosts the graph outside a pane
+    pub fn selected_commit_sha(&self) -> Option<Oid> {
+        let idx = self.selected_entry_idx?;
+        self.graph_data
+            .commits
+            .get(idx)
+            .map(|commit| commit.data.sha)
+    }
+
     fn open_selected_commit_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(selected_entry_index) = self.selected_entry_idx else {
             return;

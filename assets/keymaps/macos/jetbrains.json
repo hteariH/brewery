@@ -139,6 +139,7 @@
       "cmd-5": "debug_panel::ToggleFocus",
       "cmd-6": "diagnostics::Deploy",
       "cmd-7": "outline_panel::ToggleFocus",
+      "cmd-9": "brewery::ToggleLogPanel", // brewery: the Log tool window
     },
   },
   {
@@ -152,7 +153,7 @@
       "cmd-6": "diagnostics::Deploy",
       "cmd-7": "outline_panel::ToggleFocus",
       "cmd-8": null, // Services (bottom dock)
-      "cmd-9": null, // Git History (bottom dock)
+      "cmd-9": "brewery::ToggleLogPanel", // brewery: the Log tool window (bottom dock)
       "cmd-0": "git_panel::ToggleFocus",
     },
   },
@@ -207,6 +208,7 @@
   { "context": "DebugPanel", "bindings": { "cmd-5": "workspace::CloseActiveDock" } },
   { "context": "Diagnostics > Editor", "bindings": { "cmd-6": "pane::CloseActiveItem" } },
   { "context": "OutlinePanel", "bindings": { "cmd-7": "workspace::CloseActiveDock" } },
+  { "context": "LogPanel", "bindings": { "cmd-9": "workspace::CloseActiveDock" } }, // brewery:
   {
     // `cmd-alt-l` is bound to `editor::Format` (jetbrains "Reformat Code") in
     // the Editor context above, which collides with the default

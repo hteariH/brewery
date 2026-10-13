@@ -789,6 +789,8 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             brewery_services::ServicesPanel::load(workspace_handle.clone(), cx.clone());
         // brewery: Database tool window (data sources and schemas)
         let database_panel = brewery_db::DatabasePanel::load(workspace_handle.clone(), cx.clone());
+        // brewery: Log tool window (commit graph)
+        let log_panel = brewery_git::LogPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -816,6 +818,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(build_panel, workspace_handle.clone(), cx.clone()), // brewery:
             add_panel_when_ready(services_panel, workspace_handle.clone(), cx.clone()), // brewery:
             add_panel_when_ready(database_panel, workspace_handle.clone(), cx.clone()), // brewery:
+            add_panel_when_ready(log_panel, workspace_handle.clone(), cx.clone()), // brewery:
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
 
