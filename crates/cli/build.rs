@@ -2,6 +2,15 @@
 use std::process::Command;
 
 fn main() {
+    // brewery: expose crates/zed/BREWERY_VERSION as env!("BREWERY_VERSION")
+    // (same source as brewery_core's build script; cli cannot depend on brewery_core).
+    let version_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../zed/BREWERY_VERSION");
+    println!("cargo:rerun-if-changed={}", version_path.display());
+    let version = std::fs::read_to_string(&version_path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", version_path.display()));
+    println!("cargo:rustc-env=BREWERY_VERSION={}", version.trim());
+
     if std::env::var("ZED_UPDATE_EXPLANATION").is_ok() {
         println!(r#"cargo:rustc-cfg=feature="no-bundled-uninstall""#);
     }

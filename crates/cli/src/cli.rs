@@ -133,7 +133,6 @@ pub fn socket_file_name(channel: &str) -> String {
 /// `--version` output for the Linux and Windows apps.
 pub fn app_version_string(
     channel: &str,
-    release_version: &str,
     commit_sha: Option<&str>,
     path: &std::path::Path,
 ) -> String {
@@ -144,9 +143,9 @@ pub fn app_version_string(
         } else {
             format!("{channel} ")
         },
-        release_version,
+        env!("BREWERY_VERSION"),
         match commit_sha {
-            Some(commit_sha) => format!(" {commit_sha} "),
+            Some(commit_sha) => format!(" ({commit_sha})"),
             None => "".to_string(),
         },
         path.display(),
@@ -177,7 +176,10 @@ mod brewery_name_tests {
 
     #[test]
     fn no_zed_names_left() {
-        for name in LINUX_APP_LOCATIONS.iter().chain(WINDOWS_APP_LOCATIONS.iter()) {
+        for name in LINUX_APP_LOCATIONS
+            .iter()
+            .chain(WINDOWS_APP_LOCATIONS.iter())
+        {
             assert!(!name.to_lowercase().contains("zed"), "{name}");
         }
         assert!(!socket_file_name("stable").contains("zed"));
@@ -191,11 +193,20 @@ mod brewery_name_tests {
     #[test]
     fn version_strings() {
         let p = Path::new("/x/brewery-editor");
+        let file = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../zed/BREWERY_VERSION"
+        ))
+        .unwrap();
+        let v = file.trim();
         assert_eq!(
-            app_version_string("stable", "0.1.0", None, p),
-            format!("Brewery 0.1.0 – {}", p.display())
+            app_version_string("stable", None, p),
+            format!("Brewery {v} – {}", p.display())
         );
-        assert!(app_version_string("dev", "", Some("abc"), p).starts_with("Brewery dev  abc "));
+        assert_eq!(
+            app_version_string("dev", Some("abc"), p),
+            format!("Brewery dev {v} (abc) – {}", p.display())
+        );
         assert!(bundle_version_string("0.1.0", p).starts_with("Brewery 0.1.0 – "));
     }
 }

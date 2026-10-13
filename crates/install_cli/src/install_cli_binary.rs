@@ -80,7 +80,8 @@ async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
 }
 
 pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
-    const LINUX_PROMPT_DETAIL: &str = "If you installed Zed from our official release add ~/.local/bin to your PATH.\n\nIf you installed Zed from a different source like your package manager, then you may need to create an alias/symlink manually.\n\nDepending on your package manager, the CLI might be named zeditor, zedit, zed-editor or something else.";
+    // brewery: wording for the packaged layout (/usr/bin/brewery) and the tarball.
+    const LINUX_PROMPT_DETAIL: &str = "If you installed Brewery from a deb, rpm or AUR package, `brewery` is already in /usr/bin.\n\nIf you installed Brewery from the tarball, add its bin directory (or a symlink to bin/brewery in ~/.local/bin) to your PATH.";
 
     cx.spawn_in(window, async move |workspace, cx| {
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
@@ -98,7 +99,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
             // The user dismissed the administrator prompt; nothing to do.
             Ok(None) => return Ok(()),
             Err(error) => {
-                log::error!("failed to install zed CLI: {error:#}");
+                log::error!("failed to install brewery CLI: {error:#}");
                 workspace.update(cx, |workspace, cx| {
                     struct CliInstallFailed;
 
@@ -111,7 +112,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                                     "You can add `brewery` to your PATH manually.",
                                     cx,
                                 )
-                                .with_title("Couldn't install the Zed CLI")
+                                .with_title("Couldn't install the Brewery CLI") // brewery:
                                 .more_info_message("Show me how")
                                 .more_info_url(CANT_INSTALL_DOCS_URL)
                             })
@@ -140,5 +141,10 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
         register_zed_scheme(cx).await.log_err();
         Ok(())
     })
-    .detach_and_prompt_err("Cannot install the Zed CLI", window, cx, |_, _, _| None);
+    .detach_and_prompt_err(
+        "Cannot install the Brewery CLI", /* brewery: */
+        window,
+        cx,
+        |_, _, _| None,
+    );
 }

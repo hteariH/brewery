@@ -47,8 +47,9 @@ trait InstalledApp {
 }
 
 #[derive(Parser, Debug)]
+// brewery: name, help texts and doc comments below say Brewery
 #[command(
-    name = "brewery", // brewery:
+    name = "brewery",
     disable_version_flag = true,
     before_help = "The Brewery CLI binary.
 This CLI is a separate binary that invokes Brewery.
@@ -79,7 +80,7 @@ struct Args {
     /// Reuse an existing window, replacing its workspace
     #[arg(short, long, overrides_with_all = ["add", "new", "existing", "classic"], hide = true)]
     reuse: bool,
-    /// Open in existing Zed window
+    /// Open in existing Brewery window
     #[arg(short = 'e', long = "existing", overrides_with_all = ["add", "new", "reuse", "classic"])]
     existing: bool,
     /// Use the classic open behavior: new window for directories, reuse for files
@@ -87,33 +88,33 @@ struct Args {
     classic: bool,
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     /// This overrides the default platform-specific data directory location:
-    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Zed`.")]
-    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Zed`.")]
+    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Brewery`.")]
+    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Brewery`.")]
     #[cfg_attr(
         not(any(target_os = "windows", target_os = "macos")),
-        doc = "`$XDG_DATA_HOME/zed`."
+        doc = "`$XDG_DATA_HOME/brewery`."
     )]
     #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     user_data_dir: Option<String>,
-    /// The paths to open in Zed (space-separated).
+    /// The paths to open in Brewery (space-separated).
     ///
     /// Use `path:line:column` syntax to open a file at the given line and column.
     #[arg(trailing_var_arg = true, value_hint = clap::ValueHint::AnyPath)]
     paths_with_position: Vec<String>,
-    /// Print Zed's version and the app path.
+    /// Print Brewery's version and the app path.
     #[arg(short, long)]
     version: bool,
-    /// Run zed in the foreground (useful for debugging)
+    /// Run brewery in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
-    /// Custom path to Zed.app or the zed binary
+    /// Custom path to the Brewery app or its binary
     #[arg(long)]
     zed: Option<PathBuf>,
-    /// Run zed in dev-server mode
+    /// Run brewery in dev-server mode
     #[arg(long)]
     dev_server_token: Option<String>,
     /// The username and WSL distribution to use when opening paths. If not specified,
-    /// Zed will attempt to open the paths directly.
+    /// Brewery will attempt to open the paths directly.
     ///
     /// The username is optional, and if not specified, the default user for the distribution
     /// will be used.
@@ -124,7 +125,7 @@ struct Args {
     #[cfg(target_os = "windows")]
     #[arg(long, value_name = "USER@DISTRO")]
     wsl: Option<String>,
-    /// Not supported in Zed CLI, only supported on Zed binary
+    /// Not supported in the Brewery CLI, only supported on the Brewery binary
     /// Will attempt to give the correct command to run
     #[arg(long)]
     system_specs: bool,
@@ -138,10 +139,10 @@ struct Args {
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
     #[arg(long, action = clap::ArgAction::Append, num_args = 2, value_names = ["OLD_PATH", "NEW_PATH"], value_hint = clap::ValueHint::AnyPath)]
     diff: Vec<String>,
-    /// Generate shell completions for Zed
+    /// Generate shell completions for Brewery
     #[arg(long, value_names = ["SHELL"])]
     completions: Option<Shell>,
-    /// Uninstall Zed from user system
+    /// Uninstall Brewery from user system
     #[cfg(all(
         any(target_os = "linux", target_os = "macos"),
         not(feature = "no-bundled-uninstall")
@@ -848,6 +849,7 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
         return None;
     }
 
+    // brewery: texts say Brewery
     let blue = console::Style::new().blue();
     let items = [
         format!(
@@ -925,7 +927,6 @@ mod linux {
             // brewery:
             cli::app_version_string(
                 &release_channel::RELEASE_CHANNEL_NAME,
-                option_env!("RELEASE_VERSION").unwrap_or_default(),
                 option_env!("ZED_COMMIT_SHA"),
                 &self.0,
             )
@@ -1195,7 +1196,6 @@ mod windows {
             // brewery:
             cli::app_version_string(
                 &release_channel::RELEASE_CHANNEL_NAME,
-                option_env!("RELEASE_VERSION").unwrap_or_default(),
                 option_env!("ZED_COMMIT_SHA"),
                 &self.0,
             )
