@@ -28,6 +28,7 @@ pub enum ContextKind {
 }
 
 /// A table the statement names, with its alias when it has one. Quoted names are unquoted.
+/// `name` is empty for a derived table (`FROM (SELECT ...) d`): its columns are not known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRef {
     pub schema: Option<String>,
@@ -35,46 +36,90 @@ pub struct TableRef {
     pub alias: Option<String>,
 }
 
+/// The whole statement, as a scope.
+const STATEMENT: Range<usize> = 0..usize::MAX;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlContext {
     pub kind: ContextKind,
     /// Where the identifier being typed starts (at its opening quote, if it has one); the
-    /// completion replaces the text from here to the cursor.
+    /// completion replaces the text from here to `replace_end`.
     pub prefix_start: usize,
+    /// The cursor, or the end of a closed quoted name the cursor is in (so that its closing
+    /// quote is replaced too).
+    pub replace_end: usize,
     /// What was typed of that identifier before the cursor, without the quote.
     pub prefix: String,
-    /// The tables of the statement under the cursor, in order.
+    /// The tables of the statement under the cursor, in order, subqueries included.
     pub tables: Vec<TableRef>,
+    /// For each of `tables`, the inside of the subquery it belongs to (`STATEMENT` at the top).
+    scopes: Vec<Range<usize>>,
+    offset: usize,
 }
 
 impl SqlContext {
-    /// The table `qualifier` refers to: an alias first, then a table name; matched
-    /// case-insensitively.
+    /// Indices of `tables` by level: the innermost subquery around the cursor first, then the
+    /// levels around it; last, every table of the statement as a fallback.
+    fn levels(&self) -> Vec<Vec<usize>> {
+        let mut around: Vec<&Range<usize>> = self
+            .scopes
+            .iter()
+            .filter(|scope| scope.start <= self.offset && self.offset <= scope.end)
+            .collect();
+        around.sort_by_key(|scope| (scope.end - scope.start, scope.start));
+        around.dedup();
+        let mut levels: Vec<Vec<usize>> = around
+            .into_iter()
+            .map(|level| {
+                (0..self.tables.len())
+                    .filter(|&ix| &self.scopes[ix] == level)
+                    .collect()
+            })
+            .collect();
+        levels.push((0..self.tables.len()).collect());
+        levels
+    }
+
+    /// The tables a column at the cursor may come from: those of the subquery the cursor is in
+    /// first, then those of the levels around it.
+    pub fn visible_tables(&self) -> Vec<&TableRef> {
+        let mut levels = self.levels();
+        levels.pop();
+        levels
+            .into_iter()
+            .flatten()
+            .map(|ix| &self.tables[ix])
+            .collect()
+    }
+
+    /// The table `qualifier` refers to: level by level from the cursor outwards, an alias first,
+    /// then a table name; matched case-insensitively.
     pub fn resolve(&self, qualifier: &[String]) -> Option<&TableRef> {
-        match qualifier {
-            [] => None,
-            [single] => self
-                .tables
-                .iter()
-                .find(|table| {
-                    table
-                        .alias
-                        .as_ref()
-                        .is_some_and(|alias| alias.eq_ignore_ascii_case(single))
-                })
-                .or_else(|| {
-                    self.tables
-                        .iter()
-                        .find(|table| table.name.eq_ignore_ascii_case(single))
+        self.levels().iter().find_map(|level| {
+            let tables = || level.iter().map(|&ix| &self.tables[ix]);
+            match qualifier {
+                [] => None,
+                [single] => tables()
+                    .find(|table| {
+                        table
+                            .alias
+                            .as_ref()
+                            .is_some_and(|alias| alias.eq_ignore_ascii_case(single))
+                    })
+                    .or_else(|| {
+                        tables().find(|table| {
+                            !table.name.is_empty() && table.name.eq_ignore_ascii_case(single)
+                        })
+                    }),
+                [.., schema, name] => tables().find(|table| {
+                    table.name.eq_ignore_ascii_case(name)
+                        && table
+                            .schema
+                            .as_ref()
+                            .is_some_and(|own| own.eq_ignore_ascii_case(schema))
                 }),
-            [.., schema, name] => self.tables.iter().find(|table| {
-                table.name.eq_ignore_ascii_case(name)
-                    && table
-                        .schema
-                        .as_ref()
-                        .is_some_and(|own| own.eq_ignore_ascii_case(schema))
-            }),
-        }
+            }
+        })
     }
 }
 
@@ -381,6 +426,15 @@ fn position_after(sql: &str, before: &[&Token]) -> Position {
         Kind::Word if last.is_keyword_in(sql, TABLE_KEYWORDS) => Position::Tables,
         Kind::Word if last.is_keyword_in(sql, COLUMN_KEYWORDS) => Position::Columns,
         Kind::Punct('(') => Position::Columns,
+        // `SELECT * |`, `SELECT t.* |`: the item is complete.
+        Kind::Punct('*')
+            if before.len() < 2
+                || before[before.len() - 2].is_punct('.')
+                || before[before.len() - 2].is_punct(',')
+                || before[before.len() - 2].is_keyword_in(sql, &["SELECT", "DISTINCT"]) =>
+        {
+            Position::Keywords
+        }
         Kind::Punct(',') => list_position(sql, &before[..before.len() - 1]),
         Kind::Punct('=' | '<' | '>' | '!' | '+' | '-' | '*' | '/' | '%' | '|') => Position::Columns,
         _ => Position::Keywords,
@@ -413,9 +467,66 @@ fn list_position(sql: &str, before: &[&Token]) -> Position {
     Position::Columns
 }
 
-/// The tables `statement` names after FROM, JOIN, INTO, UPDATE, TABLE and DESCRIBE, skipping
-/// the token at `typing` (the identifier being typed is not a table yet).
-fn table_refs(sql: &str, statement: &[&Token], typing: Option<usize>) -> Vec<TableRef> {
+fn is_subquery_open(sql: &str, statement: &[&Token], ix: usize) -> bool {
+    statement[ix].is_punct('(')
+        && statement
+            .get(ix + 1)
+            .is_some_and(|next| next.is_keyword_in(sql, &["SELECT", "WITH", "VALUES"]))
+}
+
+/// For every `(` of `statement`, the index of its matching `)` (when it is closed).
+fn closing_parens(statement: &[&Token]) -> Vec<Option<usize>> {
+    let mut closes = vec![None; statement.len()];
+    let mut open = Vec::new();
+    for (ix, token) in statement.iter().enumerate() {
+        if token.is_punct('(') {
+            open.push(ix);
+        } else if token.is_punct(')')
+            && let Some(opened) = open.pop()
+        {
+            closes[opened] = Some(ix);
+        }
+    }
+    closes
+}
+
+/// For every token of `statement`, the inside of the innermost subquery it is in (byte range,
+/// open-ended while the subquery is not closed), or `STATEMENT`.
+fn token_scopes(sql: &str, statement: &[&Token], closes: &[Option<usize>]) -> Vec<Range<usize>> {
+    let mut scopes = Vec::with_capacity(statement.len());
+    // Every open `(`, with the scope it opens when it is a subquery.
+    let mut open: Vec<Option<Range<usize>>> = Vec::new();
+    for (ix, token) in statement.iter().enumerate() {
+        if token.is_punct(')') {
+            open.pop();
+        }
+        let scope = open
+            .iter()
+            .rev()
+            .flatten()
+            .next()
+            .cloned()
+            .unwrap_or(STATEMENT);
+        scopes.push(scope);
+        if token.is_punct('(') {
+            open.push(is_subquery_open(sql, statement, ix).then(|| {
+                let end = closes[ix].map_or(usize::MAX, |close| statement[close].range.start);
+                token.range.end..end
+            }));
+        }
+    }
+    scopes
+}
+
+/// The tables `statement` names after FROM, JOIN, INTO, UPDATE, TABLE and DESCRIBE, each with
+/// its scope, skipping the token at `typing` (the identifier being typed is not a table yet).
+fn table_refs(
+    sql: &str,
+    statement: &[&Token],
+    typing: Option<usize>,
+) -> (Vec<TableRef>, Vec<Range<usize>>) {
+    let closes = closing_parens(statement);
+    let scopes = token_scopes(sql, statement, &closes);
     let usable = |ix: usize| -> bool {
         Some(ix) != typing
             && statement.get(ix).is_some_and(|token| {
@@ -423,54 +534,85 @@ fn table_refs(sql: &str, statement: &[&Token], typing: Option<usize>) -> Vec<Tab
                     || (token.kind == Kind::Word && !is_keyword(&sql[token.range.clone()]))
             })
     };
+    // An alias at `ix` (after an optional AS): the alias and the index after it.
+    let alias_at = |mut ix: usize| -> (Option<String>, usize) {
+        let explicit = statement
+            .get(ix)
+            .and_then(|token| token.keyword(sql))
+            .is_some_and(|word| word == "AS");
+        if explicit {
+            ix += 1;
+        }
+        if usable(ix) {
+            (Some(statement[ix].identifier(sql)), ix + 1)
+        } else if explicit && Some(ix) == typing {
+            (None, ix + 1)
+        } else {
+            (None, ix)
+        }
+    };
     let mut tables = Vec::new();
-    let mut ix = 0;
-    while ix < statement.len() {
-        let keyword = statement[ix].keyword(sql);
-        ix += 1;
-        let Some(keyword) = keyword.filter(|word| TABLE_KEYWORDS.contains(&word.as_str())) else {
+    let mut table_scopes = Vec::new();
+    for (keyword_ix, token) in statement.iter().enumerate() {
+        let Some(keyword) = token
+            .keyword(sql)
+            .filter(|word| TABLE_KEYWORDS.contains(&word.as_str()))
+        else {
             continue;
         };
+        let mut ix = keyword_ix + 1;
         loop {
-            if !usable(ix) {
-                break;
-            }
-            let mut parts = vec![statement[ix].identifier(sql)];
-            // `schema.tab|`: the table is still being typed.
-            let mut unfinished = false;
-            ix += 1;
-            while statement.get(ix).is_some_and(|token| token.is_punct('.'))
-                && statement
-                    .get(ix + 1)
-                    .is_some_and(|token| token.is_identifier())
+            // `FROM (owners o JOIN ...)`: the tables inside belong to this level.
+            while statement.get(ix).is_some_and(|token| token.is_punct('('))
+                && !is_subquery_open(sql, statement, ix)
             {
-                unfinished |= Some(ix + 1) == typing;
-                parts.push(statement[ix + 1].identifier(sql));
-                ix += 2;
-            }
-            let explicit_alias = statement
-                .get(ix)
-                .and_then(|token| token.keyword(sql))
-                .is_some_and(|word| word == "AS");
-            if explicit_alias {
                 ix += 1;
             }
-            let alias = if usable(ix) {
-                ix += 1;
-                Some(statement[ix - 1].identifier(sql))
-            } else {
-                if explicit_alias && Some(ix) == typing {
-                    ix += 1;
+            if ix < statement.len() && is_subquery_open(sql, statement, ix) {
+                // A derived table; the tables inside are read at its own FROM.
+                let scope = scopes[ix].clone();
+                let Some(close) = closes[ix] else {
+                    break;
+                };
+                let (alias, next) = alias_at(close + 1);
+                ix = next;
+                if alias.is_some() {
+                    tables.push(TableRef {
+                        schema: None,
+                        name: String::new(),
+                        alias,
+                    });
+                    table_scopes.push(scope);
                 }
-                None
-            };
-            let name = parts.pop().unwrap_or_default();
-            if !unfinished {
-                tables.push(TableRef {
-                    schema: parts.pop(),
-                    name,
-                    alias,
-                });
+            } else {
+                if !usable(ix) {
+                    break;
+                }
+                let scope = scopes[ix].clone();
+                let mut parts = vec![statement[ix].identifier(sql)];
+                // `schema.tab|`: the table is still being typed.
+                let mut unfinished = false;
+                ix += 1;
+                while statement.get(ix).is_some_and(|token| token.is_punct('.'))
+                    && statement
+                        .get(ix + 1)
+                        .is_some_and(|token| token.is_identifier())
+                {
+                    unfinished |= Some(ix + 1) == typing;
+                    parts.push(statement[ix + 1].identifier(sql));
+                    ix += 2;
+                }
+                let (alias, next) = alias_at(ix);
+                ix = next;
+                let name = parts.pop().unwrap_or_default();
+                if !unfinished {
+                    tables.push(TableRef {
+                        schema: parts.pop(),
+                        name,
+                        alias,
+                    });
+                    table_scopes.push(scope);
+                }
             }
             let more = keyword == "FROM" && statement.get(ix).is_some_and(|t| t.is_punct(','));
             if !more {
@@ -479,7 +621,7 @@ fn table_refs(sql: &str, statement: &[&Token], typing: Option<usize>) -> Vec<Tab
             ix += 1;
         }
     }
-    tables
+    (tables, table_scopes)
 }
 
 /// The completion context for a cursor at byte `offset` of `sql`.
@@ -491,8 +633,11 @@ pub fn context_at(sql: &str, offset: usize) -> SqlContext {
     let nothing = SqlContext {
         kind: ContextKind::Nothing,
         prefix_start: offset,
+        replace_end: offset,
         prefix: String::new(),
         tables: Vec::new(),
+        scopes: Vec::new(),
+        offset,
     };
     let tokens = tokenize(sql);
     if tokens.iter().any(|token| token.swallows(offset)) {
@@ -515,10 +660,14 @@ pub fn context_at(sql: &str, offset: usize) -> SqlContext {
             && offset <= token.range.end
             && matches!(token.kind, Kind::Word | Kind::Quoted | Kind::Number)
     });
+    let mut replace_end = offset;
     let (prefix_start, prefix, before_end) = match typing.map(|ix| (ix, statement[ix])) {
         Some((_, token)) if token.kind == Kind::Number => return nothing,
         Some((ix, token)) => {
             let prefix = if token.kind == Kind::Quoted {
+                if token.closed {
+                    replace_end = token.range.end;
+                }
                 let quote_len = sql[token.range.start..]
                     .chars()
                     .next()
@@ -543,7 +692,7 @@ pub fn context_at(sql: &str, offset: usize) -> SqlContext {
         ),
     };
     let before = &statement[..before_end];
-    let tables = table_refs(sql, statement, typing);
+    let (tables, scopes) = table_refs(sql, statement, typing);
 
     let kind = if before.last().is_some_and(|token| token.is_punct('.')) {
         // `a.b.` : the qualifier parts, then what comes before them.
@@ -572,8 +721,11 @@ pub fn context_at(sql: &str, offset: usize) -> SqlContext {
     SqlContext {
         kind,
         prefix_start,
+        replace_end,
         prefix,
         tables,
+        scopes,
+        offset,
     }
 }
 

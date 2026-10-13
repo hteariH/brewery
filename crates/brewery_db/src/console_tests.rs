@@ -628,15 +628,23 @@ impl Console {
         cx.run_until_parked();
     }
 
-    /// The items of the open completion menu, as `label detail`.
+    /// The items the open completion menu shows, in order, as `label detail`.
     fn menu(&self, cx: &mut VisualTestContext) -> Vec<String> {
         self.editor(cx).read_with(cx, |editor, _| {
-            editor
-                .current_completions()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|completion| {
-                    let detail = match completion.documentation {
+            let menu = editor.context_menu().borrow();
+            let Some(editor::code_context_menus::CodeContextMenu::Completions(menu)) =
+                menu.as_ref()
+            else {
+                return Vec::new();
+            };
+            let completions = menu.completions.borrow();
+            menu.entries
+                .borrow()
+                .iter()
+                .filter_map(|entry| entry.as_match())
+                .map(|entry| {
+                    let completion = &completions[entry.candidate_id];
+                    let detail = match &completion.documentation {
                         Some(project::lsp_store::CompletionDocumentation::SingleLine(detail)) => {
                             detail.to_string()
                         }
@@ -646,6 +654,12 @@ impl Console {
                 })
                 .collect()
         })
+    }
+
+    /// Types `typed` where the cursor is, one keystroke at a time.
+    fn keep_typing(&self, typed: &str, cx: &mut VisualTestContext) {
+        cx.simulate_input(typed);
+        cx.run_until_parked();
     }
 
     fn accept(&self, cx: &mut VisualTestContext) {
@@ -737,4 +751,62 @@ async fn completion_without_a_schema_still_offers_keywords(cx: &mut TestAppConte
     // Inside a string literal there is nothing to complete.
     console.type_at("SELECT 'ow|'", "n", cx);
     assert!(console.menu(cx).is_empty());
+}
+
+#[gpui::test]
+async fn the_menu_narrows_as_the_name_is_typed(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let mut schema = schema();
+    schema["schemas"][0]["tables"] = json!([
+        { "name": "orders", "kind": "table", "columns": [] },
+        { "name": "owls", "kind": "table", "columns": [] },
+        { "name": "owners", "kind": "table", "columns": [] },
+        { "name": "owner_names", "kind": "view", "columns": [] }
+    ]);
+    schema["schemas"].as_array_mut().unwrap().truncate(1);
+    *console.fixture.state.schema_reply.borrow_mut() = Some(schema);
+
+    console.type_at("SELECT * FROM |", "o", cx);
+    assert_eq!(
+        console.menu(cx),
+        [
+            "orders table",
+            "owls table",
+            "owners table",
+            "owner_names view"
+        ]
+    );
+    console.keep_typing("w", cx);
+    assert_eq!(
+        console.menu(cx),
+        ["owls table", "owners table", "owner_names view"]
+    );
+    console.keep_typing("n", cx);
+    assert_eq!(console.menu(cx), ["owners table", "owner_names view"]);
+    console.keep_typing("ers", cx);
+    assert_eq!(console.menu(cx), ["owners table"]);
+    assert_eq!(console.fixture.calls_of("db/schema").len(), 1);
+}
+
+#[gpui::test]
+async fn completing_inside_a_quoted_name_replaces_it_whole(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    // The closing quote is there already (typed, or added by autoclose).
+    console.type_at("SELECT o.\"F|\" FROM owners o", "i", cx);
+    assert_eq!(console.menu(cx), ["First Name text"]);
+    console.accept(cx);
+    assert_eq!(console.text(cx), "SELECT o.\"First Name\" FROM owners o");
+
+    console.type_at("SELECT o.\"F|rst\" FROM owners o", "i", cx);
+    console.accept(cx);
+    assert_eq!(console.text(cx), "SELECT o.\"First Name\" FROM owners o");
+}
+
+#[gpui::test]
+async fn tables_of_other_schemas_are_inserted_with_their_schema(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_at("SELECT * FROM |", "inv", cx);
+    assert_eq!(console.menu(cx), ["invoices table · billing"]);
+    console.accept(cx);
+    assert_eq!(console.text(cx), "SELECT * FROM billing.invoices");
 }

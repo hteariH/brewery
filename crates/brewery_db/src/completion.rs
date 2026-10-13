@@ -5,13 +5,14 @@ use crate::schema_cache::SchemaCache;
 use crate::sql_context::{ContextKind, KEYWORDS, SqlContext, TableRef, context_at};
 use crate::statements::quote_identifier;
 use anyhow::Result;
-use brewery_daemon_client::{DbSchema, TableInfo, TableKind};
+use brewery_daemon_client::{ConnectionInfo, DbSchema, TableInfo, TableKind};
 use editor::{CompletionProvider, Editor};
 use gpui::{Context, Entity, Task, Window};
 use language::{Buffer, CodeLabel, ToOffset as _};
 use project::lsp_store::CompletionDocumentation;
 use project::{Completion, CompletionDisplayOptions, CompletionResponse, CompletionSource};
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 /// One item of the menu: what it shows, what it inserts and its detail (a column's type, "table",
@@ -23,30 +24,117 @@ pub struct SqlCompletion {
     pub detail: String,
 }
 
-fn has_prefix(name: &str, prefix: &str) -> bool {
-    name.to_lowercase().starts_with(&prefix.to_lowercase())
+/// How names are written for one data source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dialect {
+    pub driver_id: String,
+    /// The schema unqualified names resolve to; tables of other schemas are inserted as
+    /// `schema.table`. `None` never qualifies (SQLite, or nothing known).
+    pub default_schema: Option<String>,
 }
 
-/// The table `name` (in `schema`, or in any schema when `None`), with the name of its schema.
+impl Dialect {
+    /// PostgreSQL: `currentSchema` of the URL (or the options), else `public`. MySQL and MariaDB:
+    /// the database of the URL. Anything else: unknown.
+    pub fn for_connection(connection: &ConnectionInfo) -> Self {
+        let url = connection.url.as_str();
+        let query_param = |name: &str| -> Option<String> {
+            let (_, query) = url.split_once('?')?;
+            query.split(['&', ';']).find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                key.eq_ignore_ascii_case(name).then(|| value.to_string())
+            })
+        };
+        let default_schema = match connection.driver_id.as_str() {
+            "postgresql" => {
+                let current = query_param("currentSchema")
+                    .or_else(|| connection.options.get("currentSchema").cloned());
+                Some(
+                    current
+                        .and_then(|value| {
+                            value
+                                .split(',')
+                                .next()
+                                .map(|first| first.trim().to_string())
+                        })
+                        .filter(|first| !first.is_empty())
+                        .unwrap_or_else(|| "public".to_string()),
+                )
+            }
+            "mysql" | "mariadb" => url
+                .split_once("//")
+                .and_then(|(_, rest)| rest.split_once('/'))
+                .map(|(_, path)| {
+                    path.split(['?', ';', '/'])
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .filter(|database| !database.is_empty()),
+            _ => None,
+        };
+        Self {
+            driver_id: connection.driver_id.clone(),
+            default_schema,
+        }
+    }
+
+    fn is_default(&self, schema: &str) -> bool {
+        schema.is_empty()
+            || self
+                .default_schema
+                .as_deref()
+                .is_none_or(|default| default.eq_ignore_ascii_case(schema))
+    }
+}
+
+/// Case-insensitive (ASCII) prefix match, without allocating.
+fn has_prefix(name: &str, prefix: &str) -> bool {
+    name.get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+}
+
+/// The table `name` (in `schema`, or in any schema when `None`, the default one first), with the
+/// name of its schema.
 fn find_table<'a>(
     db: &'a DbSchema,
+    dialect: &Dialect,
     schema: Option<&str>,
     name: &str,
 ) -> Option<(&'a str, &'a TableInfo)> {
-    db.schemas
-        .iter()
-        .filter(|candidate| schema.is_none_or(|schema| candidate.name.eq_ignore_ascii_case(schema)))
-        .find_map(|candidate| {
-            candidate
-                .tables
-                .iter()
-                .find(|table| table.name.eq_ignore_ascii_case(name))
-                .map(|table| (candidate.name.as_str(), table))
-        })
+    let in_schema = |wanted: Option<&str>| {
+        db.schemas
+            .iter()
+            .filter(move |candidate| {
+                wanted.is_none_or(|wanted| candidate.name.eq_ignore_ascii_case(wanted))
+            })
+            .find_map(|candidate| {
+                candidate
+                    .tables
+                    .iter()
+                    .find(|table| table.name.eq_ignore_ascii_case(name))
+                    .map(|table| (candidate.name.as_str(), table))
+            })
+    };
+    match schema {
+        Some(schema) => in_schema(Some(schema)),
+        None => dialect
+            .default_schema
+            .as_deref()
+            .and_then(|default| in_schema(Some(default)))
+            .or_else(|| in_schema(None)),
+    }
 }
 
-fn find_ref<'a>(db: &'a DbSchema, table: &TableRef) -> Option<(&'a str, &'a TableInfo)> {
-    find_table(db, table.schema.as_deref(), &table.name)
+fn find_ref<'a>(
+    db: &'a DbSchema,
+    dialect: &Dialect,
+    table: &TableRef,
+) -> Option<(&'a str, &'a TableInfo)> {
+    if table.name.is_empty() {
+        return None;
+    }
+    find_table(db, dialect, table.schema.as_deref(), &table.name)
 }
 
 /// The menu for `context`, in the order it is shown: tables of the statement before the other
@@ -54,8 +142,9 @@ fn find_ref<'a>(db: &'a DbSchema, table: &TableRef) -> Option<(&'a str, &'a Tabl
 pub fn completions_for(
     context: &SqlContext,
     schema: Option<&DbSchema>,
-    driver_id: &str,
+    dialect: &Dialect,
 ) -> Vec<SqlCompletion> {
+    let driver_id = dialect.driver_id.as_str();
     let prefix = context.prefix.as_str();
     let mut items = Vec::new();
     let identifier = |name: &str, detail: String| SqlCompletion {
@@ -63,6 +152,7 @@ pub fn completions_for(
         insert: quote_identifier(driver_id, name),
         detail,
     };
+    let visible: Vec<&TableRef> = context.visible_tables();
     match &context.kind {
         ContextKind::Nothing => {}
         ContextKind::Keywords => push_keywords(&mut items, prefix),
@@ -91,11 +181,10 @@ pub fn completions_for(
                 only.as_deref()
                     .is_none_or(|only| schema.eq_ignore_ascii_case(only))
             };
-            let mut listed: Vec<&TableInfo> = Vec::new();
-            let statement_tables = context
-                .tables
+            let mut listed: HashSet<*const TableInfo> = HashSet::default();
+            let statement_tables = visible
                 .iter()
-                .filter_map(|table| find_ref(db, table));
+                .filter_map(|table| find_ref(db, dialect, table));
             let all_tables = db.schemas.iter().flat_map(|schema| {
                 schema
                     .tables
@@ -103,12 +192,19 @@ pub fn completions_for(
                     .map(|table| (schema.name.as_str(), table))
             });
             for (schema, table) in statement_tables.chain(all_tables) {
-                let seen = listed.iter().any(|listed| std::ptr::eq(*listed, table));
-                if seen || !in_scope(schema) || !has_prefix(&table.name, prefix) {
+                if !in_scope(schema)
+                    || !has_prefix(&table.name, prefix)
+                    || !listed.insert(table as *const TableInfo)
+                {
                     continue;
                 }
-                listed.push(table);
-                items.push(identifier(&table.name, detail(schema, table)));
+                let mut item = identifier(&table.name, detail(schema, table));
+                // After `schema.` the schema is written already.
+                if only.is_none() && !dialect.is_default(schema) {
+                    item.insert =
+                        format!("{}.{}", quote_identifier(driver_id, schema), item.insert);
+                }
+                items.push(item);
             }
             if only.is_none() {
                 for schema in &db.schemas {
@@ -120,16 +216,13 @@ pub fn completions_for(
         }
         ContextKind::Columns => {
             if let Some(db) = schema {
-                let mut tables: Vec<&TableInfo> = Vec::new();
-                for (_, table) in context
-                    .tables
+                let mut seen: HashSet<*const TableInfo> = HashSet::default();
+                let tables: Vec<&TableInfo> = visible
                     .iter()
-                    .filter_map(|table| find_ref(db, table))
-                {
-                    if !tables.iter().any(|listed| std::ptr::eq(*listed, table)) {
-                        tables.push(table);
-                    }
-                }
+                    .filter_map(|table| find_ref(db, dialect, table))
+                    .map(|(_, table)| table)
+                    .filter(|table| seen.insert(*table as *const TableInfo))
+                    .collect();
                 let several = tables.len() > 1;
                 for table in tables {
                     for column in &table.columns {
@@ -150,11 +243,12 @@ pub fn completions_for(
             let Some(db) = schema else {
                 return items;
             };
+            // A derived table (`FROM (SELECT ..) d`) resolves but has no known columns.
             let table = match context.resolve(qualifier) {
-                Some(table) => find_ref(db, table),
+                Some(table) => find_ref(db, dialect, table),
                 None => match qualifier.as_slice() {
-                    [name] => find_table(db, None, name),
-                    [.., schema, name] => find_table(db, Some(schema), name),
+                    [name] => find_table(db, dialect, None, name),
+                    [.., schema, name] => find_table(db, dialect, Some(schema), name),
                     [] => None,
                 },
             };
@@ -192,17 +286,17 @@ fn push_keywords(items: &mut Vec<SqlCompletion>, prefix: &str) {
 /// Completion for one console's editor.
 pub struct SqlCompletionProvider {
     cache: Entity<SchemaCache>,
-    driver_id: String,
+    dialect: Dialect,
     /// The last answer went out without the schema because it was still being fetched; the
     /// console asks again when it arrives.
     waiting: Rc<Cell<bool>>,
 }
 
 impl SqlCompletionProvider {
-    pub fn new(cache: Entity<SchemaCache>, driver_id: String) -> Self {
+    pub fn new(cache: Entity<SchemaCache>, dialect: Dialect) -> Self {
         Self {
             cache,
-            driver_id,
+            dialect,
             waiting: Rc::default(),
         }
     }
@@ -227,7 +321,13 @@ impl CompletionProvider for SqlCompletionProvider {
             let offset = buffer_position.to_offset(buffer);
             let context = context_at(&buffer.text(), offset);
             let start = buffer.anchor_before(context.prefix_start.min(offset));
-            (context, start..buffer_position)
+            // Inside `"Fi|"` the closing quote is replaced too.
+            let end = if context.replace_end > offset {
+                buffer.anchor_after(context.replace_end)
+            } else {
+                buffer_position
+            };
+            (context, start..end)
         };
         let schema = if context.kind == ContextKind::Nothing {
             None
@@ -235,8 +335,15 @@ impl CompletionProvider for SqlCompletionProvider {
             self.cache.update(cx, |cache, cx| cache.schema(cx))
         };
         let loading = schema.is_none() && self.cache.read(cx).is_loading();
-        self.waiting.set(loading);
-        let completions = completions_for(&context, schema.as_deref(), &self.driver_id)
+        // Worth reopening the menu for once the schema is there: a name being typed, or a place
+        // where only names fit.
+        let wants_names = !context.prefix.is_empty()
+            || matches!(
+                context.kind,
+                ContextKind::Tables { .. } | ContextKind::ColumnsOf { .. }
+            );
+        self.waiting.set(loading && wants_names);
+        let completions = completions_for(&context, schema.as_deref(), &self.dialect)
             .into_iter()
             .map(|item| Completion {
                 replace_range: replace_range.clone(),
@@ -257,8 +364,9 @@ impl CompletionProvider for SqlCompletionProvider {
         Task::ready(Ok(vec![CompletionResponse {
             completions,
             display_options: CompletionDisplayOptions::default(),
-            // Asked again on the next keystroke while the schema is on its way.
-            is_incomplete: loading,
+            // The menu is never filtered by Zed (see `filter_completions`), so every keystroke
+            // has to ask again for it to narrow.
+            is_incomplete: true,
         }]))
     }
 
@@ -285,8 +393,8 @@ impl CompletionProvider for SqlCompletionProvider {
 
     /// `completions_for` already keeps only the names with the typed prefix. Zed's fuzzy filter
     /// would order the menu by match score instead (keywords among columns, a view before its
-    /// table), so it is off and every keystroke asks again; that is cheap, the schema is in
-    /// memory.
+    /// table), so it is off. Zed then only asks again when the last answer was incomplete, which
+    /// every answer is; that is cheap, the schema is in memory.
     fn filter_completions(&self) -> bool {
         false
     }

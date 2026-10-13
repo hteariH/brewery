@@ -8,9 +8,24 @@ fn schema() -> DbSchema {
 
 /// The completions at the `|` in `marked`, as `label detail` strings.
 fn offered_with(marked: &str, schema: Option<&DbSchema>, driver_id: &str) -> Vec<SqlCompletion> {
+    let default_schema = match driver_id {
+        "postgresql" => Some("public".to_string()),
+        _ => None,
+    };
+    offered_in(
+        marked,
+        schema,
+        &Dialect {
+            driver_id: driver_id.to_string(),
+            default_schema,
+        },
+    )
+}
+
+fn offered_in(marked: &str, schema: Option<&DbSchema>, dialect: &Dialect) -> Vec<SqlCompletion> {
     let offset = marked.find('|').expect("a cursor marker");
     let text = marked.replacen('|', "", 1);
-    completions_for(&context_at(&text, offset), schema, driver_id)
+    completions_for(&context_at(&text, offset), schema, dialect)
 }
 
 fn offered(marked: &str) -> Vec<String> {
@@ -179,4 +194,94 @@ fn without_a_schema_only_keywords() {
 fn nothing_in_strings_and_comments() {
     assert!(labels("SELECT * FROM owners WHERE email = 'ow|'").is_empty());
     assert!(labels("-- SEL|").is_empty());
+}
+
+#[test]
+fn tables_outside_the_default_schema_are_inserted_qualified() {
+    let inserted = |marked: &str, driver_id: &str, default_schema: Option<&str>| -> Vec<String> {
+        let dialect = Dialect {
+            driver_id: driver_id.to_string(),
+            default_schema: default_schema.map(str::to_string),
+        };
+        offered_in(marked, Some(&schema()), &dialect)
+            .into_iter()
+            .map(|completion| completion.insert)
+            .collect()
+    };
+    assert_eq!(
+        inserted("SELECT * FROM |", "postgresql", Some("public")),
+        [
+            "owners",
+            "owner_names",
+            "pets",
+            "billing.invoices",
+            "public",
+            "billing"
+        ]
+    );
+    assert_eq!(
+        inserted("SELECT * FROM |", "postgresql", Some("billing")),
+        [
+            "public.owners",
+            "public.owner_names",
+            "public.pets",
+            "invoices",
+            "public",
+            "billing"
+        ]
+    );
+    assert_eq!(
+        inserted("SELECT o.| FROM owners o", "postgresql", Some("billing")),
+        ["id", "email", "\"First Name\""],
+        "columns are never qualified"
+    );
+    // After `schema.` the schema is already there; without a known default nothing is qualified.
+    assert_eq!(
+        inserted("SELECT * FROM billing.|", "postgresql", Some("public")),
+        ["invoices"]
+    );
+    assert_eq!(inserted("SELECT * FROM inv|", "sqlite", None), ["invoices"]);
+}
+
+#[test]
+fn the_default_schema_comes_from_the_connection() {
+    let dialect = |driver: &str, url: &str| {
+        let connection: ConnectionInfo = serde_json::from_value(serde_json::json!({
+            "id": "c1", "name": "db", "driverId": driver, "url": url,
+            "user": null, "hasPassword": false, "options": {}
+        }))
+        .unwrap();
+        Dialect::for_connection(&connection).default_schema
+    };
+    assert_eq!(
+        dialect("postgresql", "jdbc:postgresql://localhost:5432/shop"),
+        Some("public".to_string())
+    );
+    assert_eq!(
+        dialect(
+            "postgresql",
+            "jdbc:postgresql://localhost/shop?ssl=true&currentSchema=billing,public"
+        ),
+        Some("billing".to_string())
+    );
+    assert_eq!(
+        dialect(
+            "mariadb",
+            "jdbc:mariadb://localhost:3306/petclinic?useSSL=false"
+        ),
+        Some("petclinic".to_string())
+    );
+    assert_eq!(dialect("mysql", "jdbc:mysql://localhost:3306/"), None);
+    assert_eq!(dialect("sqlite", "jdbc:sqlite:/tmp/app.db"), None);
+}
+
+#[test]
+fn subqueries_and_derived_tables() {
+    let items = labels("SELECT * FROM pets WHERE owner_id IN (SELECT | FROM owners)");
+    assert_eq!(items[..4], ["id", "email", "First Name", "id"]);
+    assert!(labels("SELECT d.| FROM (SELECT id FROM owners) d").is_empty());
+    assert_eq!(
+        labels("SELECT * FROM owners o WHERE id IN (SELECT owner_id FROM pets o WHERE o.n|)"),
+        ["name"]
+    );
 }

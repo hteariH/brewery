@@ -1,7 +1,7 @@
 //! The query console: a workspace tab with an SQL editor bound to one data source and, below it,
 //! the result of the last statement (a paged grid, an update count or the daemon's error).
 
-use crate::completion::SqlCompletionProvider;
+use crate::completion::{Dialect, SqlCompletionProvider};
 use crate::panel::WAITING_FOR_DAEMON;
 use crate::result_grid::ResultGrid;
 use crate::schema_cache::SchemaCache;
@@ -109,7 +109,7 @@ impl QueryConsole {
         });
         let schema_cache = SchemaCache::for_connection(&daemon, &connection.id, cx);
         let completion =
-            SqlCompletionProvider::new(schema_cache.clone(), connection.driver_id.clone());
+            SqlCompletionProvider::new(schema_cache.clone(), Dialect::for_connection(&connection));
         let waiting = completion.waiting();
         let editor = cx.new(|cx| {
             let mut editor = Editor::for_buffer(buffer, Some(project), window, cx);

@@ -300,3 +300,112 @@ fn schema_changes_are_recognised_by_their_first_keyword() {
         assert!(!is_schema_change(sql), "{sql}");
     }
 }
+
+#[test]
+fn inside_a_closed_quoted_name_the_replacement_runs_through_the_closing_quote() {
+    let context = at("SELECT o.\"Fi|\" FROM owners o");
+    assert_eq!(context.prefix, "Fi");
+    assert_eq!(context.prefix_start, 9);
+    assert_eq!(context.replace_end, 13);
+
+    let context = at("SELECT o.\"Fi|rst\" FROM owners o");
+    assert_eq!(context.prefix, "Fi");
+    assert_eq!((context.prefix_start, context.replace_end), (9, 16));
+
+    // Not closed yet, or not quoted: up to the cursor.
+    let context = at("SELECT o.\"Fi|");
+    assert_eq!((context.prefix_start, context.replace_end), (9, 12));
+    let context = at("SELECT * FROM ow|ners");
+    assert_eq!((context.prefix_start, context.replace_end), (14, 16));
+}
+
+#[test]
+fn subquery_aliases_resolve_in_their_own_level_first() {
+    assert_eq!(
+        resolved("SELECT * FROM a x WHERE id IN (SELECT id FROM b x WHERE x.|)"),
+        Some(table(None, "b", Some("x")))
+    );
+    assert_eq!(
+        resolved("SELECT * FROM a x WHERE id IN (SELECT id FROM b x WHERE x.|"),
+        Some(table(None, "b", Some("x"))),
+        "while the subquery is not closed yet"
+    );
+    assert_eq!(
+        resolved("SELECT x.| FROM a x WHERE id IN (SELECT id FROM b x)"),
+        Some(table(None, "a", Some("x")))
+    );
+    // A correlated subquery sees the outer aliases.
+    assert_eq!(
+        resolved("SELECT * FROM a x WHERE id IN (SELECT id FROM b y WHERE y.id = x.|)"),
+        Some(table(None, "a", Some("x")))
+    );
+}
+
+#[test]
+fn column_positions_see_the_tables_of_the_levels_around_the_cursor() {
+    let names = |marked: &str| -> Vec<String> {
+        at(marked)
+            .visible_tables()
+            .into_iter()
+            .map(|table| table.name.clone())
+            .collect()
+    };
+    assert_eq!(
+        names("SELECT | FROM a WHERE id IN (SELECT id FROM b)"),
+        ["a"]
+    );
+    assert_eq!(
+        names("SELECT * FROM a WHERE id IN (SELECT | FROM b)"),
+        ["b", "a"]
+    );
+}
+
+#[test]
+fn a_derived_table_alias_stands_for_no_known_table() {
+    let derived = table(None, "", Some("d"));
+    assert_eq!(
+        resolved("SELECT d.| FROM (SELECT id FROM owners) d"),
+        Some(derived.clone())
+    );
+    assert_eq!(
+        resolved("SELECT d.| FROM (SELECT id FROM owners) AS d, pets p"),
+        Some(derived)
+    );
+    assert_eq!(
+        resolved("SELECT p.| FROM (SELECT id FROM owners) AS d, pets p"),
+        Some(table(None, "pets", Some("p")))
+    );
+    // The table inside is seen from inside only.
+    let context = at("SELECT | FROM (SELECT id FROM owners) d");
+    assert!(
+        context
+            .visible_tables()
+            .iter()
+            .all(|table| table.name != "owners")
+    );
+}
+
+#[test]
+fn parenthesised_from_lists() {
+    assert_eq!(
+        resolved("SELECT o.| FROM (owners o JOIN pets p ON p.owner_id = o.id)"),
+        Some(table(None, "owners", Some("o")))
+    );
+    assert_eq!(
+        resolved("SELECT p.| FROM (owners o JOIN pets p ON p.owner_id = o.id)"),
+        Some(table(None, "pets", Some("p")))
+    );
+}
+
+#[test]
+fn a_star_in_the_select_list_is_a_finished_item() {
+    for marked in [
+        "SELECT * |",
+        "SELECT o.* |",
+        "SELECT id, * |",
+        "SELECT DISTINCT * |",
+    ] {
+        assert_eq!(kind(marked), ContextKind::Keywords, "{marked}");
+    }
+    assert_eq!(kind("SELECT 2 * |"), ContextKind::Columns);
+}
