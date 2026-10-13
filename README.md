@@ -140,7 +140,17 @@ tag or any revision, or the whole project when no file is focused. The project
 compare shows the changes since the merge base with that branch. "Compare with
 current" in the Branches popup opens the same view.
 
-A 3-way merge editor comes in the next update.
+When a merge or rebase from the Branches popup stops on conflicts, the Conflicts
+dialog lists the files. Accept Yours or Accept Theirs resolves a file in one click;
+Merge… opens the 3-pane merge editor: your version on the left, the result in the
+middle and theirs on the right. Changes that don't conflict are already applied.
+Take each change from either side with the arrow buttons or ignore it, edit the
+result freely, jump between conflicts with F7 and Shift+F7, then Apply to save the
+file and mark it resolved. Continue finishes the merge or rebase, and Abort cancels
+it. During a rebase the left side is still your branch. Clicking a conflicted file
+in the Commit tool window opens the merge editor, and `brewery: resolve conflicts`
+reopens the dialog. Conflicts after a pull show a notification with a Resolve
+button.
 
 ## Licence
 
