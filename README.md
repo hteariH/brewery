@@ -152,6 +152,13 @@ in the Commit tool window opens the merge editor, and `brewery: resolve conflict
 reopens the dialog. Conflicts after a pull show a notification with a Resolve
 button.
 
+## Updates
+
+On Windows, Brewery updates itself from GitHub Releases: it downloads the new version
+in the background and installs it when you quit. On Linux, update with your package
+manager (or download the new release); Brewery shows a notification when one is out.
+Use Check for Updates in the menu to check now.
+
 ## Licence
 
 The editor is GPL-3.0-or-later, like Zed. See `LICENSE-GPL`.

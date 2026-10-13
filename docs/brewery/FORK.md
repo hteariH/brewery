@@ -21,7 +21,7 @@
 
     git checkout main
     script/brewery/merge-upstream
-    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
+    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
     cargo test -p workspace --lib
     script/brewery/list-hooks   # every hook still present?
 
@@ -76,3 +76,22 @@ brewery-daemon.jar`, `jdtls/` and `extensions/<id>`. The root is the exe's folde
 Windows, the parent of `libexec/` on Linux (`/opt/brewery/libexec/brewery-editor`) and
 `Contents/Resources` in a macOS app. A bundled JRE is used for the daemon before
 `JAVA_HOME` and `PATH`.
+
+## Updates
+
+Brewery checks `https://github.com/hteariH/brewery/releases/latest/download/latest.json`
+(Stable and Preview builds only; Dev and Nightly never poll). The manifest:
+
+    {"version": "0.1.1",
+     "notes_url": "https://github.com/hteariH/brewery/releases/tag/v0.1.1",
+     "assets": {"windows-x86_64": {"url": "...setup.exe", "sha256": "..."},
+                "linux-x86_64": {...}, "macos-aarch64": {...}}}
+
+On Windows the installer is downloaded, verified against `sha256`, run in update mode,
+and `toolsuto_update_helper.exe` swaps the files on quit, including the `jre`,
+`brewery-daemon`, `jdtls` and `extensions` directories. The helper waits up to 5 s for
+processes started from those directories and then stops them. On Linux and macOS
+Brewery only shows a notification with a link to the release notes; packages update
+through the package manager. Don't set `ZED_UPDATE_EXPLANATION` in builds: it turns
+the check off completely. To test against a draft release, set
+`BREWERY_UPDATE_MANIFEST_URL` to another manifest URL.
