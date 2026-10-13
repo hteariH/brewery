@@ -4,10 +4,12 @@ use fs::RealFs;
 use gpui::{TestAppContext, VisualTestContext};
 use language::{Language, LanguageConfig, LanguageMatcher};
 use settings::{DiffViewStyle, SettingsStore};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use tempfile::TempDir;
-use workspace::{AppState, MultiWorkspace};
+use workspace::{AppState, MultiWorkspace, SaveIntent};
 use worktree::WorktreeModelHandle;
 
 /// A real git repository in a temp dir, isolated from the user's global and system config.
@@ -306,7 +308,67 @@ async fn revision_against_revision(cx: &mut TestAppContext) {
         );
         assert!(view.new_buffer().expect("buffer").read(cx).read_only());
         assert!(!view.can_save(cx));
+        assert!(!view.is_dirty(cx));
+        assert!(!view.has_conflict(cx));
     });
+}
+
+#[gpui::test]
+async fn unsaved_working_copy_edits_are_not_lost_on_close(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.commit("a.txt", "one\ntwo\n", "first");
+    let (fixture, cx) = open_real(&repo, cx).await;
+
+    let view = open_view(&fixture, "a.txt", "HEAD", NewSide::WorkingCopy, cx)
+        .await
+        .expect("open");
+    view.read_with(cx, |view, cx| assert!(!view.is_dirty(cx)));
+
+    let dirty_events = Rc::new(Cell::new(0));
+    let _subscription = cx.update({
+        let dirty_events = dirty_events.clone();
+        |_, cx| {
+            cx.subscribe(&view, move |_, event: &EditorEvent, _| {
+                if matches!(event, EditorEvent::DirtyChanged) {
+                    dirty_events.set(dirty_events.get() + 1);
+                }
+            })
+        }
+    });
+    rhs_editor(&view, cx).update_in(cx, |editor, window, cx| {
+        editor.move_to_end(&editor::actions::MoveToEnd, window, cx);
+        editor.insert("three\n", window, cx);
+    });
+    cx.run_until_parked();
+    view.read_with(cx, |view, cx| {
+        assert!(view.is_dirty(cx), "edits in the view make the tab dirty");
+        assert!(!view.has_conflict(cx));
+    });
+    assert!(dirty_events.get() > 0, "the tab hears about it (dirty dot)");
+
+    let pane = fixture
+        .workspace
+        .read_with(cx, |workspace, _| workspace.active_pane().clone());
+    let close = pane.update_in(cx, |pane, window, cx| {
+        pane.close_item_by_id(view.item_id(), SaveIntent::Close, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt(), "closing asks to save");
+    cx.simulate_prompt_answer("Save");
+    close.await.expect("close");
+    cx.run_until_parked();
+
+    assert_eq!(
+        std::fs::read_to_string(repo.work.join("a.txt")).expect("read"),
+        "one\ntwo\nthree\n"
+    );
+    let open_views = pane.read_with(cx, |pane, _| {
+        pane.items()
+            .filter(|item| item.downcast::<RevisionDiffView>().is_some())
+            .count()
+    });
+    assert_eq!(open_views, 0);
 }
 
 #[gpui::test]
@@ -347,6 +409,24 @@ async fn large_file_shows_a_message(cx: &mut TestAppContext) {
     let view = open_view(&fixture, "big.txt", "HEAD", NewSide::WorkingCopy, cx)
         .await
         .expect("open");
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.message().map(|message| message.as_ref()),
+            Some(LARGE_MESSAGE)
+        );
+    });
+
+    // Too large at a revision: the blob's size is checked before it is read.
+    repo.commit("big.txt", "x".repeat(MAX_FILE_SIZE + 1), "big");
+    let view = open_view(
+        &fixture,
+        "big.txt",
+        "HEAD~1",
+        NewSide::Revision("HEAD".into()),
+        cx,
+    )
+    .await
+    .expect("open");
     view.read_with(cx, |view, _| {
         assert_eq!(
             view.message().map(|message| message.as_ref()),

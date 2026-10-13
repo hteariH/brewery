@@ -263,6 +263,24 @@ impl GitCli {
         )
     }
 
+    /// The size in bytes of a file at `rev`, without reading it; `None` when the file does not
+    /// exist there. An unknown revision or a directory is an error.
+    pub fn blob_size(
+        repo: &Entity<Repository>,
+        rev: &str,
+        path: RepoPath,
+        cx: &mut App,
+    ) -> Task<Result<Option<u64>>> {
+        let rev = rev.to_string();
+        Self::job(
+            repo,
+            "brewery git cat-file",
+            None,
+            cx,
+            async move |runner, _| runner.blob_size(&rev, &path).await,
+        )
+    }
+
     /// `git rev-list --max-count=<limit> <range>`, newest first.
     pub fn rev_list(
         repo: &Entity<Repository>,
@@ -580,6 +598,31 @@ impl GitRunner {
             bail!("{}", blob.text().message());
         }
         Ok(Some(blob.stdout))
+    }
+
+    pub(crate) async fn blob_size(&self, rev: &str, path: &RepoPath) -> Result<Option<u64>> {
+        check_revision(rev, "revision")?;
+        let tree = format!("{rev}^{{tree}}");
+        if !self
+            .run(&["rev-parse", "--verify", "--quiet", &tree])
+            .await?
+            .success()
+        {
+            bail!("unknown revision {rev}");
+        }
+        let object = format!("{rev}:{}", path.as_unix_str());
+        if !self.run(&["cat-file", "-e", &object]).await?.success() {
+            return Ok(None);
+        }
+        let kind = self.run(&["cat-file", "-t", &object]).await?;
+        if kind.stdout.trim() != "blob" {
+            bail!("{} at {rev} is not a file", path.as_unix_str());
+        }
+        let size = self.run(&["cat-file", "-s", &object]).await?;
+        if !size.success() {
+            bail!("{}", size.message());
+        }
+        Ok(Some(size.stdout.trim().parse()?))
     }
 
     pub(crate) async fn resolve_commit(&self, rev: &str) -> Result<Option<Oid>> {

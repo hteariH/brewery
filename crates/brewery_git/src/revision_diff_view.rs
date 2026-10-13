@@ -220,14 +220,12 @@ impl RevisionDiffView {
             };
             let old_content = match &old_side {
                 ResolvedSide::Revision { sha, .. } => {
-                    Loaded::from_bytes(read_revision(&repo, *sha, &old_path, cx).await?)
+                    read_revision(&repo, *sha, &old_path, cx).await?
                 }
                 _ => Loaded::Missing,
             };
             let new_content = match &new_side {
-                ResolvedSide::Revision { sha, .. } => {
-                    Loaded::from_bytes(read_revision(&repo, *sha, &path, cx).await?)
-                }
+                ResolvedSide::Revision { sha, .. } => read_revision(&repo, *sha, &path, cx).await?,
                 ResolvedSide::WorkingCopy => read_working_copy(&project, &repo, &path, cx).await?,
                 ResolvedSide::Empty => Loaded::Missing,
             };
@@ -340,6 +338,11 @@ impl RevisionDiffView {
             splittable.set_diff_hunk_renderer(Some(Arc::new(HiddenUnstagedDiffHunkRenderer)), cx);
             splittable
         });
+        // Re-emitted so the pane updates the tab (dirty dot, title) and Zed's save logic runs.
+        cx.subscribe(&editor, |_, _, event: &EditorEvent, cx| {
+            cx.emit(event.clone())
+        })
+        .detach();
         let header = format!(
             "{} {} ↔ {}",
             paths_description(&old_path, &path),
@@ -472,6 +475,14 @@ impl RevisionDiffView {
         }
     }
 
+    /// The diff editor when its right side edits the working copy.
+    fn working_copy_editor(&self) -> Option<&Entity<SplittableEditor>> {
+        match &self.content {
+            Content::Diff { editor, .. } if self.new == ResolvedSide::WorkingCopy => Some(editor),
+            _ => None,
+        }
+    }
+
     fn file_name(&self) -> &str {
         self.path.file_name().unwrap_or(self.path.as_unix_str())
     }
@@ -503,14 +514,26 @@ async fn resolve(repo: &Entity<Repository>, rev: &str, cx: &mut AsyncApp) -> Res
         .ok_or_else(|| anyhow!("unknown revision {rev}"))
 }
 
+/// The file at `sha`. Its size is checked first, so a huge blob is never read into memory.
 async fn read_revision(
     repo: &Entity<Repository>,
     sha: Oid,
     path: &RepoPath,
     cx: &mut AsyncApp,
-) -> Result<Option<Vec<u8>>> {
-    cx.update(|cx| GitCli::show_bytes_at(repo, &sha.to_string(), path.clone(), cx))
-        .await
+) -> Result<Loaded> {
+    let rev = sha.to_string();
+    match cx
+        .update(|cx| GitCli::blob_size(repo, &rev, path.clone(), cx))
+        .await?
+    {
+        None => return Ok(Loaded::Missing),
+        Some(size) if size > MAX_FILE_SIZE as u64 => return Ok(Loaded::TooLarge),
+        Some(_) => {}
+    }
+    let bytes = cx
+        .update(|cx| GitCli::show_bytes_at(repo, &rev, path.clone(), cx))
+        .await?;
+    Ok(Loaded::from_bytes(bytes))
 }
 
 /// The file on disk; an unsaved worktree buffer is picked up when the view opens it.
@@ -727,6 +750,34 @@ impl Item for RevisionDiffView {
                     editor.added_to_workspace(workspace, window, cx)
                 })
             });
+        }
+    }
+
+    // Only a working-copy compare edits a real file; its right side is the worktree buffer.
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.working_copy_editor()
+            .is_some_and(|editor| editor.read(cx).is_dirty(cx))
+    }
+
+    fn has_conflict(&self, cx: &App) -> bool {
+        self.working_copy_editor()
+            .is_some_and(|editor| editor.read(cx).has_conflict(cx))
+    }
+
+    fn has_deleted_file(&self, cx: &App) -> bool {
+        self.working_copy_editor()
+            .is_some_and(|editor| editor.read(cx).has_deleted_file(cx))
+    }
+
+    fn reload(
+        &mut self,
+        project: Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        match self.working_copy_editor().cloned() {
+            Some(editor) => editor.update(cx, |editor, cx| editor.reload(project, window, cx)),
+            None => Task::ready(Ok(())),
         }
     }
 
