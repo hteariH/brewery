@@ -493,6 +493,24 @@ async fn popup_lists_groups_for_a_fake_branch_list(cx: &mut TestAppContext) {
     });
     cx.dispatch_action(editor::actions::MoveRight);
     cx.run_until_parked();
+    assert!(popup.read_with(cx, |popup, cx| {
+        popup.picker.read(cx).delegate.submenu.is_some()
+    }));
+    // The menu takes focus two frames later, like Zed's popover menus (test windows do not
+    // run frame callbacks): an Escape before that closes only the submenu.
+    cx.dispatch_action(menu::Cancel);
+    cx.run_until_parked();
+    assert!(popup.read_with(cx, |popup, cx| {
+        popup.picker.read(cx).delegate.submenu.is_none()
+    }));
+    opened.workspace.read_with(cx, |workspace, cx| {
+        assert!(workspace.active_modal::<BranchesPopup>(cx).is_some())
+    });
+
+    // Dismissing the menu itself also returns to the list; the popup stays open.
+    picker.update_in(cx, |picker, window, cx| {
+        picker.delegate.open_submenu(ix, None, window, cx)
+    });
     let menu = popup
         .read_with(cx, |popup, cx| {
             popup
@@ -503,9 +521,7 @@ async fn popup_lists_groups_for_a_fake_branch_list(cx: &mut TestAppContext) {
                 .as_ref()
                 .map(|submenu| submenu.menu.clone())
         })
-        .expect("submenu is open");
-    // (The menu takes focus two frames later, like Zed's popover menus; test windows do not
-    // run frame callbacks.) Closing it returns to the list; the popup stays open.
+        .expect("submenu is open again");
     menu.update(cx, |_, cx| cx.emit(DismissEvent));
     cx.run_until_parked();
     assert!(popup.read_with(cx, |popup, cx| {
@@ -587,6 +603,10 @@ impl TestRepo {
         std::fs::write(self.work.join(path), content).expect("write");
         self.git(&["add", "--", path]);
         self.git(&["commit", "--quiet", "-m", message]);
+    }
+
+    fn read(&self, path: &str) -> String {
+        std::fs::read_to_string(self.work.join(path)).expect("read")
     }
 
     fn has_branch(&self, name: &str) -> bool {
@@ -743,6 +763,182 @@ async fn conflicting_merge_reports_conflicts(cx: &mut TestAppContext) {
     assert!(
         repo.git_status(&["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
             .0
+    );
+
+    // A second merge while this one is unresolved is refused, not reported as new conflicts.
+    SHOWN_TOASTS.with(|shown| shown.borrow_mut().clear());
+    let popup = open_popup(&mut opened);
+    run_action(
+        &popup,
+        BranchAction::MergeIntoCurrent,
+        "feature",
+        &mut opened.cx,
+    );
+    wait_until(&mut opened.cx, "refusal toast", |_| {
+        !shown_toasts().is_empty()
+    });
+    assert_eq!(
+        shown_toasts(),
+        vec![OutcomeToast {
+            kind: ToastKind::Error,
+            message: "Merge failed: a merge is in progress; finish or abort it first".into()
+        }]
+    );
+}
+
+#[gpui::test]
+async fn checkout_blocked_by_local_changes_shows_gits_reason(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.commit("a.txt", "base\n", "base");
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    repo.commit("a.txt", "feature\n", "feature change");
+    repo.git(&["checkout", "--quiet", "main"]);
+    std::fs::write(repo.work.join("a.txt"), "local edit\n").expect("write");
+    let mut opened = open_real(&repo, cx).await;
+    wait_for_branch_list(&mut opened, "branches", |names| names.len() == 2);
+
+    let popup = open_popup(&mut opened);
+    run_action(&popup, BranchAction::Checkout, "feature", &mut opened.cx);
+    wait_until(&mut opened.cx, "checkout toast", |_| {
+        !shown_toasts().is_empty()
+    });
+    let toasts = shown_toasts();
+    assert_eq!(toasts.len(), 1);
+    assert_eq!(toasts[0].kind, ToastKind::Error);
+    assert!(
+        toasts[0].message.starts_with("Checkout failed: error:")
+            && toasts[0].message.contains("a.txt")
+            && !toasts[0].message.contains(ZED_GIT_ERROR_HEADER),
+        "{:?}",
+        toasts[0].message
+    );
+    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert_eq!(repo.read("a.txt"), "local edit\n");
+}
+
+#[test]
+fn git_error_line_skips_zeds_header_and_keeps_the_file_list() {
+    // Zed's GitBinaryCommandError: "Git command failed:\n{stdout}{stderr}\n".
+    let zed = "Git command failed:\nerror: Your local changes to the following files would be \
+               overwritten by checkout:\n\ta.txt\n\tdir/b.txt\nPlease commit your changes or \
+               stash them before you switch branches.\nAborting\n";
+    assert_eq!(
+        git_error_line(zed),
+        "error: Your local changes to the following files would be overwritten by checkout: \
+         a.txt, dir/b.txt"
+    );
+    assert_eq!(
+        git_error_line("Git command failed:\nfatal: 'bad name' is not a valid branch name\n"),
+        "fatal: 'bad name' is not a valid branch name"
+    );
+    // Without an error:/fatal: line, the first line that is not Zed's header.
+    assert_eq!(
+        git_error_line("Git command failed:\n\nsomething odd happened\nmore\n"),
+        "something odd happened"
+    );
+    assert_eq!(
+        git_error_line("Branch 'x' not found"),
+        "Branch 'x' not found"
+    );
+    assert_eq!(git_error_line("Git command failed:\n"), "unknown error");
+    assert_eq!(git_error_line(""), "unknown error");
+}
+
+#[test]
+fn commit_modal_key_context_is_unchanged() {
+    // The ctrl-~ exemption matches this string in Zed's commit modal.
+    let source = include_str!("../../git_ui/src/commit_modal.rs");
+    assert!(source.contains(&format!(".key_context(\"{COMMIT_MODAL_CONTEXT}\")")));
+}
+
+struct FakeCommitModal(FocusHandle);
+
+impl ModalView for FakeCommitModal {}
+impl EventEmitter<DismissEvent> for FakeCommitModal {}
+impl Focusable for FakeCommitModal {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.0.clone()
+    }
+}
+impl Render for FakeCommitModal {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .key_context(COMMIT_MODAL_CONTEXT)
+            .track_focus(&self.0)
+            .size_full()
+    }
+}
+
+#[gpui::test]
+async fn git_branch_opens_the_popup_except_in_the_commit_modal(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(init);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ ".git": {}, "file.txt": "text" }))
+        .await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    cx.run_until_parked();
+    let mut opened = open_workspace(project, cx).await;
+    let cx = &mut opened.cx;
+    let popup_open = |workspace: &Entity<Workspace>, cx: &mut VisualTestContext| {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<BranchesPopup>(cx).is_some()
+        })
+    };
+
+    // In the commit modal, git::Branch is left to the modal's own branch selector.
+    opened.workspace.update_in(cx, |workspace, window, cx| {
+        workspace.toggle_modal(window, cx, |_, cx| FakeCommitModal(cx.focus_handle()))
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(zed_actions::git::Branch);
+    cx.run_until_parked();
+    assert!(!popup_open(&opened.workspace, cx));
+    opened.workspace.read_with(cx, |workspace, cx| {
+        assert!(workspace.active_modal::<FakeCommitModal>(cx).is_some())
+    });
+
+    // Elsewhere it opens the Branches popup (taking precedence over Zed's handlers).
+    opened.workspace.update_in(cx, |workspace, window, cx| {
+        workspace.hide_modal(window, cx);
+    });
+    cx.run_until_parked();
+    cx.dispatch_action(zed_actions::git::Branch);
+    cx.run_until_parked();
+    assert!(popup_open(&opened.workspace, cx));
+
+    // The title-bar builder hook builds it too.
+    let built = cx.update(|window, cx| {
+        git_ui_core::build_branch_picker(
+            opened.workspace.downgrade(),
+            Some(opened.repository.clone()),
+            window,
+            cx,
+        )
+    });
+    assert!(built.is_some());
+}
+
+#[gpui::test]
+async fn without_a_repository_only_pull_and_push_remain(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ ".git": {}, "file.txt": "text" }))
+        .await;
+    let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+    cx.run_until_parked();
+    let mut opened = open_workspace(project, cx).await;
+    let popup = opened
+        .workspace
+        .update_in(&mut opened.cx, |workspace, window, cx| {
+            let handle = workspace.weak_handle();
+            cx.new(|cx| BranchesPopup::new(handle, None, window, cx))
+        });
+    opened.cx.run_until_parked();
+    assert_eq!(
+        rows(&popup, &mut opened.cx),
+        vec!["> Update Project", "> Push…"]
     );
 }
 

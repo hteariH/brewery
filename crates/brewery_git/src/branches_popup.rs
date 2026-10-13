@@ -13,6 +13,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use fuzzy_nucleo::{Case, LengthPenalty, StringMatchCandidate};
@@ -31,7 +32,7 @@ use ui::{
 use workspace::notifications::NotificationId;
 use workspace::{ModalView, Toast, Workspace};
 
-use crate::cli::{GitCli, MergeOutcome, check_revision};
+use crate::cli::{GitCli, MergeOutcome, Operation, check_revision};
 
 /// How many recent branches the Recent group shows.
 const RECENT_LIMIT: usize = 5;
@@ -376,7 +377,7 @@ impl OutcomeToast {
     pub(crate) fn error(what: &str, error: &str) -> Self {
         Self {
             kind: ToastKind::Error,
-            message: format!("{what}: {}", first_line(error)),
+            message: format!("{what}: {}", git_error_line(error)),
         }
     }
 }
@@ -422,11 +423,44 @@ pub(crate) fn outcome_toast(op: &GitOp, outcome: &Result<MergeOutcome>) -> Outco
     }
 }
 
-fn first_line(text: &str) -> &str {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("unknown error")
+/// Zed's `GitBinaryCommandError` puts this header line before git's own output.
+const ZED_GIT_ERROR_HEADER: &str = "Git command failed:";
+
+/// How many indented detail lines (usually file names) follow the reason in a toast.
+const DETAIL_LIMIT: usize = 5;
+
+/// The reason git gave, in one line: the first `error:` / `fatal:` line (else the first
+/// non-empty line other than Zed's error header), followed by the indented lines git lists
+/// under it (such as the files a checkout would overwrite).
+pub(crate) fn git_error_line(text: &str) -> String {
+    let lines = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let is_header = |line: &str| line.trim() == ZED_GIT_ERROR_HEADER;
+    let reason = lines
+        .iter()
+        .position(|line| {
+            let line = line.trim_start();
+            line.starts_with("error:") || line.starts_with("fatal:")
+        })
+        .or_else(|| lines.iter().position(|line| !is_header(line)));
+    let Some(reason) = reason else {
+        return "unknown error".to_string();
+    };
+    let details = lines[reason + 1..]
+        .iter()
+        .take_while(|line| line.starts_with([' ', '\t']))
+        .take(DETAIL_LIMIT)
+        .map(|line| line.trim())
+        .collect::<Vec<_>>();
+    let mut message = lines[reason].trim().to_string();
+    if !details.is_empty() {
+        message.push(' ');
+        message.push_str(&details.join(", "));
+    }
+    message
 }
 
 fn toast_id(kind: ToastKind) -> NotificationId {
@@ -771,6 +805,9 @@ impl BranchesDelegate {
                     window,
                     cx,
                     async move |repo, cx: &mut AsyncWindowContext| {
+                        if let Some(toast) = refuse_while_in_progress("Merge", &repo, cx).await? {
+                            return Ok(toast);
+                        }
                         let outcome = cx.update(|_, cx| GitCli::merge(&repo, &name, cx))?.await;
                         Ok(outcome_toast(
                             &GitOp::Merge {
@@ -788,6 +825,9 @@ impl BranchesDelegate {
                     window,
                     cx,
                     async move |repo, cx: &mut AsyncWindowContext| {
+                        if let Some(toast) = refuse_while_in_progress("Rebase", &repo, cx).await? {
+                            return Ok(toast);
+                        }
                         let outcome = cx.update(|_, cx| GitCli::rebase(&repo, &name, cx))?.await;
                         Ok(outcome_toast(
                             &GitOp::Rebase {
@@ -806,6 +846,9 @@ impl BranchesDelegate {
                     window,
                     cx,
                     async move |repo, cx: &mut AsyncWindowContext| {
+                        if let Some(toast) = refuse_while_in_progress("Rebase", &repo, cx).await? {
+                            return Ok(toast);
+                        }
                         if let Err(error) = repo
                             .update(cx, |repo, _| repo.change_branch(name.clone()))
                             .await
@@ -999,7 +1042,7 @@ impl BranchesDelegate {
                                     "--quiet".into(),
                                     format!("{rev}^{{commit}}"),
                                 ],
-                                None,
+                                Some(REV_PARSE_TIMEOUT),
                                 cx,
                             )
                         })?
@@ -1015,7 +1058,7 @@ impl BranchesDelegate {
                             GitCli::run(
                                 &repo,
                                 vec!["switch".into(), "--detach".into(), rev.clone()],
-                                None,
+                                Some(SWITCH_TIMEOUT),
                                 cx,
                             )
                         })?
@@ -1033,6 +1076,32 @@ impl BranchesDelegate {
 
 /// An `Err` with this message from an operation means the user cancelled: no toast.
 const CANCELLED: &str = "cancelled by the user";
+
+/// A merge or rebase refuses to start while git has one in progress, and the unmerged paths
+/// left by it would make the refusal look like new conflicts: say what is in progress instead.
+async fn refuse_while_in_progress(
+    what: &str,
+    repo: &Entity<Repository>,
+    cx: &mut AsyncWindowContext,
+) -> Result<Option<OutcomeToast>> {
+    let in_progress = cx.update(|_, cx| GitCli::in_progress(repo, cx))?.await?;
+    Ok(in_progress.map(|operation| {
+        let operation = match operation {
+            Operation::Merge => "a merge",
+            Operation::Rebase => "a rebase",
+            Operation::CherryPick => "a cherry-pick",
+        };
+        OutcomeToast::error(
+            &format!("{what} failed"),
+            &format!("{operation} is in progress; finish or abort it first"),
+        )
+    }))
+}
+
+/// Bounds for git commands the popup runs itself; hooks run in trusted repositories and must
+/// not block the repository's job queue forever.
+const REV_PARSE_TIMEOUT: Duration = Duration::from_secs(30);
+const SWITCH_TIMEOUT: Duration = Duration::from_secs(600);
 
 async fn delete_branch(
     repo: &Entity<Repository>,
@@ -1053,7 +1122,7 @@ async fn delete_branch(
 async fn is_unmerged(repo: &Entity<Repository>, name: &str, cx: &mut AsyncWindowContext) -> bool {
     let local_ref = format!("refs/heads/{name}");
     let run = |args: Vec<String>, cx: &mut AsyncWindowContext| {
-        cx.update(|_, cx| GitCli::run(repo, args, None, cx))
+        cx.update(|_, cx| GitCli::run(repo, args, Some(REV_PARSE_TIMEOUT), cx))
     };
     let Ok(upstream) = run(
         vec![
@@ -1157,6 +1226,20 @@ impl PickerDelegate for BranchesDelegate {
                 );
                 self.rows = grouped.rows;
                 self.selected_index = grouped.selected.unwrap_or(0);
+                if self.repo.is_none() {
+                    // Without a repository only Zed's pull and push (which explain themselves)
+                    // remain; the other actions would do nothing.
+                    self.rows.retain(|row| {
+                        matches!(
+                            row,
+                            Row::Action {
+                                action: TopAction::UpdateProject | TopAction::Push,
+                                ..
+                            }
+                        )
+                    });
+                    self.selected_index = 0;
+                }
             }
         }
         Task::ready(())
@@ -1367,7 +1450,13 @@ impl BranchesPopup {
 
     fn on_cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
         self.picker.update(cx, |picker, cx| {
-            if picker.delegate.mode != Mode::List && picker.delegate.submenu.is_none() {
+            if picker.delegate.submenu.take().is_some() {
+                // The submenu takes focus two frames after it opens; an Escape before that
+                // closes only the submenu.
+                cx.stop_propagation();
+                picker.focus(window, cx);
+                cx.notify();
+            } else if picker.delegate.mode != Mode::List {
                 cx.stop_propagation();
                 picker.delegate.leave_mode(window, cx);
             }
@@ -1461,11 +1550,16 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+/// The key context of Zed's commit modal (`crates/git_ui/src/commit_modal.rs`, `key_context`).
+/// Check it on Zed merges: if it is renamed, `git::Branch` there would replace the commit modal
+/// with the popup (the `commit_modal_keeps_its_branch_selector` test pins this string).
+pub(crate) const COMMIT_MODAL_CONTEXT: &str = "GitCommit";
+
 fn toggle_popup(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if window
         .context_stack()
         .iter()
-        .any(|context| context.contains("GitCommit"))
+        .any(|context| context.contains(COMMIT_MODAL_CONTEXT))
     {
         return;
     }
