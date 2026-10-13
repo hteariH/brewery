@@ -29,19 +29,89 @@ pub const MANIFEST_URL_ENV: &str = "BREWERY_UPDATE_MANIFEST_URL";
 /// `/verysilent /update=true`.
 pub const WINDOWS_INSTALLER_FILE_NAME: &str = "Brewery-setup.exe";
 
-static MANIFEST_URL: LazyLock<String> =
-    LazyLock::new(|| manifest_url_from(std::env::var(MANIFEST_URL_ENV).ok()));
+static MANIFEST_SOURCE: LazyLock<ManifestSource> =
+    LazyLock::new(|| manifest_source_from(std::env::var(MANIFEST_URL_ENV).ok()));
 
 /// The manifest URL in effect for this process.
 pub fn manifest_url() -> &'static str {
-    MANIFEST_URL.as_str()
+    match &*MANIFEST_SOURCE {
+        ManifestSource::Override(url) => url,
+        ManifestSource::Default | ManifestSource::Rejected(_) => DEFAULT_MANIFEST_URL,
+    }
 }
 
-fn manifest_url_from(env_value: Option<String>) -> String {
-    env_value
+/// Warns once per process when the manifest override is in effect or was ignored.
+pub fn log_manifest_source() {
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| match &*MANIFEST_SOURCE {
+        ManifestSource::Default => {}
+        ManifestSource::Override(url) => {
+            log::warn!("using update manifest override {url} (from {MANIFEST_URL_ENV})")
+        }
+        ManifestSource::Rejected(value) => log::warn!(
+            "ignoring {MANIFEST_URL_ENV}={value:?}: the update manifest URL must use https://"
+        ),
+    });
+}
+
+/// Where the manifest comes from, decided once from the environment.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ManifestSource {
+    Default,
+    /// A valid `https://` override.
+    Override(String),
+    /// An override that was ignored because it is not `https://`.
+    Rejected(String),
+}
+
+fn manifest_source_from(env_value: Option<String>) -> ManifestSource {
+    let Some(value) = env_value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_MANIFEST_URL.to_string())
+    else {
+        return ManifestSource::Default;
+    };
+    if is_https(&value) {
+        ManifestSource::Override(value)
+    } else {
+        ManifestSource::Rejected(value)
+    }
+}
+
+/// `https://` followed by something (any case for the scheme).
+pub fn is_https(url: &str) -> bool {
+    const SCHEME: &str = "https://";
+    url.len() > SCHEME.len()
+        && url
+            .get(..SCHEME.len())
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(SCHEME))
+}
+
+/// Release notes may only point at Brewery's own repository.
+fn is_brewery_page(url: &str) -> bool {
+    url.starts_with(&format!("{}/", brewery_core::REPOSITORY_URL))
+}
+
+/// Keeps error messages and logs short when a body is not a manifest.
+fn excerpt(bytes: &[u8]) -> String {
+    const MAX_CHARS: usize = 200;
+    let text = String::from_utf8_lossy(bytes);
+    let mut excerpt: String = text.chars().take(MAX_CHARS).collect();
+    if text.chars().count() > MAX_CHARS {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+/// The largest manifest Brewery reads.
+pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+fn manifest_url_from(env_value: Option<String>) -> String {
+    match manifest_source_from(env_value) {
+        ManifestSource::Override(url) => url,
+        ManifestSource::Default | ManifestSource::Rejected(_) => DEFAULT_MANIFEST_URL.to_string(),
+    }
 }
 
 /// What Brewery does with a newer release on an OS.
@@ -166,12 +236,8 @@ pub fn platform_key(os: &str, arch: &str) -> Option<String> {
 
 /// Parses `latest.json`; the version must be semver (a leading `v` is allowed).
 pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
-    let mut manifest: Manifest = serde_json::from_slice(bytes).with_context(|| {
-        format!(
-            "error deserializing update manifest {:?}",
-            String::from_utf8_lossy(bytes)
-        )
-    })?;
+    let mut manifest: Manifest = serde_json::from_slice(bytes)
+        .with_context(|| format!("error deserializing update manifest {:?}", excerpt(bytes)))?;
     let version = manifest.version.trim();
     let version = version.strip_prefix('v').unwrap_or(version);
     let version = Version::parse(version)
@@ -191,16 +257,32 @@ pub fn select_release(
     if !version.pre.is_empty() && current_version.pre.is_empty() {
         return None;
     }
-    let asset = manifest.assets.get(&platform_key(os, arch)?)?;
+    let key = platform_key(os, arch)?;
+    let asset = manifest.assets.get(&key)?;
+    if !is_https(&asset.url) {
+        log::warn!(
+            "ignoring update {} for {key}: the asset URL must use https://",
+            manifest.version
+        );
+        return None;
+    }
+    let notes_url = manifest
+        .notes_url
+        .clone()
+        .filter(|url| is_brewery_page(url));
     Some(ReleaseAsset {
         version: manifest.version.clone(),
         url: asset.url.clone(),
         sha256: asset.sha256.clone(),
-        notes_url: manifest.notes_url.clone(),
+        notes_url,
     })
 }
 
 pub async fn fetch_manifest(http_client: &dyn HttpClient, url: &str) -> Result<Manifest> {
+    anyhow::ensure!(
+        is_https(url),
+        "the update manifest URL must use https://: {url}"
+    );
     // GitHub answers `releases/latest/download/...` with a 302 to its asset host.
     let follow_redirects = true;
     let mut response = http_client
@@ -208,11 +290,19 @@ pub async fn fetch_manifest(http_client: &dyn HttpClient, url: &str) -> Result<M
         .await
         .with_context(|| format!("failed to fetch update manifest {url}"))?;
     let mut body = Vec::new();
-    response.body_mut().read_to_end(&mut body).await?;
+    response
+        .body_mut()
+        .take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .await?;
     anyhow::ensure!(
         response.status().is_success(),
         "failed to fetch update manifest {url}: {}",
         response.status(),
+    );
+    anyhow::ensure!(
+        body.len() <= MAX_MANIFEST_BYTES,
+        "update manifest {url} is too large (over {MAX_MANIFEST_BYTES} bytes)"
     );
     parse_manifest(&body)
 }
@@ -279,6 +369,121 @@ mod tests {
         assert_eq!(
             manifest_url_from(Some("https://example.test/latest.json".into())),
             "https://example.test/latest.json"
+        );
+    }
+
+    #[test]
+    fn test_manifest_override_must_be_https() {
+        assert_eq!(manifest_source_from(None), ManifestSource::Default);
+        assert_eq!(
+            manifest_source_from(Some("  ".into())),
+            ManifestSource::Default
+        );
+        assert_eq!(
+            manifest_source_from(Some(" https://example.test/latest.json ".into())),
+            ManifestSource::Override("https://example.test/latest.json".into())
+        );
+        assert_eq!(
+            manifest_source_from(Some("HTTPS://example.test/latest.json".into())),
+            ManifestSource::Override("HTTPS://example.test/latest.json".into())
+        );
+        for rejected in [
+            "http://example.test/latest.json",
+            "file:///C:/latest.json",
+            "example.test/latest.json",
+            "https://",
+        ] {
+            assert_eq!(
+                manifest_source_from(Some(rejected.into())),
+                ManifestSource::Rejected(rejected.into()),
+                "{rejected}"
+            );
+        }
+        assert_eq!(
+            manifest_url_from(Some("http://example.test/x".into())),
+            DEFAULT_MANIFEST_URL
+        );
+        assert!(is_https(DEFAULT_MANIFEST_URL));
+    }
+
+    #[test]
+    fn test_non_https_asset_is_no_update() {
+        let manifest = parse_manifest(
+            FIXTURE
+                .replace(
+                    "https://github.com/hteariH/brewery/releases/download/v0.1.1/Brewery-0.1.1-x86_64-setup.exe",
+                    "http://github.com/hteariH/brewery/releases/download/v0.1.1/Brewery-0.1.1-x86_64-setup.exe",
+                )
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(select_release(&manifest, "windows", "x86_64", &v("0.1.0")).is_none());
+        // Other platforms in the same manifest are unaffected.
+        assert!(select_release(&manifest, "linux", "x86_64", &v("0.1.0")).is_some());
+    }
+
+    #[test]
+    fn test_foreign_notes_url_is_dropped() {
+        for notes_url in [
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-settings:",
+            "https://evil.example/brewery",
+            "https://github.com/hteariH/brewery-evil/releases",
+        ] {
+            let manifest = parse_manifest(
+                FIXTURE
+                    .replace(
+                        "https://github.com/hteariH/brewery/releases/tag/v0.1.1",
+                        notes_url,
+                    )
+                    .as_bytes(),
+            )
+            .unwrap();
+            let release = select_release(&manifest, "linux", "x86_64", &v("0.1.0")).unwrap();
+            assert_eq!(release.notes_url, None, "{notes_url}");
+        }
+    }
+
+    #[test]
+    fn test_manifest_size_is_capped() {
+        let body = format!(
+            r#"{{"version":"0.1.1","padding":"{}","assets":{{}}}}"#,
+            "x".repeat(MAX_MANIFEST_BYTES)
+        );
+        let client = FakeHttpClient::create(move |_| {
+            let body = body.clone();
+            async move { Ok(Response::builder().status(200).body(body.into()).unwrap()) }
+        });
+        let error =
+            smol::block_on(fetch_manifest(client.as_ref(), DEFAULT_MANIFEST_URL)).unwrap_err();
+        assert!(error.to_string().contains("too large"), "{error:#}");
+    }
+
+    #[test]
+    fn test_parse_error_text_is_truncated() {
+        let garbage = "x".repeat(10_000);
+        let error = parse_manifest(garbage.as_bytes()).unwrap_err();
+        assert!(
+            format!("{error:#}").len() < 1_000,
+            "{}",
+            format!("{error:#}").len()
+        );
+    }
+
+    #[test]
+    fn test_fetch_refuses_plain_http() {
+        let client = FakeHttpClient::create(|_| async move {
+            Ok(Response::builder()
+                .status(200)
+                .body(FIXTURE.into())
+                .unwrap())
+        });
+        assert!(
+            smol::block_on(fetch_manifest(
+                client.as_ref(),
+                "http://example.test/latest.json"
+            ))
+            .is_err()
         );
     }
 
@@ -449,6 +654,11 @@ mod tests {
         assert_eq!(newer("0.1.1", "0.1.1"), None);
         assert_eq!(newer("0.2.0", "0.1.1"), None);
         assert_eq!(newer("0.9.0", "0.10.0"), Some(v("0.10.0")));
+        // A pre-release build is offered the final release and later pre-releases.
+        assert_eq!(newer("0.2.0-rc.1", "0.2.0"), Some(v("0.2.0")));
+        assert_eq!(newer("0.2.0-rc.1", "0.2.0-rc.2"), Some(v("0.2.0-rc.2")));
+        assert_eq!(newer("0.2.0-rc.1", "0.2.0-rc.1"), None);
+        assert_eq!(newer("0.2.0", "0.2.0-rc.2"), None);
     }
 
     #[test]

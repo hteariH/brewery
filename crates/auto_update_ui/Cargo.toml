@@ -10,6 +10,7 @@ workspace = true
 
 [lib]
 path = "src/auto_update_ui.rs"
+# brewery: tests enabled (announcement gate)
 doctest = false
 
 [dependencies]
@@ -33,6 +34,7 @@ util.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 
+# brewery: for the announcement-gate test
 [dev-dependencies]
 db = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }

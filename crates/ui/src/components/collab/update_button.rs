@@ -100,19 +100,22 @@ impl UpdateButton {
     }
 
     pub fn checking() -> Self {
-        Self::new(IconName::LoadCircle, "Checking for Zed Updates…")
+        // brewery: product name
+        Self::new(IconName::LoadCircle, "Checking for Brewery Updates…")
             .icon_animate(true)
             .disabled(true)
     }
 
     pub fn downloading(progress: Option<f32>) -> Self {
-        Self::new(IconName::Download, "Downloading Zed Update…")
+        // brewery: product name
+        Self::new(IconName::Download, "Downloading Brewery Update…")
             .progress(progress)
             .disabled(true)
     }
 
     pub fn installing(version: impl Into<SharedString>) -> Self {
-        Self::new(IconName::LoadCircle, "Installing Zed Update…")
+        // brewery: product name
+        Self::new(IconName::LoadCircle, "Installing Brewery Update…")
             .icon_animate(true)
             .tooltip(version)
             .disabled(true)
@@ -232,7 +235,7 @@ impl Component for UpdateButton {
 
     fn description() -> &'static str {
         "A button component displayed in the title bar to \
-        show auto-update status and allow users to restart Zed."
+        show auto-update status and allow users to restart Brewery." // brewery: product name
     }
 
     fn preview(_window: &mut Window, _cx: &mut App) -> AnyElement {
@@ -286,6 +289,23 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::time::Duration;
+
+    // brewery: these states are reachable on every OS now, so they name Brewery
+    #[test]
+    fn test_update_button_names_brewery() {
+        assert_eq!(
+            UpdateButton::checking().message.as_ref(),
+            "Checking for Brewery Updates…"
+        );
+        assert_eq!(
+            UpdateButton::downloading(None).message.as_ref(),
+            "Downloading Brewery Update…"
+        );
+        assert_eq!(
+            UpdateButton::installing("1.0.0").message.as_ref(),
+            "Installing Brewery Update…"
+        );
+    }
 
     struct TestTooltip {
         rendered: Rc<Cell<u32>>,

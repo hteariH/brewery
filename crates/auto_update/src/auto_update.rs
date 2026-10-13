@@ -290,7 +290,7 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
     // brewery: compare against Brewery's own version, not Zed's AppVersion, and read
     // the manifest URL override at startup
     let version = brewery_core::brewery_version();
-    let _ = brewery_update::manifest_url();
+    brewery_update::log_manifest_source();
     let auto_updater = cx.new(|cx| {
         let updater = AutoUpdater::new(version, client, cx);
 
@@ -857,6 +857,16 @@ impl AutoUpdater {
             return Ok(());
         };
 
+        // brewery: never run a Windows installer the manifest gives no checksum for
+        if update_action == brewery_update::UpdateAction::Install
+            && fetched_release_data.sha256.is_none()
+        {
+            anyhow::bail!(
+                "update manifest has no sha256 for {}",
+                brewery_update::platform_key(OS, ARCH).unwrap_or_else(|| format!("{OS}-{ARCH}"))
+            );
+        }
+
         // brewery: Linux and macOS record the release for a notification instead of
         // downloading it (package-managed installs; macOS assets are not dmgs)
         if update_action == brewery_update::UpdateAction::Notify {
@@ -1058,10 +1068,12 @@ impl AutoUpdater {
         mut installed_version: Version,
         fetched_version: Version,
     ) -> Option<Version> {
-        // For non-nightly releases, ignore build and pre-release fields as they're not provided by our endpoints right now.
-        installed_version.pre = semver::Prerelease::EMPTY;
+        // brewery: compare pre-releases too, so 0.2.0-rc.1 is offered 0.2.0 (the manifest
+        // never offers a pre-release to a release build, see `brewery_update::select_release`)
         installed_version.build = semver::BuildMetadata::EMPTY;
-        (fetched_version > installed_version).then_some(fetched_version)
+        let mut fetched_without_build = fetched_version.clone();
+        fetched_without_build.build = semver::BuildMetadata::EMPTY;
+        (fetched_without_build > installed_version).then_some(fetched_version)
     }
 
     pub fn set_should_show_update_notification(
@@ -1986,6 +1998,53 @@ mod tests {
                 "Updates are off in development builds".to_string(),
                 "Download Brewery from GitHub Releases.".to_string()
             ))
+        );
+    }
+
+    // brewery: Windows never runs an installer the manifest gives no checksum for
+    #[gpui::test]
+    async fn test_install_requires_sha256(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let requested = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let newer = next_brewery_version();
+
+        cx.update(|cx| {
+            settings::init(cx);
+            release_channel::init_test(
+                semver::Version::new(0, 100, 0),
+                ReleaseChannel::Stable,
+                cx,
+            );
+            cx.set_global(UpdateActionOverride(brewery_update::UpdateAction::Install));
+            disable_automatic_checks(cx);
+            let requested = requested.clone();
+            let fake_client_http = FakeHttpClient::create(move |req| {
+                requested.lock().push(req.uri().to_string());
+                let key = brewery_update::platform_key(OS, ARCH).unwrap();
+                let body = format!(
+                    r#"{{"version":"{newer}","assets":{{"{key}":{{"url":"https://test.example/new-download"}}}}}}"#
+                );
+                async move { Ok(Response::builder().status(200).body(body.into()).unwrap()) }
+            });
+            let client = Client::new(Arc::new(FakeSystemClock::new()), fake_client_http, cx);
+            crate::init(client, cx);
+        });
+        let auto_updater = cx.update(|cx| AutoUpdater::get(cx).expect("auto updater should exist"));
+        auto_updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
+        cx.background_executor.run_until_parked();
+
+        let status = auto_updater.read_with(cx, |updater, _| updater.status());
+        let AutoUpdateStatus::Errored { error } = status else {
+            panic!("expected an error, got {status:?}");
+        };
+        assert!(error.to_string().contains("no sha256"), "{error:#}");
+        assert!(
+            requested
+                .lock()
+                .iter()
+                .all(|uri| uri == brewery_update::DEFAULT_MANIFEST_URL),
+            "the installer must not be downloaded: {:?}",
+            requested.lock()
         );
     }
 

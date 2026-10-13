@@ -1,3 +1,4 @@
+// brewery: brewery_update
 use auto_update::{AutoUpdater, brewery_update, release_notes_url};
 use db::kvp::Dismissable;
 use editor::{Editor, MultiBuffer};
@@ -34,6 +35,7 @@ actions!(
 
 pub fn init(cx: &mut App) {
     notify_if_app_was_updated(cx);
+    // brewery: Linux and macOS notification for a newer release
     notify_when_update_is_available(cx);
     cx.observe_new(|workspace: &mut Workspace, _window, cx| {
         workspace.register_action(|workspace, _: &ViewReleaseNotesLocally, window, cx| {
