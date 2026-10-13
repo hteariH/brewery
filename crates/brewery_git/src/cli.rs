@@ -7,13 +7,16 @@
 //! `RealGitRepository`'s (`GitBinary::build_command`).
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use futures::future::{self, Either};
 pub use git::Oid;
 pub use git::repository::RepoPath;
-use gpui::{App, AsyncApp, Entity, SharedString, Task};
+use gpui::{App, AsyncApp, BackgroundExecutor, Entity, SharedString, Task};
 use project::git_store::{LocalRepositoryState, Repository, RepositoryState};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::time::Duration;
 
 /// The result of one `git` process. A non-zero `status` is not an error; the caller decides.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +55,9 @@ pub enum MergeOutcome {
     Failed(String),
 }
 
+/// A side of a conflict, in git's terms. During a rebase git swaps them: `Ours` is the branch
+/// being rebased onto (upstream) and `Theirs` is the commit being replayed (your change), so
+/// "Accept Yours" in a rebase maps to `Theirs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     Ours,
@@ -70,16 +76,31 @@ pub enum Operation {
 pub struct GitCli;
 
 impl GitCli {
-    /// Runs `git <args>` in the repository's work directory.
+    /// Runs `git <args>` in the repository's work directory. With a `timeout`, git is killed
+    /// and the result is an error once it runs out (a hung process would block the
+    /// repository's job queue).
+    ///
+    /// This is a raw escape hatch: callers must validate user strings themselves (refuse
+    /// values starting with `-`, end revisions with `--`), as the typed helpers do.
     pub fn run(
         repo: &Entity<Repository>,
         args: Vec<String>,
+        timeout: Option<Duration>,
         cx: &mut App,
     ) -> Task<Result<GitOutput>> {
-        Self::job(repo, "brewery git", None, cx, async move |runner| {
-            let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-            runner.run(&args).await
-        })
+        Self::job(
+            repo,
+            "brewery git",
+            None,
+            cx,
+            async move |runner, executor| {
+                let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+                match timeout {
+                    Some(timeout) => runner.run_until(&args, executor.timer(timeout)).await,
+                    None => runner.run(&args).await,
+                }
+            },
+        )
     }
 
     /// `git merge --no-edit <branch>` into the current branch.
@@ -94,7 +115,7 @@ impl GitCli {
             "brewery git merge",
             Some("git merge".into()),
             cx,
-            async move |runner| runner.merge(&branch).await,
+            async move |runner, _| runner.merge(&branch).await,
         )
     }
 
@@ -110,7 +131,7 @@ impl GitCli {
             "brewery git rebase",
             Some("git rebase".into()),
             cx,
-            async move |runner| runner.rebase(&onto).await,
+            async move |runner, _| runner.rebase(&onto).await,
         )
     }
 
@@ -120,7 +141,7 @@ impl GitCli {
             "brewery git merge --abort",
             None,
             cx,
-            async move |runner| runner.abort_merge().await,
+            async move |runner, _| runner.abort_merge().await,
         )
     }
 
@@ -131,7 +152,7 @@ impl GitCli {
             "brewery git merge --continue",
             None,
             cx,
-            async move |runner| runner.continue_merge().await,
+            async move |runner, _| runner.continue_merge().await,
         )
     }
 
@@ -141,7 +162,7 @@ impl GitCli {
             "brewery git rebase --abort",
             None,
             cx,
-            async move |runner| runner.abort_rebase().await,
+            async move |runner, _| runner.abort_rebase().await,
         )
     }
 
@@ -151,12 +172,12 @@ impl GitCli {
             "brewery git rebase --continue",
             Some("git rebase".into()),
             cx,
-            async move |runner| runner.continue_rebase().await,
+            async move |runner, _| runner.continue_rebase().await,
         )
     }
 
-    /// Takes one side of conflicted files and marks them resolved (`checkout --ours|--theirs`,
-    /// then `add`).
+    /// Takes one side of conflicted files and marks them resolved: `checkout --ours|--theirs`
+    /// then `add`, or `rm` where that side deleted the file. See [`Side`] for rebases.
     pub fn checkout_side(
         repo: &Entity<Repository>,
         paths: Vec<RepoPath>,
@@ -168,22 +189,30 @@ impl GitCli {
             "brewery git checkout side",
             None,
             cx,
-            async move |runner| runner.checkout_side(paths, side).await,
+            async move |runner, _| runner.checkout_side(paths, side).await,
         )
     }
 
     /// Local branches from `git reflog` checkouts, most recent first, without duplicates.
+    /// The current branch is included (normally first): ask for one more than you show when
+    /// it is excluded.
     pub fn recent_branches(
         repo: &Entity<Repository>,
         limit: usize,
         cx: &mut App,
     ) -> Task<Result<Vec<String>>> {
-        Self::job(repo, "brewery git reflog", None, cx, async move |runner| {
-            runner.recent_branches(limit).await
-        })
+        Self::job(
+            repo,
+            "brewery git reflog",
+            None,
+            cx,
+            async move |runner, _| runner.recent_branches(limit).await,
+        )
     }
 
-    /// The file's content at `rev`, or `None` when it does not exist there.
+    /// The text of a file at `rev`; `None` when the file does not exist there. An unknown
+    /// revision, a directory or non-UTF-8 content is an error; use `show_bytes_at` for
+    /// binary files.
     pub fn show_at(
         repo: &Entity<Repository>,
         rev: &str,
@@ -191,9 +220,30 @@ impl GitCli {
         cx: &mut App,
     ) -> Task<Result<Option<String>>> {
         let rev = rev.to_string();
-        Self::job(repo, "brewery git show", None, cx, async move |runner| {
-            runner.show_at(&rev, &path).await
-        })
+        Self::job(
+            repo,
+            "brewery git show",
+            None,
+            cx,
+            async move |runner, _| runner.show_at(&rev, &path).await,
+        )
+    }
+
+    /// The exact bytes of a file at `rev`; `None` when the file does not exist there.
+    pub fn show_bytes_at(
+        repo: &Entity<Repository>,
+        rev: &str,
+        path: RepoPath,
+        cx: &mut App,
+    ) -> Task<Result<Option<Vec<u8>>>> {
+        let rev = rev.to_string();
+        Self::job(
+            repo,
+            "brewery git show",
+            None,
+            cx,
+            async move |runner, _| runner.show_bytes_at(&rev, &path).await,
+        )
     }
 
     /// `git rev-list --max-count=<limit> <range>`, newest first.
@@ -209,7 +259,7 @@ impl GitCli {
             "brewery git rev-list",
             None,
             cx,
-            async move |runner| runner.rev_list(&range, limit).await,
+            async move |runner, _| runner.rev_list(&range, limit).await,
         )
     }
 
@@ -219,7 +269,7 @@ impl GitCli {
             "brewery git in progress",
             None,
             cx,
-            async move |runner| runner.in_progress().await,
+            async move |runner, _| runner.in_progress().await,
         )
     }
 
@@ -228,7 +278,7 @@ impl GitCli {
         description: &'static str,
         status: Option<SharedString>,
         cx: &mut App,
-        f: impl FnOnce(GitRunner) -> Fut + Send + 'static,
+        f: impl FnOnce(GitRunner, BackgroundExecutor) -> Fut + Send + 'static,
     ) -> Task<Result<R>>
     where
         R: Send + 'static,
@@ -240,7 +290,8 @@ impl GitCli {
                 match state {
                     RepositoryState::Local(local) => {
                         let runner = GitRunner::for_local(&local, work_dir, &cx)?;
-                        cx.background_executor().spawn(f(runner)).await
+                        let executor = cx.background_executor().clone();
+                        executor.spawn(f(runner, executor.clone())).await
                     }
                     RepositoryState::Remote(_) => Err(anyhow!("not supported for remote projects")),
                 }
@@ -265,11 +316,16 @@ pub(crate) struct GitRunner {
 
 impl GitRunner {
     fn for_local(local: &LocalRepositoryState, work_dir: PathBuf, cx: &AsyncApp) -> Result<Self> {
-        let env = local
+        #[allow(unused_mut)]
+        let mut env = local
             .environment
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<HashMap<_, _>>();
+        #[cfg(test)]
+        if let Ok(extra) = TEST_ENV.lock() {
+            env.extend(extra.clone());
+        }
         let git_binary = find_git(&env, &work_dir, cx)?;
         Ok(Self {
             git_binary,
@@ -281,6 +337,27 @@ impl GitRunner {
     }
 
     pub(crate) async fn run(&self, args: &[&str]) -> Result<GitOutput> {
+        self.run_raw(args, &[], future::pending())
+            .await
+            .map(RawOutput::text)
+    }
+
+    /// Like `run`, but kills git and fails once `deadline` completes.
+    pub(crate) async fn run_until(
+        &self,
+        args: &[&str],
+        deadline: impl Future<Output = ()>,
+    ) -> Result<GitOutput> {
+        self.run_raw(args, &[], deadline).await.map(RawOutput::text)
+    }
+
+    async fn run_raw(
+        &self,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+        deadline: impl Future<Output = ()>,
+    ) -> Result<RawOutput> {
+        let subcommand = args.first().copied().unwrap_or_default();
         let mut command = util::command::new_command(&self.git_binary);
         command.current_dir(&self.work_dir);
         // Same safety and parsing options as Zed's `GitBinary::build_command`.
@@ -309,14 +386,22 @@ impl GitRunner {
         command.env("GIT_SEQUENCE_EDITOR", "true");
         command.env("GIT_MERGE_AUTOEDIT", "no");
         command.env("GIT_TERMINAL_PROMPT", "0");
-        let output = command
-            .output()
-            .await
-            .with_context(|| format!("running {:?}", self.git_binary))?;
-        Ok(GitOutput {
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        // Dropping the output future (deadline reached) kills git.
+        command.kill_on_drop(true);
+        let output = pin!(command.output());
+        let output = match future::select(output, pin!(deadline)).await {
+            Either::Left((output, _)) => {
+                output.with_context(|| format!("running {:?}", self.git_binary))?
+            }
+            Either::Right(_) => bail!("git {subcommand} timed out"),
+        };
+        Ok(RawOutput {
             status: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout: output.stdout,
+            stderr: output.stderr,
         })
     }
 
@@ -349,29 +434,58 @@ impl GitRunner {
     }
 
     pub(crate) async fn continue_rebase(&self) -> Result<MergeOutcome> {
-        let before = self.head().await?;
         let output = self.run(&["rebase", "--continue"]).await?;
-        self.outcome(output, before).await
+        // A finished rebase is `Merged` even when the last commit was dropped as empty and HEAD
+        // did not move; `None` makes `outcome` skip the HEAD comparison.
+        self.outcome(output, None).await
     }
 
     pub(crate) async fn checkout_side(&self, paths: Vec<RepoPath>, side: Side) -> Result<()> {
         if paths.is_empty() {
             return Ok(());
         }
-        let side = match side {
-            Side::Ours => "--ours",
-            Side::Theirs => "--theirs",
+        let (flag, stage) = match side {
+            Side::Ours => ("--ours", "2"),
+            Side::Theirs => ("--theirs", "3"),
         };
-        let paths = paths
-            .iter()
-            .map(|path| path.as_unix_str())
-            .collect::<Vec<_>>();
-        let mut checkout = vec!["--literal-pathspecs", "checkout", side, "--"];
-        checkout.extend(&paths);
-        self.run_checked(&checkout).await?;
-        let mut add = vec!["--literal-pathspecs", "add", "--"];
-        add.extend(&paths);
-        self.run_checked(&add).await
+        let mut take = Vec::new();
+        let mut remove = Vec::new();
+        for path in &paths {
+            let path = path.as_unix_str();
+            let stages = self
+                .run_literal(&["ls-files", "-u", "-z", "--", path])
+                .await?;
+            if !stages.success() {
+                bail!("{}", stages.message());
+            }
+            // Records are "<mode> <oid> <stage>\t<path>"; a conflicted path without the chosen
+            // stage was deleted on that side.
+            let has_stage = stages.stdout.split('\0').any(|record| {
+                record
+                    .split_once('\t')
+                    .and_then(|(info, _)| info.split(' ').nth(2))
+                    == Some(stage)
+            });
+            if !stages.stdout.is_empty() && !has_stage {
+                remove.push(path);
+            } else {
+                take.push(path);
+            }
+        }
+        if !take.is_empty() {
+            let mut checkout = vec!["checkout", flag, "--"];
+            checkout.extend(&take);
+            self.run_literal_checked(&checkout).await?;
+            let mut add = vec!["add", "--"];
+            add.extend(&take);
+            self.run_literal_checked(&add).await?;
+        }
+        if !remove.is_empty() {
+            let mut rm = vec!["rm", "--quiet", "--force", "--"];
+            rm.extend(&remove);
+            self.run_literal_checked(&rm).await?;
+        }
+        Ok(())
     }
 
     /// Empty when the reflog cannot be read (e.g. a repository without commits).
@@ -417,10 +531,38 @@ impl GitRunner {
     }
 
     pub(crate) async fn show_at(&self, rev: &str, path: &RepoPath) -> Result<Option<String>> {
+        match self.show_bytes_at(rev, path).await? {
+            Some(bytes) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| anyhow!("{} at {rev} is not UTF-8 text", path.as_unix_str())),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn show_bytes_at(
+        &self,
+        rev: &str,
+        path: &RepoPath,
+    ) -> Result<Option<Vec<u8>>> {
         check_revision(rev, "revision")?;
+        let tree = format!("{rev}^{{tree}}");
+        let revision = self
+            .run(&["rev-parse", "--verify", "--quiet", &tree])
+            .await?;
+        if !revision.success() {
+            bail!("unknown revision {rev}");
+        }
         let object = format!("{rev}:{}", path.as_unix_str());
-        let output = self.run(&["cat-file", "blob", &object]).await?;
-        Ok(output.success().then_some(output.stdout))
+        if !self.run(&["cat-file", "-e", &object]).await?.success() {
+            return Ok(None);
+        }
+        let blob = self
+            .run_raw(&["cat-file", "blob", &object], &[], future::pending())
+            .await?;
+        if blob.status != 0 {
+            bail!("{}", blob.text().message());
+        }
+        Ok(Some(blob.stdout))
     }
 
     pub(crate) async fn rev_list(&self, range: &str, limit: usize) -> Result<Vec<Oid>> {
@@ -453,6 +595,21 @@ impl GitRunner {
             None
         };
         Ok(operation)
+    }
+
+    /// Runs with pathspec magic off, so file names are taken literally.
+    async fn run_literal(&self, args: &[&str]) -> Result<GitOutput> {
+        self.run_raw(args, &[("GIT_LITERAL_PATHSPECS", "1")], future::pending())
+            .await
+            .map(RawOutput::text)
+    }
+
+    async fn run_literal_checked(&self, args: &[&str]) -> Result<()> {
+        let output = self.run_literal(args).await?;
+        if !output.success() {
+            bail!("{}", output.message());
+        }
+        Ok(())
     }
 
     async fn run_checked(&self, args: &[&str]) -> Result<()> {
@@ -490,17 +647,19 @@ impl GitRunner {
 
     async fn outcome(&self, output: GitOutput, before: Option<String>) -> Result<MergeOutcome> {
         if output.success() {
-            return Ok(if self.head().await? == before {
+            return Ok(if before.is_some() && self.head().await? == before {
                 MergeOutcome::UpToDate
             } else {
                 MergeOutcome::Merged
             });
         }
+        // A rebase that stopped without conflicts (a failing hook, an `edit` step) is `Failed`
+        // with git's message; `in_progress` tells the caller it can still be continued.
         let conflicts = self.unmerged_paths().await?;
-        if !conflicts.is_empty() || self.in_progress().await? == Some(Operation::Rebase) {
-            return Ok(MergeOutcome::Conflicts(conflicts));
+        if conflicts.is_empty() {
+            return Ok(MergeOutcome::Failed(output.message()));
         }
-        Ok(MergeOutcome::Failed(output.message()))
+        Ok(MergeOutcome::Conflicts(conflicts))
     }
 }
 
@@ -519,13 +678,42 @@ fn check_revision(value: &str, what: &str) -> Result<()> {
 }
 
 /// The `git` Zed's `LocalRepositoryState` picks: the project environment's PATH, then this
-/// process's PATH, then the bundled one.
+/// process's PATH, then the bundled one. Mirrors `LocalRepositoryState::new` in
+/// crates/project/src/git_store.rs (the `which_in` / `fs.open_repo` lines) and the bundled
+/// fallback in `RealFs`; keep them in step when merging Zed.
 fn find_git(env: &HashMap<String, String>, work_dir: &Path, cx: &AsyncApp) -> Result<PathBuf> {
     env.get("PATH")
         .and_then(|paths| which::which_in("git", Some(paths), work_dir).ok())
         .or_else(|| which::which("git").ok())
         .or_else(|| cx.update(|cx| cx.path_for_auxiliary_executable("git").ok()))
         .context("git not found on PATH")
+}
+
+struct RawOutput {
+    status: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl RawOutput {
+    fn text(self) -> GitOutput {
+        GitOutput {
+            status: self.status,
+            stdout: String::from_utf8_lossy(&self.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&self.stderr).into_owned(),
+        }
+    }
+}
+
+/// Extra environment for jobs run through `GitCli` in tests (hermetic git config).
+#[cfg(test)]
+static TEST_ENV: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn set_test_env(env: HashMap<String, String>) {
+    if let Ok(mut extra) = TEST_ENV.lock() {
+        *extra = env.into_iter().collect();
+    }
 }
 
 #[cfg(test)]

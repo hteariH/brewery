@@ -27,8 +27,8 @@ members = [
     "crates/brewery_cloud", # brewery:
     "crates/brewery_core", # brewery:
     "crates/brewery_daemon_client", # brewery:
-    "crates/brewery_git", # brewery:
     "crates/brewery_db", # brewery:
+    "crates/brewery_git", # brewery:
     "crates/brewery_run_widget", # brewery:
     "crates/brewery_search_everywhere", # brewery:
     "crates/brewery_services", # brewery:
@@ -315,8 +315,8 @@ brewery_build = { path = "crates/brewery_build" } # brewery:
 brewery_cloud = { path = "crates/brewery_cloud" } # brewery:
 brewery_core = { path = "crates/brewery_core" } # brewery:
 brewery_daemon_client = { path = "crates/brewery_daemon_client" } # brewery:
-brewery_git = { path = "crates/brewery_git" } # brewery:
 brewery_db = { path = "crates/brewery_db" } # brewery:
+brewery_git = { path = "crates/brewery_git" } # brewery:
 brewery_run_widget = { path = "crates/brewery_run_widget" } # brewery:
 brewery_search_everywhere = { path = "crates/brewery_search_everywhere" } # brewery:
 brewery_services = { path = "crates/brewery_services" } # brewery:

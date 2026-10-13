@@ -352,6 +352,94 @@ fn checkout_side_takes_ours_or_theirs_and_marks_resolved() {
 }
 
 #[test]
+fn checkout_side_resolves_modify_delete_conflicts() {
+    let repo = TestRepo::new();
+    for name in ["d1.txt", "d2.txt", "d3.txt", "d4.txt"] {
+        repo.write(
+            name, "base
+",
+        );
+    }
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "--quiet", "-m", "base"]);
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    // feature modifies d1, d2 and deletes d3, d4.
+    repo.write(
+        "d1.txt", "feature
+",
+    );
+    repo.write(
+        "d2.txt", "feature
+",
+    );
+    repo.git(&["rm", "--quiet", "d3.txt", "d4.txt"]);
+    repo.git(&["commit", "--quiet", "-am", "feature"]);
+    repo.git(&["checkout", "--quiet", "main"]);
+    // main deletes d1, d2 and modifies d3, d4.
+    repo.git(&["rm", "--quiet", "d1.txt", "d2.txt"]);
+    repo.write(
+        "d3.txt", "main
+",
+    );
+    repo.write(
+        "d4.txt", "main
+",
+    );
+    repo.git(&["commit", "--quiet", "-am", "main"]);
+    let runner = repo.runner();
+    assert_eq!(
+        block(runner.merge("feature")).expect("merge"),
+        MergeOutcome::Conflicts(paths(&["d1.txt", "d2.txt", "d3.txt", "d4.txt"]))
+    );
+
+    // Ours deleted d1 and kept d4; theirs kept d2 and deleted d3.
+    block(runner.checkout_side(paths(&["d1.txt", "d4.txt"]), Side::Ours)).expect("ours");
+    block(runner.checkout_side(paths(&["d2.txt", "d3.txt"]), Side::Theirs)).expect("theirs");
+    assert!(!repo.work.join("d1.txt").exists());
+    assert_eq!(
+        repo.read("d2.txt"),
+        "feature
+"
+    );
+    assert!(!repo.work.join("d3.txt").exists());
+    assert_eq!(
+        repo.read("d4.txt"),
+        "main
+"
+    );
+    assert_eq!(repo.git(&["diff", "--name-only", "--diff-filter=U"]), "");
+
+    assert_eq!(
+        block(runner.continue_merge()).expect("continue"),
+        MergeOutcome::Merged
+    );
+    assert_eq!(
+        repo.git(&["ls-files"]),
+        "d2.txt
+d4.txt"
+    );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn run_until_kills_git_at_the_deadline() {
+    let repo = TestRepo::new();
+    repo.git(&["config", "alias.slow", "!sleep 5"]);
+    let runner = repo.runner();
+    let started = std::time::Instant::now();
+    let result = block(runner.run_until(&["slow"], async {
+        smol::Timer::after(std::time::Duration::from_millis(300)).await;
+    }));
+    let error = result.expect_err("timed out");
+    assert!(error.to_string().contains("timed out"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+
+    let fast =
+        block(runner.run_until(&["--version"], futures::future::pending::<()>())).expect("run");
+    assert_eq!(fast.status, 0);
+}
+
+#[test]
 fn recent_branches_from_reflog() {
     let repo = TestRepo::new();
     repo.commit("a.txt", "base\n", "base");
@@ -407,6 +495,33 @@ fn show_at_existing_and_missing_path() {
     );
     let missing = RepoPath::new("dir/missing.txt").expect("path");
     assert_eq!(block(runner.show_at("HEAD", &missing)).expect("show"), None);
+    assert!(
+        block(runner.show_at("no-such-revision", &path)).is_err(),
+        "an unknown revision is an error, not a missing file"
+    );
+    assert!(block(runner.show_at("HEAD", &RepoPath::new("dir").expect("path"))).is_err());
+}
+
+#[test]
+fn show_bytes_at_is_lossless_and_show_at_refuses_binary() {
+    let repo = TestRepo::new();
+    let bytes = vec![0u8, 159, 146, 150, 255, 13, 10];
+    std::fs::write(repo.work.join("blob.bin"), &bytes).expect("write");
+    repo.git(&["add", "blob.bin"]);
+    repo.git(&["commit", "--quiet", "-m", "binary"]);
+    let runner = repo.runner();
+    let path = RepoPath::new("blob.bin").expect("path");
+
+    assert_eq!(
+        block(runner.show_bytes_at("HEAD", &path)).expect("show"),
+        Some(bytes)
+    );
+    assert!(block(runner.show_at("HEAD", &path)).is_err());
+    let missing = RepoPath::new("missing.bin").expect("path");
+    assert_eq!(
+        block(runner.show_bytes_at("HEAD", &missing)).expect("show"),
+        None
+    );
 }
 
 #[test]
@@ -504,6 +619,7 @@ async fn run_through_repository_job_queue(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = TestRepo::new();
     repo.diverged_with_conflict();
+    set_test_env(repo.env.clone());
     let (_project, repository) = open_repository(&repo.work, cx).await;
 
     let output = cx
@@ -511,6 +627,7 @@ async fn run_through_repository_job_queue(cx: &mut TestAppContext) {
             GitCli::run(
                 &repository,
                 vec!["rev-parse".into(), "--abbrev-ref".into(), "HEAD".into()],
+                Some(std::time::Duration::from_secs(60)),
                 cx,
             )
         })
