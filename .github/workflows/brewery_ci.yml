@@ -229,6 +229,18 @@ jobs:
           cache-on-failure: true
       - name: Build
         run: cargo build --locked --profile release-fast -p zed
+      - name: Assert exe metadata
+        shell: pwsh
+        run: |
+          $exe = Get-Item target/release-fast/brewery.exe
+          $info = $exe.VersionInfo
+          $info | Format-List ProductName, FileDescription, CompanyName, LegalCopyright, FileVersion, ProductVersion
+          $expected = (Get-Content crates/zed/BREWERY_VERSION -TotalCount 1).Trim()
+          $channel = (Get-Content crates/zed/RELEASE_CHANNEL -TotalCount 1).Trim()
+          $name = switch ($channel) { 'stable' { 'Brewery' } 'preview' { 'Brewery Preview' } 'nightly' { 'Brewery Nightly' } default { 'Brewery Dev' } }
+          if ($info.ProductName -ne $name) { throw "ProductName is '$($info.ProductName)', expected '$name'" }
+          if ($info.CompanyName -ne 'Brewery contributors') { throw "CompanyName is '$($info.CompanyName)'" }
+          if ($info.FileVersion -ne $expected) { throw "FileVersion is '$($info.FileVersion)', expected '$expected'" }
       - uses: actions/upload-artifact@v4
         with:
           name: brewery-windows-2025

@@ -1560,6 +1560,7 @@ fn open_about_window(cx: &mut App) {
         copy_entry: NavigableEntry,
         app_icon: Arc<Image>,
         message: SharedString,
+        based_on: SharedString, // brewery:
         commit: Option<SharedString>,
         full_version: SharedString,
     }
@@ -1569,14 +1570,21 @@ fn open_about_window(cx: &mut App) {
             let release_channel = ReleaseChannel::global(cx);
             let release_channel_name = release_channel.display_name();
             let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            // brewery: About shows Brewery's version and credits Zed's.
+            let version = brewery_core::BREWERY_VERSION;
+            let based_on: SharedString =
+                brewery_core::based_on_zed(env!("CARGO_PKG_VERSION")).into();
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"
             } else {
                 ""
             };
-            let message: SharedString = format!("{release_channel_name} {version} {debug}").into();
+            let message: SharedString = format!(
+                "{} {debug}",
+                brewery_core::about_title(release_channel_name, version)
+            )
+            .into();
             let commit = AppCommitSha::try_global(cx)
                 .map(|sha| sha.full())
                 .filter(|commit| !commit.is_empty())
@@ -1588,6 +1596,7 @@ fn open_about_window(cx: &mut App) {
                 copy_entry: NavigableEntry::focusable(cx),
                 app_icon: about_window_icon(release_channel),
                 message,
+                based_on,
                 commit,
                 full_version,
             }
@@ -1636,6 +1645,11 @@ fn open_about_window(cx: &mut App) {
                             .items_center()
                             .child(img(self.app_icon.clone()).size_16().flex_none())
                             .child(Headline::new(self.message.clone()))
+                            .child(
+                                Label::new(self.based_on.clone())
+                                    .color(Color::Muted)
+                                    .size(LabelSize::XSmall),
+                            ) // brewery:
                             .when_some(self.commit.clone(), |this, commit| {
                                 this.child(
                                     Label::new("Commit")

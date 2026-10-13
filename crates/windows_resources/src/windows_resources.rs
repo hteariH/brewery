@@ -19,9 +19,38 @@ fn git_sha() -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+// brewery: the release version lives in crates/zed/BREWERY_VERSION and replaces each
+// crate's own CARGO_PKG_VERSION in the exe metadata.
+const BREWERY_VERSION_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../zed/BREWERY_VERSION");
+
+fn brewery_version() -> Option<String> {
+    let version = std::fs::read_to_string(BREWERY_VERSION_PATH).ok()?;
+    let version = version.trim();
+    (!version.is_empty()).then(|| version.to_string())
+}
+
+/// `major,minor,patch,0` for the FILEVERSION/PRODUCTVERSION fields; pre-release and
+/// build suffixes ("0.1.0-rc.1") are ignored.
+fn file_version(version: &str) -> String {
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = core
+        .split('.')
+        .map(|part| part.parse::<u16>().unwrap_or(0))
+        .chain(std::iter::repeat(0));
+    format!(
+        "{},{},{},{}",
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
 fn product_version() -> String {
     let commit_sha = git_sha();
-    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    // brewery: Brewery's version, not the crate's.
+    let pkg_version =
+        brewery_version().unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
     let channel = std::env::var("RELEASE_CHANNEL").unwrap_or_else(|_| "dev".into());
     let build_id = std::env::var("GITHUB_RUN_NUMBER").ok();
 
@@ -42,12 +71,14 @@ const ICON_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../zed/resources/wi
 const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/manifest.xml");
 
 pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-changed={BREWERY_VERSION_PATH}"); // brewery:
     let channel = option_env!("RELEASE_CHANNEL").unwrap_or("dev");
     let (icon_filename, product_name) = match channel {
-        "stable" => ("app-icon.ico", "Zed"),
-        "preview" => ("app-icon-preview.ico", "Zed Preview"),
-        "nightly" => ("app-icon-nightly.ico", "Zed Nightly"),
-        _ => ("app-icon-dev.ico", "Zed Dev"),
+        // brewery: product names are ReleaseChannel::display_name()
+        "stable" => ("app-icon.ico", "Brewery"),
+        "preview" => ("app-icon-preview.ico", "Brewery Preview"),
+        "nightly" => ("app-icon-nightly.ico", "Brewery Nightly"),
+        _ => ("app-icon-dev.ico", "Brewery Dev"),
     };
     let icon = std::path::PathBuf::from(ICON_DIR).join(icon_filename);
     let icon_escaped = icon.to_string_lossy().replace('\\', "\\\\");
@@ -59,19 +90,11 @@ pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
         String::new()
     };
 
-    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    // brewery: Brewery's version, not the crate's.
+    let pkg_version =
+        brewery_version().unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
     let product_version = product_version();
-    let mut version_parts = pkg_version
-        .split('.')
-        .map(|part| part.parse::<u16>().unwrap_or(0))
-        .chain(std::iter::repeat(0));
-    let file_version = format!(
-        "{},{},{},{}",
-        version_parts.next().unwrap_or(0),
-        version_parts.next().unwrap_or(0),
-        version_parts.next().unwrap_or(0),
-        version_parts.next().unwrap_or(0),
-    );
+    let file_version = file_version(&pkg_version);
 
     // The resource paths can contain non-ASCII characters (e.g. when the
     // repository lives under a path with such characters). Rust Strings are
@@ -100,8 +123,8 @@ BEGIN
             VALUE "FileVersion", "{pkg_version}\0"
             VALUE "ProductName", "{product_name}\0"
             VALUE "ProductVersion", "{product_version}\0"
-            VALUE "CompanyName", "Zed Industries, Inc.\0"
-            VALUE "LegalCopyright", "Copyright 2022 - 2025 Zed Industries, Inc.\0"
+            VALUE "CompanyName", "Brewery contributors\0"
+            VALUE "LegalCopyright", "Copyright 2026 Brewery contributors. Portions copyright Zed Industries, Inc.\0"
         END
     END
     BLOCK "VarFileInfo"

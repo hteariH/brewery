@@ -17,6 +17,25 @@ pub fn init(cx: &mut App) {
     });
 }
 
+/// Brewery's own release version, from `crates/zed/BREWERY_VERSION` (one line,
+/// semver). Zed's `AppVersion` stays what remote servers, extensions and LSP see.
+pub const BREWERY_VERSION: &str = env!("BREWERY_VERSION");
+
+/// `BREWERY_VERSION` as a parsed version.
+pub fn brewery_version() -> semver::Version {
+    semver::Version::parse(BREWERY_VERSION).unwrap_or_else(|_| semver::Version::new(0, 0, 0))
+}
+
+/// Headline of the About window, e.g. "Brewery 0.1.0".
+pub fn about_title(product_name: &str, brewery_version: &str) -> String {
+    format!("{product_name} {brewery_version}")
+}
+
+/// Second About line crediting the upstream editor, e.g. "based on Zed 1.25.0".
+pub fn based_on_zed(zed_version: &str) -> String {
+    format!("based on Zed {zed_version}")
+}
+
 pub const REPOSITORY_URL: &str = "https://github.com/hteariH/brewery";
 
 const REMOVED_MENU_ITEMS: &[&str] = &[
@@ -104,6 +123,26 @@ mod tests {
     use super::*;
     use command_palette_hooks::CommandPaletteFilter;
     use gpui::{Menu, MenuItem, NoAction, TestAppContext};
+
+    #[test]
+    fn brewery_version_matches_file_and_parses() {
+        let file = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../zed/BREWERY_VERSION"
+        ))
+        .expect("BREWERY_VERSION file");
+        assert_eq!(file.lines().count(), 1, "one line only");
+        assert_eq!(BREWERY_VERSION, file.trim());
+        let parsed = semver::Version::parse(file.trim()).expect("semver");
+        assert_eq!(brewery_version(), parsed);
+        assert_eq!(BREWERY_VERSION, "0.1.0");
+    }
+
+    #[test]
+    fn about_text() {
+        assert_eq!(about_title("Brewery", "0.1.0"), "Brewery 0.1.0");
+        assert_eq!(based_on_zed("1.25.0"), "based on Zed 1.25.0");
+    }
 
     fn action(name: &str) -> MenuItem {
         MenuItem::action(name.to_string(), NoAction)

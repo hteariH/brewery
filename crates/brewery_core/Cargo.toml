@@ -16,6 +16,7 @@ doctest = false
 brewery_cloud.workspace = true
 command_palette_hooks.workspace = true
 gpui.workspace = true
+semver.workspace = true
 zed_actions.workspace = true
 
 [dev-dependencies]
