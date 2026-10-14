@@ -174,7 +174,7 @@ class RealTemplateTests(unittest.TestCase):
             self.assertIn(needle, installer)
         self.assertIn("License: GPL-3.0-or-later", (root / "winget/Brewery.locale.en-US.yaml.in").read_text())
         for path in root.glob("**/*.in"):
-            self.assertNotIn(b"", path.read_bytes(), path.name)
+            self.assertNotIn(b"\r", path.read_bytes(), path.name)
 
 
 if __name__ == "__main__":
