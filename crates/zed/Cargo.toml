@@ -82,6 +82,7 @@ auto_update.workspace = true
 auto_update_ui.workspace = true
 breadcrumbs.workspace = true
 brewery_build.workspace = true # brewery:
+brewery_bundle.workspace = true # brewery:
 brewery_core.workspace = true # brewery:
 brewery_db.workspace = true # brewery:
 brewery_git.workspace = true # brewery:

@@ -2417,6 +2417,13 @@ dependencies = [
 [[package]]
 name = "brewery_bundle"
 version = "0.1.0"
+dependencies = [
+ "gpui",
+ "log",
+ "serde_json",
+ "settings",
+ "windows 0.62.2",
+]
 
 [[package]]
 name = "brewery_cloud"
@@ -22613,6 +22620,7 @@ dependencies = [
  "auto_update_ui",
  "breadcrumbs",
  "brewery_build",
+ "brewery_bundle",
  "brewery_core",
  "brewery_db",
  "brewery_git",

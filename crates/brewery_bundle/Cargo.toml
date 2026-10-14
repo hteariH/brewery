@@ -13,3 +13,14 @@ path = "src/brewery_bundle.rs"
 doctest = false
 
 [dependencies]
+gpui.workspace = true
+log.workspace = true
+serde_json.workspace = true
+settings.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }

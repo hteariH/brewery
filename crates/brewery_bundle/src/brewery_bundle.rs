@@ -1,6 +1,11 @@
 //! Where a packaged Brewery keeps its bundled pieces: the JRE, the daemon jar, jdtls
-//! and seeded extensions. Pure path logic; every function has a `*_from_exe` variant
-//! that takes the executable path so tests can use temp dirs.
+//! and seeded extensions. The path functions each have a `*_from_exe` variant that takes
+//! the executable path so tests can use temp dirs; `java_setup` wires the bundled Java
+//! tools into the extension dir and the default settings at startup.
+
+mod java_setup;
+
+pub use java_setup::*;
 
 use std::path::{Path, PathBuf};
 

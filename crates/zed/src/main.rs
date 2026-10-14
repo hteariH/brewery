@@ -495,6 +495,8 @@ fn main() {
             AppCommitSha::set_global(app_commit_sha, cx);
         }
         settings::init(cx);
+        // brewery: point the Java extension at the bundled tools (a defaults layer)
+        brewery_bundle::apply_jdtls_defaults(brewery_bundle::java_settings_overlay(), cx);
         zlog_settings::init(cx);
         zed::watch_settings_files(fs.clone(), cx);
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
@@ -661,6 +663,8 @@ fn main() {
         dap_adapters::init(cx);
         auto_update_ui::init(cx);
         reliability::init(client.clone(), app_state.workspace_store.clone(), cx);
+        // brewery: seed the bundled Java extension before the extension index loads
+        brewery_bundle::seed_bundled_extensions(paths::extensions_dir());
         extension_host::init(
             extension_host_proxy.clone(),
             app_state.fs.clone(),
