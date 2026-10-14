@@ -41,6 +41,7 @@ FAKE_SERVER = textwrap.dedent(
                 length = int(line.split(b":")[1])
         return json.loads(inp.read(length))
 
+    symbol_requests = 0
     if MODE == "noise":
         out.write(b"Picked up JAVA_TOOL_OPTIONS\n")
         out.flush()
@@ -65,7 +66,14 @@ FAKE_SERVER = textwrap.dedent(
         elif method == "workspace/executeCommand":
             send({"jsonrpc": "2.0", "id": msg["id"], "result": 50505})
         elif method == "textDocument/documentSymbol":
-            send({"jsonrpc": "2.0", "id": msg["id"], "result": [{"name": "Owner", "kind": 5}]})
+            symbol_requests += 1
+            # A real jdtls answers [] until the file's project is imported.
+            if MODE == "slow-symbols" and symbol_requests < 3:
+                send({"jsonrpc": "2.0", "id": msg["id"], "result": []})
+            elif MODE == "no-symbols":
+                send({"jsonrpc": "2.0", "id": msg["id"], "result": []})
+            else:
+                send({"jsonrpc": "2.0", "id": msg["id"], "result": [{"name": "Owner", "kind": 5}]})
         elif method == "shutdown":
             send({"jsonrpc": "2.0", "id": msg["id"], "result": None})
         elif method == "exit":
@@ -110,6 +118,21 @@ class LspSmokeTest(unittest.TestCase):
         self.assertIn("ServiceReady", log)
         self.assertIn("50505", log)
         self.assertIn("Owner", log)
+
+    def test_symbols_are_asked_again_until_the_file_is_imported(self):
+        code, log = self.smoke("slow-symbols", "--open", "src/Owner.java")
+        self.assertEqual(code, 0, log)
+        self.assertIn("Owner", log)
+
+    def test_no_symbols_at_all_fails(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = lsp_smoke.main(
+                ["--project", str(self.project), "--timeout", "4", "--open", "src/Owner.java",
+                 "--", sys.executable, "-I", str(self.server), "no-symbols"]
+            )
+        self.assertNotEqual(code, 0)
+        self.assertIn("no document symbols", err.getvalue())
 
     def test_copy_leaves_the_project_alone(self):
         before = lsp_smoke.snapshot(self.project)

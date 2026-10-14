@@ -325,10 +325,18 @@ def check(args, proc: subprocess.Popen, project: Path, started: float) -> None:
             {"textDocument": {"uri": uri, "languageId": "java", "version": 1,
                               "text": path.read_text(encoding="utf-8")}},
         )
-        symbols = client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}}, deadline)
-        names = [s.get("name") for s in symbols or []]
-        if not names:
-            raise SmokeError(f"no document symbols for {args.open}")
+        # jdtls answers [] until the file's project is imported, which can take longer
+        # than ServiceReady (offline Maven import on a fast runner), so ask again.
+        while True:
+            symbols = client.request(
+                "textDocument/documentSymbol", {"textDocument": {"uri": uri}}, deadline
+            )
+            names = [s.get("name") for s in symbols or []]
+            if names:
+                break
+            if time.monotonic() + 1 > deadline:
+                raise SmokeError(f"no document symbols for {args.open}")
+            time.sleep(0.5)
         log(f"documentSymbol {args.open}: {', '.join(names)}")
 
     client.request("shutdown", None, deadline)

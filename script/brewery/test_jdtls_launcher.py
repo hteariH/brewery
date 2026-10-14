@@ -67,7 +67,8 @@ FAKE_LAUNCHER = textwrap.dedent(
 
 
 def norm(path) -> str:
-    return os.path.normcase(os.path.normpath(str(path)))
+    # realpath: on macOS the temp dir is /var/..., which the launcher sees as /private/var.
+    return os.path.normcase(os.path.realpath(str(path)))
 
 
 @unittest.skipUnless(JDK, "needs a JDK 21 in BREWERY_TEST_JDK or JAVA_HOME")

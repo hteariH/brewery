@@ -7,3 +7,6 @@ crates/zed/resources/windows/zed.sh text eol=lf
 # brewery: gradle wrapper needs fixed line endings on CI checkouts
 brewery-daemon/gradlew text eol=lf
 brewery-daemon/gradlew.bat text eol=crlf
+
+# brewery: bundled licence texts are copied byte for byte (no CRLF on Windows checkouts)
+script/brewery/licenses/*.txt text eol=lf
