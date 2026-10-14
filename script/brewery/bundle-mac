@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Packages a macOS build of Brewery as an UNSIGNED, UNSUPPORTED zip:
+# brewery-<ver>-macos-aarch64.zip holding `<App name>.app` (Brewery.app on the stable
+# channel) and a README.txt. Brewery's replacement for Zed's script/bundle-mac: it
+# assembles the .app from binaries built elsewhere (CI's release-fast build) instead of
+# building through cargo-bundle, and has no notarization, DMG, remote server or Sentry
+# upload. The bundle is only ad-hoc signed (Apple Silicon refuses unsigned code); there is
+# no Developer ID, so Gatekeeper quarantines a downloaded copy.
+#
+#   script/brewery/bundle-mac --app <brewery> --cli <cli> --bundle <bundle dir>
+#       [--version <ver>] [--channel <channel>] [--licenses-md <licenses.md>] [--out <dir>]
+#
+#   --app          the app binary (cargo's target/<profile>/brewery)
+#   --cli          the CLI binary (cargo's target/<profile>/cli)
+#   --bundle       the offline bundle, script/brewery/fetch_bundle_deps.py's
+#                  target/bundle/macos-aarch64 (jre/, brewery-daemon/, jdtls/, extensions/, licenses/)
+#   --version      default: crates/zed/BREWERY_VERSION
+#   --channel      default: crates/zed/RELEASE_CHANNEL (must match the build's)
+#   --licenses-md  Zed's generated licences of the Rust dependencies (script/generate-licenses)
+#   --out          default: target/release
+#
+# Bundle layout (what crates/brewery_bundle and the CLI expect):
+#   <App>.app/Contents/MacOS/brewery   the app (CFBundleExecutable)
+#   <App>.app/Contents/MacOS/cli       the CLI; `ln -s .../Contents/MacOS/cli /usr/local/bin/brewery`
+#   <App>.app/Contents/Resources/{jre,brewery-daemon,jdtls,extensions,licenses}
+# Needs macOS (ditto, sips, iconutil, codesign, plutil), python3. Runs from the repository root.
+set -euo pipefail
+
+usage() {
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+app="" cli="" bundle="" version="" channel="" licenses_md="" out="target/release"
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) usage; exit 0 ;;
+        --app) app=$2; shift 2 ;;
+        --cli) cli=$2; shift 2 ;;
+        --bundle) bundle=$2; shift 2 ;;
+        --version) version=$2; shift 2 ;;
+        --channel) channel=$2; shift 2 ;;
+        --licenses-md) licenses_md=$2; shift 2 ;;
+        --out) out=$2; shift 2 ;;
+        *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+die() { echo "bundle-mac: $*" >&2; exit 1; }
+
+[[ -f script/brewery/mac_info_plist.py ]] || die "run from the repository root"
+[[ -n "$app" && -n "$cli" && -n "$bundle" ]] || { usage >&2; exit 2; }
+[[ "$(uname -s)" == Darwin ]] || die "needs macOS"
+[[ "$(uname -m)" == arm64 ]] || die "only aarch64 is packaged (host is $(uname -m))"
+for bin in "$app" "$cli"; do
+    [[ -f "$bin" ]] || die "$bin not found"
+    file "$bin" | grep -q 'Mach-O 64-bit executable arm64' || die "$bin is not an arm64 Mach-O executable"
+done
+for path in jre/bin/java brewery-daemon/brewery-daemon.jar jdtls/brewery-jdtls extensions/java/extension.toml licenses/README.txt; do
+    [[ -e "$bundle/$path" ]] || die "$bundle is not a macOS offline bundle (no $path)"
+done
+if [[ -n "$licenses_md" && ! -f "$licenses_md" ]]; then die "$licenses_md not found"; fi
+
+version=${version:-$(tr -d '[:space:]' < crates/zed/BREWERY_VERSION)}
+channel=${channel:-$(tr -d '[:space:]' < crates/zed/RELEASE_CHANNEL)}
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "bad version $version"
+
+# Names follow ReleaseChannel (crates/release_channel); mac_info_plist.py has the same table
+# and its unit test keeps the identifiers equal to ReleaseChannel::app_id().
+case $channel in
+    stable) APP_NAME="Brewery"; APP_ID="io.github.htearih.Brewery"; suffix="" ;;
+    preview) APP_NAME="Brewery Preview"; APP_ID="io.github.htearih.Brewery-Preview"; suffix="-preview" ;;
+    nightly) APP_NAME="Brewery Nightly"; APP_ID="io.github.htearih.Brewery-Nightly"; suffix="-nightly" ;;
+    dev) APP_NAME="Brewery Dev"; APP_ID="io.github.htearih.Brewery-Dev"; suffix="-dev" ;;
+    *) die "unknown channel $channel" ;;
+esac
+
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+temp_dir=$(mktemp -d)
+trap 'rm -rf "$temp_dir"' EXIT
+stage="$temp_dir/stage"
+contents="$stage/$APP_NAME.app/Contents"
+mkdir -p "$contents/MacOS" "$contents/Resources"
+
+# Binaries, stripped as Zed's script does.
+cp "$app" "$contents/MacOS/brewery"
+cp "$cli" "$contents/MacOS/cli"
+chmod 755 "$contents/MacOS/brewery" "$contents/MacOS/cli"
+strip -x "$contents/MacOS/brewery" "$contents/MacOS/cli"
+
+python3 script/brewery/mac_info_plist.py --channel "$channel" --version "$version" \
+    --out "$contents/Info.plist"
+plutil -lint "$contents/Info.plist" >/dev/null
+
+# The offline bundle: Java runtime, daemon, jdtls (+ tools), the Java extension, licences.
+# brewery_bundle's macOS root is Contents/Resources.
+for dir in jre brewery-daemon jdtls extensions licenses; do
+    ditto "$bundle/$dir" "$contents/Resources/$dir"
+done
+if [[ -n "$licenses_md" ]]; then
+    cp "$licenses_md" "$contents/Resources/licenses/rust-dependencies.md"
+fi
+cp LICENSE-GPL "$contents/Resources/licenses/LICENSE-GPL"
+cp LICENSE-APACHE "$contents/Resources/licenses/LICENSE-APACHE"
+
+# Icons: Brewery.icns from the channel's 512 and 1024 px PNGs.
+iconset="$temp_dir/Brewery.iconset"
+mkdir "$iconset"
+small="crates/zed/resources/app-icon$suffix.png"
+large="crates/zed/resources/app-icon$suffix@2x.png"
+for size in 16 32 64 128 256; do
+    sips -z "$size" "$size" "$large" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    sips -z $((size * 2)) $((size * 2)) "$large" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+cp "$small" "$iconset/icon_512x512.png"
+cp "$large" "$iconset/icon_512x512@2x.png"
+iconutil -c icns "$iconset" -o "$contents/Resources/Brewery.icns"
+# DocumentTypes.plist names a "Document" icon (see Zed's script).
+cp crates/zed/resources/Document.icns "$contents/Resources/Document.icns"
+
+# Ad-hoc signature, entitlements without Zed's associated domains (they need a Zed team
+# profile). No Developer ID, no notarization: that is what "unsigned" means here.
+sed '/com.apple.developer.associated-domains/,+1d' crates/zed/resources/zed.entitlements \
+    > "$temp_dir/brewery.entitlements"
+codesign --force --sign - "$contents/MacOS/cli"
+codesign --force --sign - --entitlements "$temp_dir/brewery.entitlements" "$contents/MacOS/brewery"
+codesign --force --sign - --entitlements "$temp_dir/brewery.entitlements" "$stage/$APP_NAME.app"
+codesign --verify --verbose=2 "$stage/$APP_NAME.app"
+
+cat > "$stage/README.txt" <<EOF
+$APP_NAME $version for macOS (Apple Silicon)
+
+UNSIGNED AND UNSUPPORTED. This build has no Developer ID signature and is not
+notarized; the Brewery project does not support or test macOS. It is provided as is.
+
+1. Move "$APP_NAME.app" to /Applications.
+2. Clear the download quarantine flag, or Gatekeeper will refuse to open it:
+
+     xattr -dr com.apple.quarantine "/Applications/$APP_NAME.app"
+
+3. Optional, the brewery command:
+
+     sudo ln -sf "/Applications/$APP_NAME.app/Contents/MacOS/cli" /usr/local/bin/brewery
+
+Licences: "$APP_NAME.app/Contents/Resources/licenses".
+EOF
+
+zip_path="$out/brewery-$version-macos-aarch64.zip"
+rm -f "$zip_path"
+ditto -c -k --norsrc "$stage" "$zip_path"
+echo "bundle-mac: $zip_path ($APP_NAME.app, $APP_ID)"

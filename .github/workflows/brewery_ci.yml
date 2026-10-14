@@ -539,3 +539,50 @@ jobs:
             target/package/*.deb
             target/package/*.rpm
           retention-days: 14
+
+  # The unsigned macOS zip (script/brewery/bundle-mac) from the macOS build and bundle, then
+  # script/brewery/smoke-mac-zip: layout, CFBundleIdentifier, signature seal, java, cli.
+  # Unsupported like the rest of macOS: a failure doesn't fail the run.
+  package-macos:
+    name: Package (macos-aarch64)
+    needs: [changes, build-other, bundle]
+    if: needs.changes.outputs.other_builds == 'true' && needs.changes.outputs.bundle == 'true'
+    continue-on-error: true
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test the Info.plist writer
+        run: python -m unittest -v script/brewery/test_mac_info_plist.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: brewery-macos-15
+          path: target/mac-build
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle-macos-aarch64
+          path: target
+      - name: Package
+        run: |
+          mkdir -p target/bundle
+          tar -xzf target/bundle-macos-aarch64.tar.gz -C target/bundle
+          script/brewery/bundle-mac --app target/mac-build/brewery --cli target/mac-build/cli             --bundle target/bundle/macos-aarch64 --out target/package
+      - name: Smoke
+        run: script/brewery/smoke-mac-zip "target/package/brewery-$(cat crates/zed/BREWERY_VERSION)-macos-aarch64.zip"
+      - name: Contents
+        run: |
+          {
+            echo "### macOS zip (unsigned, unsupported)"
+            echo '```'
+            ls -l target/package
+            unzip -l target/package/*.zip | head -n 40
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos-aarch64
+          path: target/package/*.zip
+          retention-days: 14

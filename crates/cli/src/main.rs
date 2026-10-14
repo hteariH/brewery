@@ -1435,7 +1435,7 @@ mod mac_os {
             user_data_dir: Option<&str>,
         ) -> io::Result<ExitStatus> {
             let path = match self {
-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
+                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/brewery"), // brewery: the app binary is named brewery
                 Bundle::LocalPath { executable, .. } => executable.clone(),
             };
 
@@ -1449,7 +1449,7 @@ mod mac_os {
 
         fn path(&self) -> PathBuf {
             match self {
-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
+                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/brewery"), // brewery: the app binary is named brewery
                 Bundle::LocalPath { executable, .. } => executable.clone(),
             }
         }

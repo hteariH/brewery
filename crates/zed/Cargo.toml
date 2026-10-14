@@ -292,41 +292,39 @@ search = { workspace = true, features = ["test-support"] }
 repl = { workspace = true, features = ["test-support"] }
 
 
+# brewery: metadata for cargo-bundle, kept in step with script/brewery/bundle-mac (which assembles
+# the .app itself). Identifiers equal ReleaseChannel::app_id(); no zed:// URL scheme.
 [package.metadata.bundle-dev]
 icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
-identifier = "dev.zed.Zed-Dev"
-name = "Zed Dev"
+identifier = "io.github.htearih.Brewery-Dev"
+name = "Brewery Dev"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
 
 [package.metadata.bundle-nightly]
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
-identifier = "dev.zed.Zed-Nightly"
-name = "Zed Nightly"
+identifier = "io.github.htearih.Brewery-Nightly"
+name = "Brewery Nightly"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
 
 [package.metadata.bundle-preview]
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
-identifier = "dev.zed.Zed-Preview"
-name = "Zed Preview"
+identifier = "io.github.htearih.Brewery-Preview"
+name = "Brewery Preview"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
 
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
-identifier = "dev.zed.Zed"
-name = "Zed"
+identifier = "io.github.htearih.Brewery"
+name = "Brewery"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
 
 [package.metadata.cargo-shear]
 ignored = ["profiling", "tracing"]

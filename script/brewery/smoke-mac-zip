@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Checks a zip built by script/brewery/bundle-mac: unpacks it into a temp dir and asserts
+# the bundle layout, the Info.plist identity (CFBundleIdentifier equals the channel's app
+# id), the code signature seal, the bundled Java runtime and `cli --version`.
+#
+#   script/brewery/smoke-mac-zip <zip> [--version <ver>] [--channel <channel>]
+#
+# Needs macOS (ditto, plutil, codesign). Runs from the repository root.
+set -euo pipefail
+
+zip=${1:-}
+[[ -n "$zip" && "$zip" != -* ]] || { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+shift
+version="" channel=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --version) version=$2; shift 2 ;;
+        --channel) channel=$2; shift 2 ;;
+        *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+version=${version:-$(tr -d '[:space:]' < crates/zed/BREWERY_VERSION)}
+channel=${channel:-$(tr -d '[:space:]' < crates/zed/RELEASE_CHANNEL)}
+
+fail() { echo "smoke-mac-zip: FAIL: $*" >&2; exit 1; }
+ok() { echo "ok: $*"; }
+
+case $channel in
+    stable) name="Brewery"; id="io.github.htearih.Brewery" ;;
+    preview) name="Brewery Preview"; id="io.github.htearih.Brewery-Preview" ;;
+    nightly) name="Brewery Nightly"; id="io.github.htearih.Brewery-Nightly" ;;
+    dev) name="Brewery Dev"; id="io.github.htearih.Brewery-Dev" ;;
+    *) fail "unknown channel $channel" ;;
+esac
+
+[[ "$(basename "$zip")" == "brewery-$version-macos-aarch64.zip" ]] || fail "zip is named $(basename "$zip")"
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+ditto -x -k "$zip" "$dir"
+app="$dir/$name.app"
+c="$app/Contents"
+
+[[ -d "$app" ]] || fail "no $name.app in the zip: $(ls "$dir")"
+ok "$name.app"
+[[ -f "$dir/README.txt" ]] && grep -q 'xattr -dr com.apple.quarantine' "$dir/README.txt" || fail "README.txt lacks the quarantine note"
+grep -qi 'unsigned' "$dir/README.txt" || fail "README.txt does not say unsigned"
+ok "README.txt"
+
+for f in MacOS/brewery MacOS/cli Resources/jre/bin/java Resources/jdtls/brewery-jdtls; do
+    [[ -x "$c/$f" ]] || fail "$f is missing or not executable"
+done
+for f in Resources/brewery-daemon/brewery-daemon.jar Resources/extensions/java/extension.toml \
+         Resources/licenses/README.txt Resources/licenses/LICENSE-GPL Resources/Brewery.icns Info.plist; do
+    [[ -f "$c/$f" ]] || fail "$f is missing"
+done
+[[ ! -e "$c/MacOS/zed" ]] || fail "Contents/MacOS/zed must not exist"
+ok "layout"
+
+plist="$c/Info.plist"
+plutil -lint "$plist" >/dev/null || fail "Info.plist is not valid"
+read_key() { plutil -extract "$1" raw -o - "$plist"; }
+[[ "$(read_key CFBundleIdentifier)" == "$id" ]] || fail "CFBundleIdentifier is $(read_key CFBundleIdentifier), expected $id"
+[[ "$(read_key CFBundleExecutable)" == brewery ]] || fail "CFBundleExecutable is $(read_key CFBundleExecutable)"
+[[ "$(read_key CFBundleName)" == "$name" ]] || fail "CFBundleName is $(read_key CFBundleName)"
+[[ "$(read_key CFBundleShortVersionString)" == "$version" ]] || fail "CFBundleShortVersionString is $(read_key CFBundleShortVersionString)"
+! plutil -extract CFBundleURLTypes raw -o - "$plist" >/dev/null 2>&1 || fail "the bundle registers a URL scheme"
+ok "Info.plist: $id $version"
+
+codesign --verify --verbose=2 "$app" || fail "code signature does not verify"
+ok "codesign seal"
+
+"$c/Resources/jre/bin/java" -version 2>&1 | head -n 1 | grep -q 'version "21' || fail "bundled java is not 21"
+ok "bundled java"
+
+# The CLI finds its bundle from its own path and reads the version from Info.plist.
+out=$("$c/MacOS/cli" --version) || fail "cli --version failed"
+[[ "$out" == "Brewery $version "* ]] || fail "cli --version printed: $out"
+ok "cli --version: $out"
+echo "smoke-mac-zip: all checks passed"
