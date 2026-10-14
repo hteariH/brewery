@@ -152,6 +152,17 @@ in the Commit tool window opens the merge editor, and `brewery: resolve conflict
 reopens the dialog. Conflicts after a pull show a notification with a Resolve
 button.
 
+## Java without internet
+
+Release packages bring everything Brewery itself needs for Java: a Java runtime for
+its internal servers, the Eclipse JDT language server, Lombok, the debugger and the
+Java extension. A fresh machine can open and edit Java code without downloads. Your
+project still needs its own JDK and its dependencies: Maven and Gradle download them
+the first time a project is built or imported, so that step needs a network or a
+filled local repository (`~/.m2`, `~/.gradle`). To use other JDKs for your projects,
+list them in `java.configuration.runtimes` in the Java language server settings.
+The Gradle language server is not bundled and downloads on first use.
+
 ## Updates
 
 On Windows, Brewery updates itself from GitHub Releases: it downloads the new version
