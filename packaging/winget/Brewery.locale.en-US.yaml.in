@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: hteariH.Brewery
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: Brewery contributors
+PublisherUrl: https://github.com/hteariH
+PublisherSupportUrl: https://github.com/@REPO@/issues
+PackageName: Brewery
+PackageUrl: https://github.com/@REPO@
+License: GPL-3.0-or-later
+LicenseUrl: https://github.com/@REPO@/blob/main/LICENSE-GPL
+Copyright: Copyright (c) Brewery contributors
+ShortDescription: Open-source IDE for Java and Spring, built on the Zed editor.
+Description: |-
+  Brewery is an open-source IDE for Java and Spring, a fork of the Zed editor.
+  It bundles a Java runtime, Eclipse JDT LS and its own analysis daemon, so Java
+  support works without downloads. Unsigned build: Windows SmartScreen may warn.
+Moniker: brewery
+Tags:
+  - ide
+  - java
+  - spring
+  - editor
+  - kotlin
+ReleaseNotesUrl: https://github.com/@REPO@/releases/tag/v@VERSION@
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

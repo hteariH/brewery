@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: hteariH.Brewery
+PackageVersion: @VERSION@
+InstallerType: inno
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+Commands:
+  - brewery
+ReleaseDate: @RELEASE_DATE@
+Installers:
+  - Architecture: x64
+    InstallerUrl: @INSTALLER_URL@
+    InstallerSha256: @INSTALLER_SHA256@
+    ProductCode: '@PRODUCT_CODE@'
+ManifestType: installer
+ManifestVersion: 1.6.0

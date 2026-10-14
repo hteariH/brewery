@@ -586,3 +586,68 @@ jobs:
           name: package-macos-aarch64
           path: target/package/*.zip
           retention-days: 14
+
+  # The winget manifests rendered with a placeholder checksum (the real installer isn't needed
+  # to check their shape; the release workflow fills in the checksum of the real one) and
+  # validated. Runs whenever the packaging scripts change.
+  package-winget:
+    name: Package (winget manifests)
+    needs: changes
+    if: needs.changes.outputs.bundle == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Render
+        shell: pwsh
+        run: |
+          $version = (Get-Content crates/zed/BREWERY_VERSION -Raw).Trim()
+          python script/brewery/render_manifests.py --version $version --only winget `
+            --installer-sha256 ('0' * 64) --out target/manifests
+      - name: winget
+        shell: pwsh
+        run: |
+          $cmd = Get-Command winget -ErrorAction SilentlyContinue
+          if (-not $cmd) { throw "winget is not available on this runner" }
+          winget --version
+          winget validate --manifest target/manifests/winget
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-winget-manifests
+          path: target/manifests/winget
+          retention-days: 14
+
+  # `makepkg -si` as a non-root user in archlinux:base-devel against the Linux tarball that
+  # package-linux built (file:// source), then the release PKGBUILD and its .SRCINFO.
+  package-aur:
+    name: Package (aur)
+    needs: [changes, package-linux]
+    if: needs.changes.outputs.other_builds == 'true' && needs.changes.outputs.bundle == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-linux-x64
+          path: target/package
+      - name: Smoke (makepkg -si, archlinux:base-devel)
+        run: |
+          version=$(cat crates/zed/BREWERY_VERSION)
+          mkdir -p target/aur
+          chmod 777 target/aur
+          docker run --rm -v "$PWD:/src:ro" -v "$PWD/target/package:/pkg:ro" -v "$PWD/target/aur:/out" -w /src \
+            archlinux:base-devel script/brewery/smoke-aur-package "/pkg/brewery-${version}-linux-x86_64.tar.gz" \
+            --version "$version" --out /out
+          cat target/aur/.SRCINFO
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-aur
+          include-hidden-files: true
+          path: |
+            target/aur/PKGBUILD
+            target/aur/.SRCINFO
+          retention-days: 14

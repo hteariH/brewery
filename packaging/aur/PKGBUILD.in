@@ -1,0 +1,47 @@
+# Maintainer: Brewery contributors <https://github.com/@REPO@/issues>
+#
+# Rendered by script/brewery/render_manifests.py (its at-sign placeholders); the release
+# workflow uploads the result together with .SRCINFO. Publishing to the AUR is manual.
+pkgname=brewery-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Open-source IDE for Java and Spring, built on the Zed editor (prebuilt, bundles a JRE)'
+arch=('x86_64')
+url='https://github.com/@REPO@'
+license=('GPL-3.0-or-later')
+# What the tarball does not carry (its lib/ holds xkbcommon, xcb, libstdc++ and friends).
+depends=('glibc' 'gcc-libs' 'zlib' 'glib2' 'alsa-lib' 'vulkan-icd-loader' 'wayland'
+         'libxkbcommon' 'libxkbcommon-x11' 'libx11')
+optdepends=('git: version control integration')
+provides=('brewery')
+conflicts=('brewery')
+# The tarball is a finished tree with its own JRE, jdtls and daemon: nothing to strip,
+# and stripping would also touch the bundled binaries.
+options=('!strip' '!debug' '!lto' '!emptydirs')
+source=("@SOURCE@")
+sha256sums=('@SHA256@')
+
+package() {
+    install -dm755 "$pkgdir/opt"
+    cp -a --no-preserve=ownership "$srcdir/brewery" "$pkgdir/opt/brewery"
+
+    install -dm755 "$pkgdir/usr/bin"
+    ln -s /opt/brewery/bin/brewery "$pkgdir/usr/bin/brewery"
+
+    # One desktop file, named after the app id of the channel the tarball was built for.
+    local desktop
+    for desktop in "$srcdir"/brewery/share/applications/*.desktop; do
+        install -Dm644 "$desktop" "$pkgdir/usr/share/applications/${desktop##*/}"
+    done
+    local size
+    for size in 512x512 1024x1024; do
+        install -Dm644 "$srcdir/brewery/share/icons/hicolor/$size/apps/brewery.png" \
+            "$pkgdir/usr/share/icons/hicolor/$size/apps/brewery.png"
+    done
+
+    install -dm755 "$pkgdir/usr/share/licenses/$pkgname"
+    cp -a --no-preserve=ownership "$srcdir"/brewery/licenses/. "$pkgdir/usr/share/licenses/$pkgname/"
+    # Brewery's own licences at the top, where Arch tools and users look for them.
+    install -Dm644 "$srcdir"/brewery/licenses/brewery/LICENSE-GPL "$pkgdir/usr/share/licenses/$pkgname/LICENSE-GPL"
+    install -Dm644 "$srcdir"/brewery/licenses/brewery/LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+}

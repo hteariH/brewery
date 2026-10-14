@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Builds and installs the AUR package from a Brewery tarball in a throwaway Arch container,
+# the way an AUR user would: render PKGBUILD (source = the local tarball as a file:// URL),
+# `makepkg -si` as a non-root user, check the installed tree with check-linux-tree
+# --installed, validate the desktop file, remove the package and check nothing is left.
+# Also renders the PKGBUILD with the real release URL plus its .SRCINFO into --out.
+#
+#   docker run --rm -v "$PWD:/src:ro" -v "$PWD/target/package:/pkg:ro" -v "$PWD/target/aur:/out" \
+#       -w /src archlinux:base-devel \
+#       script/brewery/smoke-aur-package /pkg/brewery-0.1.0-linux-x86_64.tar.gz --version 0.1.0 --out /out
+set -euo pipefail
+
+tarball="" version="" out=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --version) version=$2; shift 2 ;;
+        --out) out=$2; shift 2 ;;
+        -*) echo "Unknown option: $1" >&2; exit 2 ;;
+        *) tarball=$1; shift ;;
+    esac
+done
+[[ -f "$tarball" ]] || { echo "usage: $0 <brewery-<ver>-linux-x86_64.tar.gz> [--version V] [--out DIR]" >&2; exit 2; }
+[[ "$(id -u)" == 0 ]] || { echo "run as root (in an archlinux:base-devel container)" >&2; exit 2; }
+here=$(cd "$(dirname "$0")" && pwd)
+tarball=$(cd "$(dirname "$tarball")" && pwd)/$(basename "$tarball")
+if [[ -z "$version" ]]; then
+    version=$(tr -d '[:space:]' < "$here/../../crates/zed/BREWERY_VERSION")
+fi
+
+pacman -Syu --noconfirm --needed python desktop-file-utils >/dev/null
+# makepkg refuses to run as root; -i then needs sudo for pacman.
+id builder >/dev/null 2>&1 || useradd -m builder
+echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+chmod 0440 /etc/sudoers.d/builder
+
+work=/home/builder/aur
+install -d -o builder -g builder "$work"
+as_builder() { runuser -u builder -- env HOME=/home/builder PKGEXT=.pkg.tar "$@"; }
+
+# 1. Local build and install: file:// source, so no release is needed.
+as_builder python3 "$here/render_manifests.py" --version "$version" --tarball "$tarball" \
+    --source-url "file://$tarball" --only aur --out "$work/render"
+(cd "$work/render/aur" && as_builder makepkg -si --noconfirm)
+
+pacman -Qi brewery-bin | grep -E '^(Name|Version|Licenses|Provides|Conflicts With)'
+args=(/opt/brewery --installed --version "$version")
+as_builder "$here/check-linux-tree" "${args[@]}"
+for desktop in /usr/share/applications/io.github.htearih.Brewery*.desktop; do
+    desktop-file-validate "$desktop"
+    echo "ok:   desktop-file-validate $desktop"
+done
+[[ -f /usr/share/licenses/brewery-bin/LICENSE-GPL ]] || { echo "FAIL: no licence under /usr/share/licenses/brewery-bin" >&2; exit 1; }
+echo "ok:   /usr/share/licenses/brewery-bin/LICENSE-GPL"
+
+# 2. The published PKGBUILD (release URL) and its .SRCINFO.
+python3 "$here/render_manifests.py" --version "$version" --tarball "$tarball" --only aur --out "$work/release"
+chown -R builder:builder "$work/release"
+(cd "$work/release/aur" && as_builder bash -c 'makepkg --printsrcinfo > .SRCINFO')
+srcinfo="$work/release/aur/.SRCINFO"
+for want in "pkgbase = brewery-bin" "	pkgver = $version" "	arch = x86_64" "	license = GPL-3.0-or-later" \
+    "	provides = brewery" "	conflicts = brewery" \
+    "	source = https://github.com/hteariH/brewery/releases/download/v$version/brewery-$version-linux-x86_64.tar.gz" \
+    "pkgname = brewery-bin"; do
+    grep -qxF -- "$want" "$srcinfo" || { echo "FAIL: .SRCINFO lacks: $want" >&2; cat "$srcinfo" >&2; exit 1; }
+done
+grep -qE '^	sha256sums = [0-9a-f]{64}$' "$srcinfo" || { echo "FAIL: .SRCINFO has no sha256sums" >&2; exit 1; }
+echo "ok:   .SRCINFO"
+if [[ -n "$out" ]]; then
+    mkdir -p "$out"
+    cp "$work/release/aur/PKGBUILD" "$srcinfo" "$out/"
+    chmod 0644 "$out/PKGBUILD" "$out/.SRCINFO"
+fi
+
+# 3. Removal.
+pacman -Rns --noconfirm brewery-bin
+leftovers=()
+for path in /opt/brewery /usr/bin/brewery /usr/share/icons/hicolor/512x512/apps/brewery.png \
+    /usr/share/licenses/brewery-bin; do
+    if [[ -e "$path" || -L "$path" ]]; then leftovers+=("$path"); fi
+done
+shopt -s nullglob
+for desktop in /usr/share/applications/io.github.htearih.Brewery*.desktop; do leftovers+=("$desktop"); done
+if [[ ${#leftovers[@]} -gt 0 ]]; then
+    echo "FAIL: left after removing the package: ${leftovers[*]}" >&2
+    exit 1
+fi
+echo "ok:   removed cleanly"
+echo "smoke passed for brewery-bin $version"
