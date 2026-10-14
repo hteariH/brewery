@@ -556,7 +556,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Test the Info.plist writer
-        run: python -m unittest -v script/brewery/test_mac_info_plist.py
+        run: python -m unittest discover -v -s script/brewery -p 'test_mac_info_plist.py'
       - uses: actions/download-artifact@v4
         with:
           name: brewery-macos-15

@@ -1,0 +1,29 @@
+name: tmp mac iterate
+on:
+  push:
+    paths: [".github/workflows/tmp_mac_iter.yml", "script/brewery/bundle-mac", "script/brewery/smoke-mac-zip", "script/brewery/mac_info_plist.py"]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  p:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -v -s script/brewery -p 'test_mac_info_plist.py'
+      - name: Artifacts of run 38542700986
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 38542700986 -R "$GITHUB_REPOSITORY" -n brewery-macos-15 -D target/mac-build
+          gh run download 38542700986 -R "$GITHUB_REPOSITORY" -n bundle-macos-aarch64 -D target
+      - name: Package
+        run: |
+          mkdir -p target/bundle
+          tar -xzf target/bundle-macos-aarch64.tar.gz -C target/bundle
+          script/brewery/bundle-mac --app target/mac-build/brewery --cli target/mac-build/cli --bundle target/bundle/macos-aarch64 --out target/package
+      - run: script/brewery/smoke-mac-zip "target/package/brewery-$(cat crates/zed/BREWERY_VERSION)-macos-aarch64.zip"
+      - run: unzip -l target/package/*.zip | head -n 30
