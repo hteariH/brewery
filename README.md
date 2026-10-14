@@ -15,6 +15,22 @@ you open a project over SSH.
 **Status:** early development (milestone M0 — the fork itself). Not usable for
 Java work yet. See the [design](docs/superpowers/specs/2026-10-10-brewery-design.md).
 
+## Install
+
+- **Windows:** download `Brewery-<version>-x86_64-setup.exe` from
+  [Releases](https://github.com/hteariH/brewery/releases) (or use winget, once the
+  package is published: `winget install hteariH.Brewery`). It installs for your user
+  only and needs no administrator rights. The installer is not signed yet, so Windows
+  SmartScreen may warn the first time.
+- **Debian, Ubuntu:** download the `.deb` and run `sudo apt install ./brewery_<version>_amd64.deb`.
+- **Fedora, RHEL:** download the `.rpm` and run `sudo dnf install ./brewery-<version>-1.x86_64.rpm`.
+- **Arch Linux:** the `brewery-bin` package from the AUR.
+- **macOS (unsupported):** an unsigned zip for Apple Silicon. Unpack it, then run
+  `xattr -dr com.apple.quarantine Brewery.app` before the first start.
+
+Brewery installs to `/opt/brewery` on Linux and puts `brewery` on the PATH. There are
+no Flatpak or AppImage builds.
+
 ## Building
 
 Follow Zed's build guides — [Windows](docs/src/development/windows.md),

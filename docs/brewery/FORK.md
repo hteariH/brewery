@@ -152,6 +152,33 @@ names (Dev Drive/ReFS, `fsutil 8dot3name`) and a spaced install path, Brewery se
 - Without `java.configuration.runtimes`, run/debug through java-debug may use jdtls's
   default VM, which can be the bundled jlink JRE (release checklist item).
 
+## Packaging
+
+All packaging scripts take already-built binaries and the offline bundle (see "Offline
+bundle"); none of them runs cargo. Zed's own `bundle-*` scripts and `zed.iss` stay
+untouched for upstream merges.
+
+- Windows installer (Inno Setup 6, per-user):
+
+      powershell -File script/brewery/bundle-windows.ps1 -App target/release-fast/brewery.exe -Cli target/release-fast/cli.exe -Helper target/release-fast/auto_update_helper.exe -Bundle target/bundle/windows-x64
+
+  The script is `crates/zed/resources/windows/brewery.iss`. In update mode
+  (`/update=true`) it writes the files the update helper swaps under `{app}\install\`.
+- Linux tarball, deb and rpm (`/opt/brewery`, nFPM from `script/brewery/install-nfpm`):
+
+      script/brewery/bundle-linux --app target/release-fast/brewery --cli target/release-fast/cli --bundle target/bundle/linux-x64 --deb --rpm
+
+  `script/brewery/check-linux-tree` asserts the tree; `packaging/nfpm.yaml` and
+  `packaging/linux/*.sh` define the packages.
+- macOS zip (unsigned, unsupported): `script/brewery/bundle-mac --app ... --cli ... --bundle target/bundle/macos-aarch64`.
+- AUR and winget manifests: `script/brewery/render_manifests.py --version <v> --out <dir> --tarball <tar.gz> --installer <setup.exe>` fills `packaging/aur/PKGBUILD.in` and `packaging/winget/*.yaml.in` with versions, URLs and checksums.
+
+CI builds and installs every package on manual runs (`all_platforms`) and tags: silent
+install, update mode and uninstall on Windows; deb in `ubuntu:24.04`, rpm in
+`fedora:41`; `makepkg -si` in `archlinux:base-devel`; `winget validate`; macOS zip
+contents (allowed to fail). Publishing to winget, the AUR and GitHub Releases is done
+by hand.
+
 ## Updates
 
 Brewery checks `https://github.com/hteariH/brewery/releases/latest/download/latest.json`
