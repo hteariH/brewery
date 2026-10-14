@@ -456,14 +456,26 @@ jobs:
       # A separate invocation, as Zed's bundle scripts do, so the app's features don't unify into the CLI.
       - name: Build the CLI
         run: cargo build --locked --profile release-fast -p cli
-      # The artifact holds the app as `brewery` and the CLI as `cli` (upload-artifact drops
-      # the executable bits; packaging scripts copy and chmod them).
+      # Zed's licences of the Rust dependencies, for the packages. Here the crates are already
+      # fetched; the cargo-about version is the one script/generate-licenses pins (prebuilt,
+      # checksum-checked by install-action).
+      - uses: taiki-e/install-action@v2.87.27
+        if: runner.os == 'Linux'
+        with:
+          tool: cargo-about@0.8.2
+      - name: Generate the Rust dependency licences
+        if: runner.os == 'Linux'
+        run: script/generate-licenses target/release-fast/licenses.md
+      # The artifact holds the app as `brewery`, the CLI as `cli` and (Linux) licenses.md
+      # (upload-artifact drops the executable bits; packaging scripts copy and chmod them).
       - uses: actions/upload-artifact@v4
         with:
           name: brewery-${{ matrix.os }}
           path: |
             target/release-fast/brewery
             target/release-fast/cli
+            target/release-fast/licenses.md
+          if-no-files-found: error
           retention-days: 14
 
   # The Linux tarball, deb and rpm from the Linux build and bundle (script/brewery/bundle-linux),
@@ -484,20 +496,20 @@ jobs:
         with:
           name: bundle-linux-x64
           path: target
-      - name: Install packaging tools
+      # bundle-linux copies the app's libraries from this host into lib/, so it needs the
+      # ones the app links (ldd); it fails when one is missing.
+      - name: Install packaging tools and the app's libraries
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq patchelf gettext-base
+          sudo apt-get install -y -qq patchelf gettext-base libxcb1 libxkbcommon0 libxkbcommon-x11-0 \
+            libx11-xcb1 libasound2t64 libglib2.0-0t64 libstdc++6
           script/brewery/install-nfpm "$RUNNER_TEMP/nfpm"
-      # Zed's licences of the Rust dependencies (cargo-about), as Zed's own bundle script does.
-      - name: Generate the Rust dependency licences
-        run: script/generate-licenses "$RUNNER_TEMP/licenses.md"
       - name: Package
         run: |
           mkdir -p target/bundle
           tar -xzf target/bundle-linux-x64.tar.gz -C target/bundle
           script/brewery/bundle-linux --app target/linux-build/brewery --cli target/linux-build/cli \
-            --bundle target/bundle/linux-x64 --licenses-md "$RUNNER_TEMP/licenses.md" \
+            --bundle target/bundle/linux-x64 --licenses-md target/linux-build/licenses.md \
             --out target/package --deb --rpm --nfpm "$RUNNER_TEMP/nfpm/nfpm"
       - name: Contents
         run: |

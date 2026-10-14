@@ -113,6 +113,11 @@ find_libs() {
         grep -v '\<\(libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' |
         grep -v '\<\(libglib-2.0.so\|libgobject-2.0.so\|libgio-2.0.so\|libgmodule-2.0.so\|libpcre.so\|libpcre2-8.so\|libmount.so\|libblkid.so\|libselinux.so\|libffi.so\|libresolv.so\|libz.so\)' || true
 }
+# find_libs only sees libraries this host has, so a missing one would silently not be
+# bundled: the packaging host needs the app's runtime libraries (CI installs them).
+missing=$(ldd "$app" | grep 'not found' || true)
+[[ -z "$missing" ]] || die "install the app's libraries on this host first; ldd reports:
+$missing"
 libs=$(find_libs "$app")
 if [[ -n "$libs" ]]; then
     # shellcheck disable=SC2086 # one path per line, no spaces in library paths

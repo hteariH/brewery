@@ -48,6 +48,12 @@ contents:
     packager: deb
     file_info:
       mode: 0644
+  # Owned, so removing the package removes it.
+  - dst: /usr/share/licenses/brewery
+    type: dir
+    packager: rpm
+    file_info:
+      mode: 0755
   - src: ${BREWERY_TREE}/licenses/brewery/LICENSE-GPL
     dst: /usr/share/licenses/brewery/LICENSE-GPL
     type: license

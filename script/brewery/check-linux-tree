@@ -88,8 +88,10 @@ if [[ -f "$root/libexec/brewery-editor" ]] && command -v ldd >/dev/null 2>&1; th
     if [[ -n "$missing" ]]; then fail "unresolved libraries: $missing"; else ok "ldd libexec/brewery-editor"; fi
 fi
 
-# The CLI finds the app through ../libexec/brewery-editor, and prints its path.
+# The CLI finds the app through ../libexec/brewery-editor, and prints its path. It refuses
+# to run as root unless told otherwise; containers run these checks as root.
 expected_app="$root/libexec/brewery-editor"
+if [[ "$(id -u)" == 0 ]]; then export ZED_ALLOW_ROOT=true; fi
 check_version() {
     local cli=$1 out
     if ! out=$("$cli" --version 2>&1); then
@@ -123,7 +125,9 @@ if "$installed"; then
         fail "brewery is not on PATH"
     fi
     if [[ -n "$desktop" ]]; then
-        if cmp -s "$desktop" "/usr/share/applications/${desktop##*/}"; then
+        # No cmp: minimal images (fedora) lack diffutils.
+        system_desktop="/usr/share/applications/${desktop##*/}"
+        if [[ -f "$system_desktop" && "$(<"$system_desktop")" == "$(<"$desktop")" ]]; then
             ok "/usr/share/applications/${desktop##*/}"
         else
             fail "/usr/share/applications/${desktop##*/} missing or differs"
