@@ -612,8 +612,16 @@ jobs:
         run: |
           $cmd = Get-Command winget -ErrorAction SilentlyContinue
           if (-not $cmd) { throw "winget is not available on this runner" }
-          winget --version
-          winget validate --manifest target/manifests/winget
+          winget --version | Out-Host
+          winget validate --manifest target/manifests/winget | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "winget validate failed ($LASTEXITCODE)" }
+          # Control: the validator must reject a broken manifest, or the check above proves nothing.
+          Copy-Item target/manifests/winget target/manifests/broken -Recurse
+          (Get-Content target/manifests/broken/hteariH.Brewery.installer.yaml) -replace 'Scope: user', 'Scope: nobody' |
+            Set-Content target/manifests/broken/hteariH.Brewery.installer.yaml
+          winget validate --manifest target/manifests/broken | Out-Host
+          if ($LASTEXITCODE -eq 0) { throw "winget validate accepted a manifest with an invalid Scope" }
+          $global:LASTEXITCODE = 0
       - uses: actions/upload-artifact@v4
         with:
           name: package-winget-manifests
