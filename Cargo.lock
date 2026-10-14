@@ -2422,6 +2422,7 @@ dependencies = [
  "log",
  "serde_json",
  "settings",
+ "toml 0.9.8",
  "windows 0.62.2",
 ]
 

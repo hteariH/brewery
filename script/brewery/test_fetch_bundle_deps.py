@@ -14,6 +14,7 @@ import tempfile
 import threading
 import subprocess
 import unittest
+from unittest import mock
 import zipfile
 from unittest import mock
 from functools import partial
@@ -165,6 +166,7 @@ root = "jdk-21+1"
 version = "1.0"
 license = "EPL-2.0"
 source = "https://example.invalid/jdtls"
+source_tag = "https://example.invalid/jdtls/tree/v1.0"
 license_file = "licenses/jdtls.txt"
 dest = "jdtls"
 
@@ -177,7 +179,7 @@ version = "1.0"
 license = "MIT"
 source = "https://example.invalid/lombok"
 license_member = "LICENSE"
-dest = "lombok.jar"
+dest = "jdtls/tools/lombok.jar"
 
 [artifacts.lombok.any]
 url = "{u}/lombok-1.0.jar"
@@ -188,7 +190,7 @@ version = "0.1"
 license = "EPL-1.0"
 source = "https://example.invalid/java-debug"
 license_file = "licenses/java-debug.txt"
-dest = "java-debug.jar"
+dest = "jdtls/tools/java-debug.jar"
 
 [artifacts.java-debug.any]
 url = "{u}/java-debug-0.1.jar"
@@ -199,7 +201,7 @@ version = "v1"
 license = "Apache-2.0"
 source = "https://example.invalid/proxy"
 license_file = "licenses/apache.txt"
-dest = "java-lsp-proxy{{exe}}"
+dest = "jdtls/tools/java-lsp-proxy{{exe}}"
 member = "java-lsp-proxy{{exe}}"
 executable = true
 
@@ -266,10 +268,15 @@ class LoadDepsTest(unittest.TestCase):
         lin = {a.name: a for a in fbd.select(deps, "linux-x64")}
         self.assertEqual(win["jdk"].into, "work")
         self.assertEqual(win["jdtls"].dest, "jdtls")
-        self.assertEqual(win["lombok"].dest, "lombok.jar")
-        self.assertEqual(win["java-debug"].dest, "java-debug.jar")
-        self.assertEqual(win["java-lsp-proxy"].dest, "java-lsp-proxy.exe")
-        self.assertEqual(lin["java-lsp-proxy"].dest, "java-lsp-proxy")
+        # Inside jdtls/, which the Windows update helper swaps (BUNDLED_DIRS).
+        self.assertEqual(win["lombok"].dest, "jdtls/tools/lombok.jar")
+        self.assertEqual(win["java-debug"].dest, "jdtls/tools/java-debug.jar")
+        self.assertEqual(win["java-lsp-proxy"].dest, "jdtls/tools/java-lsp-proxy.exe")
+        self.assertEqual(lin["java-lsp-proxy"].dest, "jdtls/tools/java-lsp-proxy")
+        for art in win.values():
+            if art.into == "bundle":
+                top = art.dest.split("/")[0]
+                self.assertIn(top, {"jre", "brewery-daemon", "jdtls", "extensions"}, art.name)
         self.assertEqual(win["java-extension"].dest, "extensions/java")
         self.assertEqual(win["java-extension"].format, "tar.gz")
         self.assertEqual(win["jdk"].format, "zip")
@@ -344,11 +351,11 @@ class SelectTest(BundleFixture):
         lin = {a.name: a for a in fbd.select(deps, "linux-x64")}
         self.assertTrue(win["java-lsp-proxy"].url.endswith("/proxy-windows.zip"))
         self.assertEqual(win["java-lsp-proxy"].format, "zip")
-        self.assertEqual(win["java-lsp-proxy"].dest, "java-lsp-proxy.exe")
+        self.assertEqual(win["java-lsp-proxy"].dest, "jdtls/tools/java-lsp-proxy.exe")
         self.assertEqual(win["java-lsp-proxy"].member, "java-lsp-proxy.exe")
         self.assertTrue(lin["java-lsp-proxy"].url.endswith("/proxy-linux.tar.gz"))
         self.assertEqual(lin["java-lsp-proxy"].format, "tar.gz")
-        self.assertEqual(lin["java-lsp-proxy"].dest, "java-lsp-proxy")
+        self.assertEqual(lin["java-lsp-proxy"].dest, "jdtls/tools/java-lsp-proxy")
         self.assertEqual(win["lombok"].url, lin["lombok"].url)
         self.assertEqual(win["lombok"].format, "file")
         self.assertEqual(win["java-extension"].format, "tar.gz")
@@ -387,9 +394,9 @@ class BuildTest(BundleFixture):
             b"launcher",
         )
         self.assertTrue((b / "jdtls/config_win/config.ini").is_file())
-        self.assertEqual((b / "lombok.jar").read_bytes(), self.artifacts["lombok-1.0.jar"])
-        self.assertEqual((b / "java-debug.jar").read_bytes(), b"debug-bytes")
-        self.assertEqual((b / "java-lsp-proxy.exe").read_bytes(), b"win-proxy")
+        self.assertEqual((b / "jdtls/tools/lombok.jar").read_bytes(), self.artifacts["lombok-1.0.jar"])
+        self.assertEqual((b / "jdtls/tools/java-debug.jar").read_bytes(), b"debug-bytes")
+        self.assertEqual((b / "jdtls/tools/java-lsp-proxy.exe").read_bytes(), b"win-proxy")
         self.assertTrue((b / "extensions/java/extension.toml").is_file())
         self.assertTrue((b / "extensions/java/grammars/java.wasm").is_file())
         self.assertEqual((b / "brewery-daemon/brewery-daemon.jar").read_bytes(), b"daemon")
@@ -412,10 +419,18 @@ class BuildTest(BundleFixture):
 
     def test_linux_layout_uses_tar_and_no_exe(self):
         bundle = self.build("linux-x64")
-        self.assertEqual((bundle / "java-lsp-proxy").read_bytes(), b"linux-proxy")
-        self.assertFalse((bundle / "java-lsp-proxy.exe").exists())
+        proxy = bundle / "jdtls" / "tools" / "java-lsp-proxy"
+        self.assertEqual(proxy.read_bytes(), b"linux-proxy")
+        self.assertFalse(proxy.with_suffix(".exe").exists())
         if os.name != "nt":
-            self.assertTrue(os.access(bundle / "java-lsp-proxy", os.X_OK))
+            self.assertTrue(os.access(proxy, os.X_OK))
+
+    def test_nested_dest_installs_after_its_parent_whatever_the_pin_order(self):
+        real_select = fbd.select
+        with mock.patch.object(fbd, "select", lambda deps, t: list(reversed(real_select(deps, t)))):
+            bundle = self.build()
+        self.assertTrue((bundle / "jdtls/plugins/org.eclipse.equinox.launcher_1.0.jar").is_file())
+        self.assertTrue((bundle / "jdtls/tools/lombok.jar").is_file())
 
     def test_checksum_mismatch_fails_with_no_partial_output(self):
         self.write_deps({"java-debug-0.1.jar": "1" * 64})
@@ -428,7 +443,7 @@ class BuildTest(BundleFixture):
 
     def test_checksum_mismatch_keeps_previous_bundle(self):
         self.build()
-        marker = self.out / "windows-x64" / "lombok.jar"
+        marker = self.out / "windows-x64" / "jdtls" / "tools" / "lombok.jar"
         self.assertTrue(marker.is_file())
         self.write_deps({"lombok-1.0.jar": "2" * 64})
         fbd.rmtree(self.cache)
@@ -452,7 +467,7 @@ class BuildTest(BundleFixture):
         fbd.rmtree(self.out)
         self.build()
         self.assertEqual(self.server.total_hits(), first)
-        self.assertTrue((self.out / "windows-x64" / "lombok.jar").is_file())
+        self.assertTrue((self.out / "windows-x64" / "jdtls" / "tools" / "lombok.jar").is_file())
 
     def test_corrupt_cache_entry_is_downloaded_again(self):
         self.build()
@@ -468,7 +483,7 @@ class BuildTest(BundleFixture):
         (bundle / "stale.txt").write_text("old")
         bundle = self.build()
         self.assertFalse((bundle / "stale.txt").exists())
-        self.assertTrue((bundle / "lombok.jar").is_file())
+        self.assertTrue((bundle / "jdtls" / "tools" / "lombok.jar").is_file())
         self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["windows-x64"])
 
     def test_archive_path_traversal_is_rejected(self):
@@ -481,6 +496,40 @@ class BuildTest(BundleFixture):
         self.assertFalse((self.tmp / "escape.txt").exists())
         self.assertFalse((self.out / "escape.txt").exists())
         self.assertFalse(self.out.exists() and any(self.out.iterdir()))
+
+    def test_zip_path_traversal_is_rejected(self):
+        evil = make_zip({"../escape.exe": b"x"})
+        self.artifacts["proxy-windows.zip"] = evil
+        (self.served / "proxy-windows.zip").write_bytes(evil)
+        self.write_deps()
+        with self.assertRaisesRegex(fbd.FetchError, "unsafe"):
+            self.build()
+        self.assertFalse((self.out / "escape.exe").exists())
+
+    def test_symlink_chain_escape_is_rejected(self):
+        # Each link passes the lexical check; together they point outside the bundle.
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            sub = tarfile.TarInfo("sub")
+            sub.type = tarfile.DIRTYPE
+            tar.addfile(sub)
+            for name, target in (("d", "sub/.."), ("d/e", "..")):
+                info = tarfile.TarInfo(name)
+                info.type = tarfile.SYMTYPE
+                info.linkname = target
+                tar.addfile(info)
+        evil = buf.getvalue()
+        self.artifacts["jdtls.tar.gz"] = evil
+        (self.served / "jdtls.tar.gz").write_bytes(evil)
+        self.write_deps()
+        with self.assertRaises(fbd.FetchError):
+            self.build()
+        self.assertFalse(self.out.exists() and any(self.out.iterdir()))
+
+    def test_tar_without_data_filter_is_refused(self):
+        with mock.patch.object(fbd.tarfile, "data_filter", None, create=True):
+            with self.assertRaisesRegex(fbd.FetchError, "data filter"):
+                self.build()
 
     def test_missing_member_is_an_error(self):
         self.artifacts["proxy-windows.zip"] = make_zip({"other.exe": b"x"})
@@ -511,7 +560,7 @@ class FakeJlink:
 
     def __init__(self, modules=None, jlink_rc=0, make_release=True):
         self.calls = []
-        self.modules = fbd.JRE_MODULES if modules is None else modules
+        self.modules = fbd.jre_modules("windows") if modules is None else modules
         self.jlink_rc = jlink_rc
         self.make_release = make_release
 
@@ -560,9 +609,11 @@ class JreStepTest(BundleFixture):
             "java.se", "jdk.unsupported", "jdk.crypto.ec", "jdk.zipfs", "jdk.net",
             "jdk.management", "jdk.jdi", "jdk.attach", "jdk.jdwp.agent", "java.instrument",
             "jdk.localedata", "jdk.charsets", "jdk.jfr", "jdk.httpserver", "jdk.compiler",
-            "jdk.security.auth",
+            "jdk.security.auth", "jdk.crypto.cryptoki", "jdk.naming.dns", "jdk.security.jgss",
         ):
             self.assertIn(m, modules)
+        # The Windows certificate stores (corporate TLS) exist only in the Windows JDK.
+        self.assertIn("jdk.crypto.mscapi", modules)
         for flag in ("--strip-debug", "--no-man-pages", "--no-header-files", "--compress=zip-6"):
             self.assertIn(flag, jlink)
         self.assertEqual(Path(jlink[jlink.index("--output") + 1]).name, "jre")
@@ -572,6 +623,14 @@ class JreStepTest(BundleFixture):
         # The image is checked by running it.
         self.assertTrue(any("-version" in c for c in fake.calls[1:]))
         self.assertTrue(any("--list-modules" in c for c in fake.calls[1:]))
+
+    def test_linux_image_has_no_windows_only_modules(self):
+        fake = FakeJlink()
+        self.run_step(fake, target="linux-x64")
+        jlink = fake.calls[0]
+        modules = jlink[jlink.index("--add-modules") + 1].split(",")
+        self.assertNotIn("jdk.crypto.mscapi", modules)
+        self.assertIn("jdk.security.jgss", modules)
 
     def test_refuses_to_cross_link(self):
         with self.assertRaisesRegex(fbd.FetchError, "target OS"):
@@ -588,7 +647,7 @@ class JreStepTest(BundleFixture):
             self.run_step(FakeJlink(make_release=False))
 
     def test_image_missing_a_module_is_rejected(self):
-        fake = FakeJlink(modules=[m for m in fbd.JRE_MODULES if m != "jdk.jdi"])
+        fake = FakeJlink(modules=[m for m in fbd.jre_modules("windows") if m != "jdk.jdi"])
         with self.assertRaisesRegex(fbd.FetchError, "jdk.jdi"):
             self.run_step(fake)
 
@@ -695,6 +754,10 @@ class LicenseStepTest(BundleFixture):
         self.assertIn("https://example.invalid/adoptium/jdk-sources.tar.gz", source)
         self.assertIn("https://example.invalid/adoptium/tree/jdk-21+1", source)
         self.assertEqual((lic / "jdtls" / "LICENSE").read_text(encoding="utf-8"), "EPL-2.0 text\n")
+        jdtls_source = (lic / "jdtls" / "SOURCE.txt").read_text(encoding="utf-8")
+        self.assertIn("https://example.invalid/jdtls/tree/v1.0", jdtls_source)
+        self.assertNotIn("Java runtime", jdtls_source)
+        self.assertIn("Java runtime", source)
         self.assertEqual((lic / "java-debug" / "LICENSE").read_text(encoding="utf-8"), "EPL-1.0 text\n")
         self.assertEqual((lic / "lombok" / "LICENSE").read_bytes(), b"lombok MIT text")
         self.assertEqual(
@@ -719,6 +782,7 @@ class LicenseStepTest(BundleFixture):
             self.assertRegex(index, rf"(?m)^{re.escape(name)} {re.escape(version)}$")
             self.assertIn(license, index)
         self.assertIn("brewery-daemon", index)
+        self.assertIn("Source code: https://example.invalid/jdtls/tree/v1.0", index)
 
     def test_without_daemon_jar_there_are_no_daemon_notices(self):
         bundle = self.build(steps=[self.fake_jre, fbd.collect_licenses])
@@ -750,6 +814,10 @@ class LicenseStepTest(BundleFixture):
                     path = REAL_DEPS.parent / art.license_file
                     self.assertTrue(path.is_file(), path)
                     self.assertNotIn(b"\r", path.read_bytes())
+        # EPL section 3: say where the source is, not only the binaries.
+        for art in fbd.select(deps, "linux-x64"):
+            if art.license.startswith("EPL"):
+                self.assertTrue(art.source_tag.startswith("https://github.com/"), art.name)
         jdk = fbd.select(deps, "linux-x64")[0]
         self.assertEqual(jdk.name, "jdk")
         self.assertTrue(jdk.source_code.startswith("https://"))
@@ -772,11 +840,12 @@ class CliTest(BundleFixture):
                 "--arch", "x64",
                 "--out", str(self.out),
                 "--cache", str(self.cache),
+                "--no-daemon",
                 "--quiet",
             ]
         )
         self.assertEqual(code, 0)
-        self.assertTrue((self.out / "linux-x64" / "java-lsp-proxy").is_file())
+        self.assertTrue((self.out / "linux-x64" / "jdtls" / "tools" / "java-lsp-proxy").is_file())
 
     def test_main_reports_mismatch_with_exit_code(self):
         self.write_deps({"lombok-1.0.jar": "3" * 64})
@@ -789,12 +858,23 @@ class CliTest(BundleFixture):
                     "--arch", "x64",
                     "--out", str(self.out),
                     "--cache", str(self.cache),
+                    "--no-daemon",
                     "--quiet",
                 ]
             )
         self.assertNotEqual(code, 0)
         self.assertIn("SHA-256 mismatch", err.getvalue())
         self.assertFalse((self.out / "windows-x64").exists())
+
+    def test_main_requires_the_daemon_jar_unless_told_otherwise(self):
+        # A release bundle without brewery-daemon/ makes every update roll back (M6b).
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as exit:
+            fbd.main(["--deps", str(self.deps_path), "--os", "linux", "--arch", "x64",
+                      "--out", str(self.out), "--cache", str(self.cache), "--quiet"])
+        self.assertNotEqual(exit.exception.code, 0)
+        self.assertIn("--daemon-jar", err.getvalue())
+        self.assertFalse((self.out / "linux-x64").exists())
 
 
 if __name__ == "__main__":

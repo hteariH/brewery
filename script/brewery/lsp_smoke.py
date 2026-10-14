@@ -6,8 +6,8 @@ launcher (optionally behind java-lsp-proxy, exactly as the Java extension
 starts it) against a fixture project. Python 3.11+ standard library only.
 
     python script/brewery/lsp_smoke.py --project <dir> --launcher <bundle>/jdtls/brewery-jdtls[.cmd]
-        [--proxy <bundle>/java-lsp-proxy[.exe]] [--lombok <bundle>/lombok.jar]
-        [--java-debug <bundle>/java-debug.jar] [--wait-ready] [--open src/Main.java]
+        [--proxy <bundle>/jdtls/tools/java-lsp-proxy[.exe]] [--lombok <bundle>/jdtls/tools/lombok.jar]
+        [--java-debug <bundle>/jdtls/tools/java-debug.jar] [--wait-ready] [--open src/Main.java]
         [--unchanged <bundle>] [--cache <dir>] [--copy] [--timeout 300]
     python script/brewery/lsp_smoke.py --project <dir> -- <server command...>
 

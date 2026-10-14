@@ -6,7 +6,7 @@
 1. daemon_smoke: <bundle>/jre/bin/java -jar <bundle>/brewery-daemon/brewery-daemon.jar
    reads the maven-multi fixture (maven, 3 modules).
 2. lsp_smoke: jdtls started the way the Java extension starts it
-   (java-lsp-proxy -> jdtls/brewery-jdtls[.cmd] --jvm-arg=-javaagent:lombok.jar)
+   (java-lsp-proxy -> jdtls/brewery-jdtls[.cmd] --jvm-arg=-javaagent:jdtls/tools/lombok.jar)
    on a copy of that fixture plus one Java file: initialize, ServiceReady,
    java-debug's startDebugSession, documentSymbol; the bundle must stay unchanged.
 
@@ -85,10 +85,10 @@ def main(argv: list | None = None) -> int:
         launcher = bundle / "jdtls" / ("brewery-jdtls.cmd" if windows else "brewery-jdtls")
         return lsp_smoke.main(
             ["--project", str(project),
-             "--proxy", str(bundle / f"java-lsp-proxy{exe}"),
+             "--proxy", str(bundle / "jdtls" / "tools" / f"java-lsp-proxy{exe}"),
              "--launcher", str(launcher),
-             "--lombok", str(bundle / "lombok.jar"),
-             "--java-debug", str(bundle / "java-debug.jar"),
+             "--lombok", str(bundle / "jdtls" / "tools" / "lombok.jar"),
+             "--java-debug", str(bundle / "jdtls" / "tools" / "java-debug.jar"),
              "--open", JAVA_FILE,
              "--unchanged", str(bundle),
              "--cache", str(scratch / "jdtls-cache"),

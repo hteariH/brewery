@@ -1,7 +1,8 @@
 //! Startup wiring for the bundled Java tools: seeds the bundled Java extension into Zed's
-//! installed-extensions dir and layers `lsp.jdtls.settings` defaults that point the
-//! extension at the bundled jdtls launcher, Lombok, java-debug and java-lsp-proxy.
-//! Without a bundle (dev builds) nothing changes.
+//! installed-extensions dir and layers defaults that point the extension at the bundled
+//! jdtls launcher, Lombok, java-debug and java-lsp-proxy (`lsp.jdtls.settings`) and keep
+//! the extension at the bundled version (`auto_update_extensions`). Without a bundle (dev
+//! builds) nothing changes.
 
 use std::path::{Path, PathBuf};
 
@@ -12,17 +13,36 @@ use settings::{SettingsStore, merge_from::MergeFrom as _};
 /// The language server whose settings the overlay fills.
 pub const JDTLS_SERVER: &str = "jdtls";
 
+/// The extension the jdtls overlay is built for.
+pub const JAVA_EXTENSION: &str = "java";
+
 /// Extensions that ship in `<root>/extensions/` and are seeded on first start.
-pub const SEEDED_EXTENSIONS: &[&str] = &["java"];
+pub const SEEDED_EXTENSIONS: &[&str] = &[JAVA_EXTENSION];
+
+/// Where the bundle keeps the extension's helpers: inside `jdtls/`, one of the directories
+/// the Windows update helper swaps, so they are updated together with jdtls.
+fn tools_dir(root: &Path) -> PathBuf {
+    root.join("jdtls").join("tools")
+}
 
 /// `lsp.jdtls.settings` defaults for the bundle at `root`; empty without a bundle. Each key
 /// is set only when its piece is present, so a partial bundle gives a partial overlay.
 pub fn java_settings_overlay_for_root(root: Option<&Path>) -> Map<String, Value> {
+    overlay_with(root, &cmd_safe_path)
+}
+
+/// `cmd_safe` gives the form of a path that may cross `cmd /C`, or `None` when there is
+/// none (a spaced path on a volume without 8.3 names).
+fn overlay_with(
+    root: Option<&Path>,
+    cmd_safe: &dyn Fn(&Path) -> Option<PathBuf>,
+) -> Map<String, Value> {
     let mut overlay = Map::new();
     let Some(root) = root else {
         return overlay;
     };
     let file = |path: PathBuf| path.is_file().then_some(path);
+    let tools = tools_dir(root);
     let jre = root.join("jre");
     let jre = jre.join("release").is_file().then_some(jre);
     let launcher = file(root.join("jdtls").join(if cfg!(windows) {
@@ -30,11 +50,12 @@ pub fn java_settings_overlay_for_root(root: Option<&Path>) -> Map<String, Value>
     } else {
         "brewery-jdtls"
     }));
-    let proxy = file(root.join(if cfg!(windows) {
+    let proxy = file(tools.join(if cfg!(windows) {
         "java-lsp-proxy.exe"
     } else {
         "java-lsp-proxy"
     }));
+    let lombok = file(tools.join("lombok.jar"));
 
     let mut set_path = |key: &str, path: Option<PathBuf>| {
         let Some(path) = path else { return false };
@@ -50,16 +71,29 @@ pub fn java_settings_overlay_for_root(root: Option<&Path>) -> Map<String, Value>
         }
     };
     let mut any = false;
-    // Both go through `cmd /C` on Windows (the launcher, and Lombok as its `--jvm-arg`).
-    any |= set_path("jdtls_launcher", launcher.as_deref().map(cmd_safe_path));
-    any |= set_path("lombok_jar", file(root.join("lombok.jar")).as_deref().map(cmd_safe_path));
-    any |= set_path("java_debug_jar", file(root.join("java-debug.jar")));
+    // Both go through `cmd /C` on Windows: the launcher, and Lombok as its `--jvm-arg`.
+    let mut lombok_off = false;
+    if let Some(launcher) = &launcher {
+        let safe = cmd_safe(launcher);
+        // A spaced launcher path still works as long as no later argument is quoted, so
+        // without a short name jdtls starts without the (quoted) Lombok agent.
+        lombok_off = safe.is_none() && lombok.is_some();
+        any |= set_path("jdtls_launcher", Some(safe.unwrap_or_else(|| launcher.clone())));
+    }
+    if !lombok_off && let Some(lombok) = &lombok {
+        any |= set_path("lombok_jar", Some(cmd_safe(lombok).unwrap_or_else(|| lombok.clone())));
+    }
+    any |= set_path("java_debug_jar", file(tools.join("java-debug.jar")));
     any |= set_path("lsp_proxy_path", proxy);
     // The launcher prefers the bundled JRE by itself. `java_home` would also reach jdtls as
     // JAVA_HOME, making the stripped JRE the default project runtime, so it is set only
     // when the extension has to run its managed jdtls on the bundled JRE.
     let java_home = if launcher.is_none() { jre.clone() } else { None };
     any |= set_path("java_home", java_home);
+    if lombok_off {
+        log::warn!("brewery: Lombok is off: the install path has spaces and no 8.3 short name");
+        overlay.insert("lombok_support".to_string(), Value::Bool(false));
+    }
     if jre.is_some() {
         overlay.insert("jdk_auto_download".to_string(), Value::Bool(false));
         any = true;
@@ -70,31 +104,108 @@ pub fn java_settings_overlay_for_root(root: Option<&Path>) -> Map<String, Value>
     overlay
 }
 
-/// [`java_settings_overlay_for_root`] for the running executable's bundle.
-pub fn java_settings_overlay() -> Map<String, Value> {
-    java_settings_overlay_for_root(crate::bundle_root().as_deref())
+/// Defaults a bundle contributes on top of `assets/settings/default.json`.
+#[derive(Debug, Default, PartialEq)]
+pub struct BundleDefaults {
+    /// Merged into the default `lsp.jdtls.settings`.
+    pub jdtls: Map<String, Value>,
+    /// Bundled extensions that default to `auto_update_extensions: false`, so the
+    /// extension stays at the version the bundled helpers were pinned and tested with.
+    pub pinned_extensions: Vec<String>,
 }
 
-/// Merges `overlay` into the default `lsp.jdtls.settings`. User, project and extension
-/// settings are higher layers, so they still win key by key.
-pub fn apply_jdtls_defaults(overlay: Map<String, Value>, cx: &mut App) {
-    if overlay.is_empty() {
+/// The `version` in an extension's `extension.toml`.
+pub fn extension_version(extension_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(extension_dir.join("extension.toml")).ok()?;
+    let table: toml::Table = toml::from_str(&text).ok()?;
+    table.get("version")?.as_str().map(str::to_string)
+}
+
+/// [`BundleDefaults`] for the bundle at `root`, given Zed's `installed/` extensions dir.
+/// The jdtls overlay is only used while the installed Java extension is the bundled
+/// version: the proxy and the setting names belong to that release.
+pub fn bundle_defaults_for(root: Option<&Path>, installed_dir: &Path) -> BundleDefaults {
+    let Some(root) = root else {
+        return BundleDefaults::default();
+    };
+    let bundled_dir = |id: &str| {
+        let dir = root.join("extensions").join(id);
+        dir.is_dir().then_some(dir)
+    };
+    let pinned_extensions = SEEDED_EXTENSIONS
+        .iter()
+        .filter(|id| bundled_dir(id).is_some())
+        .map(|id| id.to_string())
+        .collect();
+    let bundled = bundled_dir(JAVA_EXTENSION).and_then(|dir| extension_version(&dir));
+    let installed = extension_version(&installed_dir.join(JAVA_EXTENSION));
+    let jdtls = match (&bundled, &installed) {
+        (Some(bundled), Some(installed)) if bundled == installed => {
+            java_settings_overlay_for_root(Some(root))
+        }
+        (Some(bundled), installed) => {
+            log::warn!(
+                "brewery: the installed Java extension ({}) is not the bundled {bundled}; \
+                 not pointing it at the bundled Java tools",
+                installed.as_deref().unwrap_or("none")
+            );
+            Map::new()
+        }
+        (None, _) => Map::new(),
+    };
+    BundleDefaults {
+        jdtls,
+        pinned_extensions,
+    }
+}
+
+/// Layers `defaults` onto the default settings. User, project and extension settings are
+/// higher layers, so they still win key by key.
+pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
+    let BundleDefaults {
+        jdtls,
+        pinned_extensions,
+    } = defaults;
+    if jdtls.is_empty() && pinned_extensions.is_empty() {
         return;
     }
-    log::info!(
-        "brewery: bundled Java tools: {}",
-        overlay.keys().cloned().collect::<Vec<_>>().join(", ")
-    );
-    let overlay = Value::Object(overlay);
+    if !jdtls.is_empty() {
+        log::info!(
+            "brewery: bundled Java tools: {}",
+            jdtls.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let jdtls = Value::Object(jdtls);
     cx.update_global::<SettingsStore, _>(|store, cx| {
         store.update_default_settings(cx, |defaults| {
-            let jdtls = defaults.project.lsp.0.entry(JDTLS_SERVER.into()).or_default();
-            match &mut jdtls.settings {
-                Some(settings) => settings.merge_from(&overlay),
-                None => jdtls.settings = Some(overlay),
+            for id in &pinned_extensions {
+                defaults
+                    .extension
+                    .auto_update_extensions
+                    .entry(id.as_str().into())
+                    .or_insert(false);
+            }
+            if jdtls.as_object().is_some_and(|map| !map.is_empty()) {
+                let server = defaults.project.lsp.0.entry(JDTLS_SERVER.into()).or_default();
+                match &mut server.settings {
+                    Some(settings) => settings.merge_from(&jdtls),
+                    None => server.settings = Some(jdtls.clone()),
+                }
             }
         });
     });
+}
+
+/// The startup hook: seeds the bundled extensions into `extensions_dir/installed`, then
+/// layers the bundle's defaults. Must run after `settings::init` and before
+/// `extension_host` loads its index.
+pub fn setup_bundled_java(extensions_dir: &Path, cx: &mut App) {
+    seed_bundled_extensions(extensions_dir);
+    let defaults = bundle_defaults_for(
+        crate::bundle_root().as_deref(),
+        &extensions_dir.join("installed"),
+    );
+    apply_bundle_defaults(defaults, cx);
 }
 
 /// Copies `<bundled>` to `<installed_dir>/<id>` unless that already exists. Returns
@@ -106,8 +217,14 @@ pub fn seed_extension(bundled: &Path, installed_dir: &Path, id: &str) -> std::io
         return Ok(false);
     }
     std::fs::create_dir_all(installed_dir)?;
-    let staging = installed_dir.join(format!(".{id}.brewery-seed-{}", std::process::id()));
-    std::fs::remove_dir_all(&staging).ok();
+    // Staging dirs a crashed seed left behind (Brewery runs as a single instance).
+    let prefix = format!(".{id}.brewery-seed-");
+    for entry in std::fs::read_dir(installed_dir)?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            std::fs::remove_dir_all(entry.path()).ok();
+        }
+    }
+    let staging = installed_dir.join(format!("{prefix}{}", std::process::id()));
     let result = copy_dir(bundled, &staging).and_then(|()| std::fs::rename(&staging, &target));
     if let Err(error) = result {
         std::fs::remove_dir_all(&staging).ok();
@@ -153,19 +270,21 @@ pub fn seed_bundled_extensions(extensions_dir: &Path) {
 
 /// A path that survives java-lsp-proxy's `cmd /C "<launcher>" args` on Windows: cmd strips
 /// the outer quotes when the launcher path has spaces and a later argument is quoted, so
-/// such paths are given as their 8.3 short form. Unchanged elsewhere, for paths without
-/// spaces, and (with a warning) when the volume has no short names.
-pub fn cmd_safe_path(path: &Path) -> PathBuf {
+/// such paths are given as their 8.3 short form. Paths without spaces (and every path on
+/// other systems) come back unchanged; `None` when a spaced path has no short name
+/// (8.3 names disabled on the volume).
+pub fn cmd_safe_path(path: &Path) -> Option<PathBuf> {
     #[cfg(windows)]
     if path.as_os_str().to_string_lossy().contains(' ') {
-        match short_path(path) {
-            Some(short) if !short.as_os_str().to_string_lossy().contains(' ') => return short,
-            _ => log::warn!(
-                "brewery: no 8.3 short name for {path:?}; java-lsp-proxy may fail to start jdtls"
-            ),
-        }
+        return match short_path(path) {
+            Some(short) if !short.as_os_str().to_string_lossy().contains(' ') => Some(short),
+            _ => {
+                log::warn!("brewery: no 8.3 short name for {path:?}");
+                None
+            }
+        };
     }
-    path.to_path_buf()
+    Some(path.to_path_buf())
 }
 
 #[cfg(windows)]
@@ -234,12 +353,26 @@ mod tests {
         }
     }
 
+    fn tools(root: &Path) -> PathBuf {
+        root.join("jdtls").join("tools")
+    }
+
+    fn write_extension_toml(dir: &Path, version: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("extension.toml"),
+            format!("id = \"java\"\nname = \"Java\"\nversion = \"{version}\"\n\n[grammars.java]\nrepository = \"x\"\n"),
+        )
+        .unwrap();
+    }
+
     fn populate(root: &Path) {
         touch(&root.join("jre").join("release"));
         touch(&root.join("jdtls").join(launcher_name()));
-        touch(&root.join("lombok.jar"));
-        touch(&root.join("java-debug.jar"));
-        touch(&root.join(proxy_name()));
+        touch(&tools(root).join("lombok.jar"));
+        touch(&tools(root).join("java-debug.jar"));
+        touch(&tools(root).join(proxy_name()));
+        write_extension_toml(&root.join("extensions").join("java"), "6.8.28");
     }
 
     fn string(path: PathBuf) -> Value {
@@ -268,15 +401,25 @@ mod tests {
             overlay["jdtls_launcher"],
             string(root.join("jdtls").join(launcher_name()))
         );
-        assert_eq!(overlay["lombok_jar"], string(root.join("lombok.jar")));
-        assert_eq!(overlay["java_debug_jar"], string(root.join("java-debug.jar")));
-        assert_eq!(overlay["lsp_proxy_path"], string(root.join(proxy_name())));
+        assert_eq!(overlay["lombok_jar"], string(tools(root).join("lombok.jar")));
+        assert_eq!(overlay["java_debug_jar"], string(tools(root).join("java-debug.jar")));
+        assert_eq!(overlay["lsp_proxy_path"], string(tools(root).join(proxy_name())));
         assert_eq!(overlay["jdk_auto_download"], Value::Bool(false));
         assert_eq!(overlay["check_updates"], Value::String("once".into()));
         // The launcher runs on the bundled JRE by itself; `java_home` would also become
         // jdtls's JAVA_HOME and so the default project runtime, so it is left to the user.
         assert!(!overlay.contains_key("java_home"), "{overlay:?}");
         assert_eq!(overlay.len(), 6, "{overlay:?}");
+    }
+
+    #[test]
+    fn helpers_at_the_bundle_root_are_not_used() {
+        // The update helper only swaps jre/, brewery-daemon/, jdtls/ and extensions/.
+        let temp = TempDir::new("old-layout");
+        touch(&temp.0.join("lombok.jar"));
+        touch(&temp.0.join("java-debug.jar"));
+        touch(&temp.0.join(proxy_name()));
+        assert!(java_settings_overlay_for_root(Some(&temp.0)).is_empty());
     }
 
     #[test]
@@ -292,20 +435,34 @@ mod tests {
             assert!(Path::new(&as_str("jdtls_launcher")).is_file());
         }
         // Zed spawns the proxy directly and java-debug goes through LSP: long paths are fine.
-        assert_eq!(overlay["lsp_proxy_path"], string(root.join(proxy_name())));
-        assert_eq!(overlay["java_debug_jar"], string(root.join("java-debug.jar")));
+        assert_eq!(overlay["lsp_proxy_path"], string(tools(&root).join(proxy_name())));
+        assert_eq!(overlay["java_debug_jar"], string(tools(&root).join("java-debug.jar")));
+    }
+
+    #[test]
+    fn without_a_short_name_lombok_is_turned_off_instead_of_breaking_jdtls() {
+        let temp = TempDir::new("no-8dot3");
+        populate(&temp.0);
+        let no_short_names = |_: &Path| None;
+        let overlay = overlay_with(Some(&temp.0), &no_short_names);
+        assert_eq!(
+            overlay["jdtls_launcher"],
+            string(temp.0.join("jdtls").join(launcher_name()))
+        );
+        assert_eq!(overlay["lombok_support"], Value::Bool(false));
+        assert!(!overlay.contains_key("lombok_jar"), "{overlay:?}");
+        assert_eq!(overlay["lsp_proxy_path"], string(tools(&temp.0).join(proxy_name())));
     }
 
     #[test]
     fn partial_bundle_gives_a_partial_overlay() {
         let temp = TempDir::new("partial");
-        touch(&temp.0.join("lombok.jar"));
-        touch(&temp.0.join(proxy_name()));
-        // A launcher directory without the launcher script does not count.
-        std::fs::create_dir_all(temp.0.join("jdtls")).unwrap();
+        touch(&tools(&temp.0).join("lombok.jar"));
+        touch(&tools(&temp.0).join(proxy_name()));
+        // A jdtls directory without the launcher script does not count.
         let overlay = java_settings_overlay_for_root(Some(&temp.0));
-        assert_eq!(overlay["lombok_jar"], string(temp.0.join("lombok.jar")));
-        assert_eq!(overlay["lsp_proxy_path"], string(temp.0.join(proxy_name())));
+        assert_eq!(overlay["lombok_jar"], string(tools(&temp.0).join("lombok.jar")));
+        assert_eq!(overlay["lsp_proxy_path"], string(tools(&temp.0).join(proxy_name())));
         assert_eq!(overlay["check_updates"], Value::String("once".into()));
         for absent in ["jdtls_launcher", "java_debug_jar", "java_home", "jdk_auto_download"] {
             assert!(!overlay.contains_key(absent), "{absent}: {overlay:?}");
@@ -322,6 +479,45 @@ mod tests {
         assert!(!overlay.contains_key("jdtls_launcher"));
     }
 
+    #[test]
+    fn reads_the_extension_version() {
+        let temp = TempDir::new("version");
+        write_extension_toml(&temp.0, "6.8.28");
+        assert_eq!(extension_version(&temp.0).as_deref(), Some("6.8.28"));
+        assert_eq!(extension_version(&temp.0.join("missing")), None);
+    }
+
+    #[test]
+    fn overlay_needs_the_bundled_extension_version_installed() {
+        let temp = TempDir::new("versions");
+        let root = temp.0.join("bundle");
+        populate(&root);
+        let installed = temp.0.join("installed");
+
+        // Not installed yet (seeding failed): nothing points at the bundled helpers.
+        let defaults = bundle_defaults_for(Some(&root), &installed);
+        assert!(defaults.jdtls.is_empty());
+        assert_eq!(defaults.pinned_extensions, vec!["java".to_string()]);
+
+        write_extension_toml(&installed.join("java"), "6.8.28");
+        let defaults = bundle_defaults_for(Some(&root), &installed);
+        assert_eq!(defaults.jdtls, java_settings_overlay_for_root(Some(&root)));
+        assert!(!defaults.jdtls.is_empty());
+
+        // The user updated the extension: its own proxy and downloads, not ours.
+        write_extension_toml(&installed.join("java"), "6.9.0");
+        let defaults = bundle_defaults_for(Some(&root), &installed);
+        assert!(defaults.jdtls.is_empty());
+        assert_eq!(defaults.pinned_extensions, vec!["java".to_string()]);
+    }
+
+    #[test]
+    fn no_bundle_no_defaults() {
+        let temp = TempDir::new("no-bundle-defaults");
+        assert_eq!(bundle_defaults_for(None, &temp.0), BundleDefaults::default());
+        assert_eq!(bundle_defaults_for(Some(&temp.0), &temp.0), BundleDefaults::default());
+    }
+
     fn jdtls_settings(cx: &App) -> Value {
         cx.global::<SettingsStore>().merged_settings().project.lsp.0[JDTLS_SERVER]
             .settings
@@ -329,52 +525,88 @@ mod tests {
             .unwrap()
     }
 
+    fn auto_update_java(cx: &App) -> Option<bool> {
+        cx.global::<SettingsStore>()
+            .merged_settings()
+            .extension
+            .auto_update_extensions
+            .get("java")
+            .copied()
+    }
+
+    fn set_user_settings(cx: &mut App, json: &str) {
+        cx.update_global::<SettingsStore, _>(|store, cx| {
+            store.set_user_settings(json, cx).unwrap();
+        });
+    }
+
+    fn full_defaults(root: &Path) -> BundleDefaults {
+        BundleDefaults {
+            jdtls: java_settings_overlay_for_root(Some(root)),
+            pinned_extensions: vec!["java".to_string()],
+        }
+    }
+
     #[gpui::test]
     fn user_settings_override_the_overlay(cx: &mut TestAppContext) {
         let temp = TempDir::new("user-wins");
         populate(&temp.0);
-        let overlay = java_settings_overlay_for_root(Some(&temp.0));
         cx.update(|cx| {
             let store = SettingsStore::new(cx, &settings::default_settings());
             cx.set_global(store);
-            apply_jdtls_defaults(overlay, cx);
+            apply_bundle_defaults(full_defaults(&temp.0), cx);
 
             let settings = jdtls_settings(cx);
             // The overlay beats default.json's `jdk_auto_download: true`.
             assert_eq!(settings["jdk_auto_download"], Value::Bool(false));
-            assert_eq!(settings["lombok_jar"], string(temp.0.join("lombok.jar")));
+            assert_eq!(settings["lombok_jar"], string(tools(&temp.0).join("lombok.jar")));
 
-            cx.update_global::<SettingsStore, _>(|store, cx| {
-                store
-                    .set_user_settings(
-                        r#"{"lsp": {"jdtls": {"settings": {
-                            "lombok_jar": "/mine/lombok.jar",
-                            "jdk_auto_download": true,
-                            "max_memory": "4G"
-                        }}}}"#,
-                        cx,
-                    )
-                    .unwrap();
-            });
+            set_user_settings(
+                cx,
+                r#"{"lsp": {"jdtls": {"settings": {
+                    "lombok_jar": "/mine/lombok.jar",
+                    "jdk_auto_download": true,
+                    "max_memory": "4G"
+                }}}}"#,
+            );
             let settings = jdtls_settings(cx);
             assert_eq!(settings["lombok_jar"], Value::String("/mine/lombok.jar".into()));
             assert_eq!(settings["jdk_auto_download"], Value::Bool(true));
             assert_eq!(settings["max_memory"], Value::String("4G".into()));
             // Keys the user did not set still come from the overlay.
-            assert_eq!(settings["java_debug_jar"], string(temp.0.join("java-debug.jar")));
+            assert_eq!(
+                settings["java_debug_jar"],
+                string(tools(&temp.0).join("java-debug.jar"))
+            );
             assert_eq!(settings["check_updates"], Value::String("once".into()));
         });
     }
 
     #[gpui::test]
-    fn empty_overlay_keeps_the_defaults(cx: &mut TestAppContext) {
+    fn bundled_extension_does_not_auto_update_unless_the_user_says_so(cx: &mut TestAppContext) {
+        let temp = TempDir::new("pinned");
+        populate(&temp.0);
+        cx.update(|cx| {
+            let store = SettingsStore::new(cx, &settings::default_settings());
+            cx.set_global(store);
+            assert_eq!(auto_update_java(cx), None);
+            apply_bundle_defaults(full_defaults(&temp.0), cx);
+            assert_eq!(auto_update_java(cx), Some(false));
+            set_user_settings(cx, r#"{"auto_update_extensions": {"java": true}}"#);
+            assert_eq!(auto_update_java(cx), Some(true));
+        });
+    }
+
+    #[gpui::test]
+    fn empty_defaults_keep_the_defaults(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let store = SettingsStore::new(cx, &settings::default_settings());
             cx.set_global(store);
             let before = jdtls_settings(cx);
-            apply_jdtls_defaults(Map::new(), cx);
+            apply_bundle_defaults(BundleDefaults::default(), cx);
             assert_eq!(jdtls_settings(cx), before);
             assert_eq!(before["jdk_auto_download"], Value::Bool(true));
+            assert_eq!(auto_update_java(cx), None);
         });
     }
 
@@ -405,6 +637,22 @@ mod tests {
         // No temp dirs are left next to it.
         let entries: Vec<_> = std::fs::read_dir(&installed).unwrap().collect();
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn seeding_removes_staging_dirs_a_crash_left_behind() {
+        let temp = TempDir::new("seed-stale");
+        let bundled = bundled_extension(&temp.0);
+        let installed = temp.0.join("extensions").join("installed");
+        touch(&installed.join(".java.brewery-seed-999999").join("extension.wasm"));
+        touch(&installed.join("other").join("extension.toml"));
+        assert!(seed_extension(&bundled, &installed, "java").unwrap());
+        let mut names: Vec<_> = std::fs::read_dir(&installed)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["java", "other"]);
     }
 
     #[test]
@@ -445,7 +693,7 @@ mod tests {
         let temp = TempDir::new("nospace");
         let file = temp.0.join("brewery-jdtls.cmd");
         touch(&file);
-        assert_eq!(cmd_safe_path(&file), file);
+        assert_eq!(cmd_safe_path(&file), Some(file));
     }
 
     #[test]
@@ -455,19 +703,22 @@ mod tests {
         touch(&file);
         let safe = cmd_safe_path(&file);
         if cfg!(windows) && !short_names_disabled(&temp.0) {
+            let safe = safe.unwrap();
             assert!(!safe.to_str().unwrap().contains(' '), "{safe:?}");
             assert_ne!(safe, file);
             // Same file.
             assert!(safe.is_file());
             assert_eq!(std::fs::read(&safe).unwrap(), b"x");
+        } else if cfg!(windows) {
+            assert_eq!(safe, None);
         } else {
-            assert_eq!(safe, file);
+            assert_eq!(safe, Some(file));
         }
     }
 
-    /// 8.3 names can be turned off per volume (`fsutil 8dot3name`); then the fallback
-    /// keeps the long path, which the test above accepts. Asks cmd's `%~s` independently
-    /// of the code under test.
+    /// 8.3 names can be turned off per volume (`fsutil 8dot3name`); then there is no
+    /// cmd-safe form, which the tests above accept. Asks cmd's `%~s` independently of the
+    /// code under test.
     #[cfg(windows)]
     #[allow(clippy::disallowed_methods, reason = "a test helper; cmd returns at once")]
     fn short_names_disabled(dir: &Path) -> bool {

@@ -8,9 +8,9 @@ SHA-256 does not match, and lays out
     <out>/<os>-<arch>/
         jre/                         (jlink of the pinned JDK, on the target OS)
         jdtls/                       (+ brewery-jdtls[.cmd] launcher)
-        lombok.jar
-        java-debug.jar
-        java-lsp-proxy[.exe]
+            tools/lombok.jar
+            tools/java-debug.jar
+            tools/java-lsp-proxy[.exe]
         extensions/java/
         brewery-daemon/brewery-daemon.jar   (with --daemon-jar)
         licenses/                    (every component's licence + README.txt)
@@ -19,11 +19,11 @@ The bundle is assembled in a hidden staging directory next to the target and
 swapped in only when every step succeeded, so a failed run never leaves a
 partial bundle and never destroys the previous one.
 
-Python 3.11+ standard library only. Usage (from the repo root):
+Python 3.11.4+ (tarfile's data filter) standard library only. Usage (from the repo root):
 
     python script/brewery/fetch_bundle_deps.py [--os windows] [--arch x64]
         [--out target/bundle] [--cache ~/.cache/brewery-bundle]
-        [--daemon-jar brewery-daemon/build/libs/brewery-daemon-all.jar]
+        (--daemon-jar brewery-daemon/build/libs/brewery-daemon-all.jar | --no-daemon)
 """
 
 from __future__ import annotations
@@ -331,6 +331,31 @@ def _check_member(name: str, archive: Path) -> None:
         raise FetchError(f"unsafe path {name!r} in {archive.name}")
 
 
+def _resolve_member(path: str, links: dict, archive: Path, depth: int = 0) -> list:
+    """Components of path inside the archive, following the archive's own symlinks
+    (links: member name -> link target). FetchError when it leaves the archive root, so
+    chains that each pass the lexical check (a -> sub/.., a/b -> ..) are caught too."""
+    if depth > 40:
+        raise FetchError(f"unsafe link loop at {path!r} in {archive.name}")
+    resolved: list = []
+    for part in path.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                raise FetchError(f"unsafe path {path!r} in {archive.name}")
+            resolved.pop()
+            continue
+        resolved.append(part)
+        target = links.get("/".join(resolved))
+        if target is not None:
+            if PurePosixPath(target).is_absolute():
+                raise FetchError(f"unsafe link {path!r} in {archive.name}")
+            base = resolved[:-1]
+            resolved = _resolve_member("/".join([*base, target]), links, archive, depth + 1)
+    return resolved
+
+
 def _extract(archive: Path, fmt: str, into: Path) -> None:
     into.mkdir(parents=True)
     try:
@@ -341,20 +366,31 @@ def _extract(archive: Path, fmt: str, into: Path) -> None:
                 zf.extractall(into)
         elif fmt == "tar.gz":
             with tarfile.open(archive, "r:gz") as tf:
+                # The data filter (Python 3.11.4+, 3.12+) also guards what lexical
+                # checks cannot see, such as links created on disk by earlier members.
+                if getattr(tarfile, "data_filter", None) is None:
+                    raise FetchError(
+                        f"cannot unpack {archive.name}: this Python's tarfile has no data "
+                        "filter; use Python 3.11.4+ or 3.12+"
+                    )
                 members = tf.getmembers()
+                links: dict = {}
                 for m in members:
                     _check_member(m.name, archive)
+                    parent = _resolve_member(posixpath.dirname(m.name), links, archive)
                     if m.issym() or m.islnk():
-                        base = posixpath.dirname(m.name) if m.issym() else ""
-                        _check_member(posixpath.join(base, m.linkname), archive)
                         if PurePosixPath(m.linkname).is_absolute():
                             raise FetchError(f"unsafe link {m.name!r} in {archive.name}")
+                        base = posixpath.dirname(m.name) if m.issym() else ""
+                        _check_member(posixpath.join(base, m.linkname), archive)
+                        if m.issym():
+                            _resolve_member("/".join([*parent, m.linkname]), links, archive)
+                            links["/".join([*parent, posixpath.basename(m.name)])] = m.linkname
+                        else:
+                            _resolve_member(m.linkname, links, archive)
                     elif not (m.isfile() or m.isdir()):
                         raise FetchError(f"unsafe member type {m.name!r} in {archive.name}")
-                if hasattr(tarfile, "data_filter"):
-                    tf.extractall(into, members=members, filter="data")
-                else:
-                    tf.extractall(into, members=members)
+                tf.extractall(into, members=members, filter="data")
         else:
             raise FetchError(f"cannot unpack format {fmt}")
     except (tarfile.TarError, zipfile.BadZipFile, OSError) as err:
@@ -440,7 +476,21 @@ JRE_MODULES = (
     "jdk.jfr",
     "jdk.httpserver",
     "jdk.compiler",
+    # Loaded by JDBC drivers through services or reflection, so jdeps cannot see them:
+    # PKCS#11 keys, JNDI DNS/SRV lookups and Kerberos (e.g. mssql-jdbc integrated auth).
+    "jdk.crypto.cryptoki",
+    "jdk.naming.dns",
+    "jdk.security.jgss",
 )
+# Modules that exist only in some OS's JDK: the Windows-ROOT / Windows-MY keystores
+# (corporate TLS roots, client certificates).
+JRE_MODULES_BY_OS = {"windows": ("jdk.crypto.mscapi",)}
+
+
+def jre_modules(os_name: str) -> tuple:
+    return JRE_MODULES + JRE_MODULES_BY_OS.get(os_name, ())
+
+
 JLINK_FLAGS = ("--strip-debug", "--no-man-pages", "--no-header-files", "--compress=zip-6")
 
 # jdtls's shared configuration per target: the first is the one the launcher uses,
@@ -487,10 +537,11 @@ def build_jre(ctx: BundleContext, run: Callable = subprocess.run, host: str | No
     jre = ctx.bundle / "jre"
     if jre.exists():
         raise FetchError(f"jre: {jre} already exists in the bundle")
-    ctx.log(f"  jlink   {len(JRE_MODULES)} modules -> jre/")
+    modules = jre_modules(ctx.os)
+    ctx.log(f"  jlink   {len(modules)} modules -> jre/")
     _run_checked(
         run,
-        [jlink, "--module-path", jmods, "--add-modules", ",".join(JRE_MODULES), *JLINK_FLAGS,
+        [jlink, "--module-path", jmods, "--add-modules", ",".join(modules), *JLINK_FLAGS,
          "--output", jre],
         "jlink",
     )
@@ -504,7 +555,7 @@ def build_jre(ctx: BundleContext, run: Callable = subprocess.run, host: str | No
     ctx.log(f"  jre     {first[0] if first else 'java -version ok'}")
     listing = _run_checked(run, [java, "--list-modules"], "jre/bin/java --list-modules")
     present = {line.split("@", 1)[0].strip() for line in listing.stdout.splitlines()}
-    missing = [m for m in JRE_MODULES if m not in present]
+    missing = [m for m in modules if m not in present]
     if missing:
         raise FetchError(f"jre: image lacks modules {', '.join(missing)}")
 
@@ -588,16 +639,21 @@ def collect_licenses(ctx: BundleContext) -> None:
             (dest / file_name).write_bytes(data)
         index += [f"{component} {art.version}", f"  License: {art.license}", f"  Source:  {art.source}"]
         if art.source_code or art.source_tag:
-            source = [
-                f"Corresponding source for the Java runtime in jre/ ({art.version}),",
-                "built from the Eclipse Temurin JDK with jlink:",
-                "",
-            ]
+            if art.name == "jdk":
+                source = [
+                    f"Corresponding source for the Java runtime in jre/ ({art.version}),",
+                    "built from the Eclipse Temurin JDK with jlink:",
+                    "",
+                ]
+            else:
+                source = [f"Source code of {component} {art.version}:", ""]
             if art.source_code:
                 source.append(f"Source archive: {art.source_code}")
                 index.append(f"  Corresponding source: {art.source_code}")
             if art.source_tag:
                 source.append(f"Source tag:     {art.source_tag}")
+                if not art.source_code:
+                    index.append(f"  Source code: {art.source_tag}")
             source.append(f"Binaries:       {art.source}")
             (dest / "SOURCE.txt").write_text("\n".join(source) + "\n", encoding="utf-8")
         index.append(f"  Files:   licenses/{component}/")
@@ -663,7 +719,9 @@ def build_bundle(
             deps_dir=Path(deps.path).parent,
             log=log,
         )
-        for art in resolved:
+        # A directory artifact (jdtls/) goes in before the files placed inside it
+        # (jdtls/tools/...), whatever order the pins file lists them in.
+        for art in sorted(resolved, key=lambda a: len(PurePosixPath(a.dest).parts)):
             if art.into == "work":
                 dest = work_root / art.name
                 install(art, files[art.name], dest, scratch)
@@ -705,8 +763,14 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="bundle parent dir")
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE, help="download cache")
     parser.add_argument("--daemon-jar", type=Path, help="built brewery-daemon shadow jar")
+    parser.add_argument(
+        "--no-daemon", action="store_true",
+        help="build without brewery-daemon/ (not for releases: the updater needs it)",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
+    if args.daemon_jar is None and not args.no_daemon:
+        parser.error("--daemon-jar is required (or --no-daemon for a bundle without the daemon)")
     log = (lambda *_: None) if args.quiet else (lambda msg: print(msg, flush=True))
     try:
         target = target_name(normalize_os(args.os), normalize_arch(args.arch))

@@ -68,6 +68,7 @@ jobs:
               - '.github/workflows/brewery_ci.yml'
             bundle:
               - 'script/brewery/**'
+              - 'brewery-daemon/**'
               - '.github/workflows/brewery_ci.yml'
       - id: plan
         shell: bash

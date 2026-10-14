@@ -74,6 +74,7 @@ root = "jdk-21.0.12.1+1/Contents/Home"
 version = "1.61.0-202609031315"
 license = "EPL-2.0"
 source = "https://download.eclipse.org/jdtls/milestones/1.61.0/"
+source_tag = "https://github.com/eclipse-jdtls/eclipse.jdt.ls/tree/v1.61.0"
 # LICENSE of github.com/eclipse-jdtls/eclipse.jdt.ls at tag v1.61.0.
 license_file = "licenses/eclipse.jdt.ls-LICENSE.txt"
 dest = "jdtls"
@@ -88,7 +89,7 @@ version = "1.18.48"
 license = "MIT"
 source = "https://projectlombok.org/downloads/"
 license_member = "LICENSE"
-dest = "lombok.jar"
+dest = "jdtls/tools/lombok.jar"
 
 [artifacts.lombok.any]
 url = "https://projectlombok.org/downloads/lombok-1.18.48.jar"
@@ -100,9 +101,10 @@ sha256 = "85477a4655ebb2c074a9099cfb749be454449fee564d4282610df1b85f7c508b"
 version = "0.53.2"
 license = "EPL-1.0"
 source = "https://github.com/zed-industries/java-debug/releases/tag/0.53.2"
+source_tag = "https://github.com/zed-industries/java-debug/tree/0.53.2"
 # LICENSE.txt of github.com/zed-industries/java-debug at tag 0.53.2.
 license_file = "licenses/java-debug-LICENSE.txt"
-dest = "java-debug.jar"
+dest = "jdtls/tools/java-debug.jar"
 
 [artifacts.java-debug.any]
 url = "https://github.com/zed-industries/java-debug/releases/download/0.53.2/com.microsoft.java.debug.plugin-0.53.2.jar"
@@ -117,7 +119,7 @@ license = "Apache-2.0"
 source = "https://github.com/zed-extensions/java/releases/tag/v6.8.28"
 # LICENSE of github.com/zed-extensions/java at tag v6.8.28 (proxy and extension).
 license_file = "licenses/zed-extensions-java-LICENSE.txt"
-dest = "java-lsp-proxy{exe}"
+dest = "jdtls/tools/java-lsp-proxy{exe}"
 member = "java-lsp-proxy{exe}"
 executable = true
 
