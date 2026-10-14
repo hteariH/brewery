@@ -97,11 +97,35 @@ plutil -lint "$contents/Info.plist" >/dev/null
 for dir in jre brewery-daemon jdtls extensions licenses; do
     ditto "$bundle/$dir" "$contents/Resources/$dir"
 done
+# Licences: Brewery's and Zed's, then every bundled component's (the bundle's licenses/),
+# laid out as in the Linux tree (script/brewery/bundle-linux).
+lic="$contents/Resources/licenses"
+mkdir -p "$lic/brewery" "$lic/brewery-daemon" "$lic/intellij-icons"
+cp LICENSE-GPL LICENSE-APACHE "$lic/brewery/"
+cp brewery-daemon/LICENSE "$lic/brewery-daemon/LICENSE"
+cp crates/brewery_theme/icons/NOTICE "$lic/intellij-icons/NOTICE"
 if [[ -n "$licenses_md" ]]; then
-    cp "$licenses_md" "$contents/Resources/licenses/rust-dependencies.md"
+    cp "$licenses_md" "$lic/brewery/licenses.md"
 fi
-cp LICENSE-GPL "$contents/Resources/licenses/LICENSE-GPL"
-cp LICENSE-APACHE "$contents/Resources/licenses/LICENSE-APACHE"
+bundle_readme=$(cat "$bundle/licenses/README.txt")
+{
+    echo "Brewery $version"
+    echo "  License: GPL-3.0-or-later. Brewery is a fork of the Zed editor"
+    echo "  (https://github.com/zed-industries/zed); Zed's code is GPL-3.0-or-later,"
+    echo "  its GPUI framework Apache-2.0: licenses/brewery/LICENSE-GPL, LICENSE-APACHE."
+    if [[ -n "$licenses_md" ]]; then
+        echo "  Rust dependencies, themes and icons: licenses/brewery/licenses.md"
+    fi
+    echo "  Source:  https://github.com/hteariH/brewery"
+    echo ""
+    echo "brewery-daemon $version"
+    echo "  License: Apache-2.0: licenses/brewery-daemon/LICENSE"
+    echo ""
+    echo "IntelliJ Platform icons (brewery_theme)"
+    echo "  License: Apache-2.0, NOTICE: licenses/intellij-icons/NOTICE"
+    echo ""
+    echo "$bundle_readme"
+} > "$lic/README.txt"
 
 # Icons: Brewery.icns from the channel's 512 and 1024 px PNGs.
 iconset="$temp_dir/Brewery.iconset"

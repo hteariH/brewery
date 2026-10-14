@@ -50,7 +50,7 @@ for f in MacOS/brewery MacOS/cli Resources/jre/bin/java Resources/jdtls/brewery-
     [[ -x "$c/$f" ]] || fail "$f is missing or not executable"
 done
 for f in Resources/brewery-daemon/brewery-daemon.jar Resources/extensions/java/extension.toml \
-         Resources/licenses/README.txt Resources/licenses/LICENSE-GPL Resources/Brewery.icns Info.plist; do
+         Resources/licenses/README.txt Resources/licenses/brewery/LICENSE-GPL Resources/licenses/brewery/licenses.md Resources/licenses/brewery-daemon/LICENSE Resources/licenses/intellij-icons/NOTICE Resources/Brewery.icns Info.plist; do
     [[ -f "$c/$f" ]] || fail "$f is missing"
 done
 [[ ! -e "$c/MacOS/zed" ]] || fail "Contents/MacOS/zed must not exist"

@@ -237,9 +237,19 @@ pub fn init(cx: &mut App) {
 
     cx.on_action(|_: &zed_actions::OpenLicenses, cx| {
         with_active_or_new_workspace(cx, |workspace, window, cx| {
+            // brewery: a build without assets/licenses.md shows a notice instead of panicking
+            let Some(licenses) = util::try_asset_str::<Assets>("licenses.md") else {
+                workspace.show_error(
+                    "This build has no dependency licences: assets/licenses.md was not generated \
+                     before it was built (script/generate-licenses). The licences of the bundled \
+                     components are in the install's licenses folder.",
+                    cx,
+                );
+                return;
+            };
             open_bundled_file(
                 workspace,
-                asset_str::<Assets>("licenses.md"),
+                licenses,
                 "Open Source License Attribution",
                 "Markdown",
                 window,

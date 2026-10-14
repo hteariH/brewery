@@ -338,9 +338,20 @@ jobs:
           shared-key: brewery-build
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
+      # Zed's licences of the Rust dependencies (cargo-about). They are embedded in the app
+      # (Help > View Dependency Licenses), so they must exist before the build.
+      - uses: taiki-e/install-action@v2.87.27
+        with:
+          tool: cargo-about@0.8.2
+      - name: Generate the Rust dependency licences
+        shell: pwsh
+        run: script/generate-licenses.ps1 assets/licenses.md
       # The installer also needs the CLI (bin\brewery.exe) and the update helper.
       - name: Build
         run: cargo build --locked --profile release-fast -p zed -p cli -p auto_update_helper
+      - name: Keep the licences with the binaries
+        shell: pwsh
+        run: Copy-Item assets/licenses.md target/release-fast/licenses.md
       - name: Assert exe metadata
         shell: pwsh
         run: |
@@ -360,6 +371,7 @@ jobs:
             target/release-fast/brewery.exe
             target/release-fast/cli.exe
             target/release-fast/auto_update_helper.exe
+            target/release-fast/licenses.md
           retention-days: 14
 
   # The Windows installer (script/brewery/bundle-windows.ps1, Inno Setup) from the Windows build
@@ -388,17 +400,13 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { throw "Inno Setup 6 not found at $iscc" }
           (Get-Item $iscc).VersionInfo | Format-List FileVersion
-      # Zed's licences of the Rust dependencies (cargo-about), as Zed's own bundle script does.
-      - name: Generate the Rust dependency licences
-        shell: pwsh
-        run: script/generate-licenses.ps1 "$env:RUNNER_TEMP\licenses.md"
       - name: Build the installer
         id: installer
         shell: pwsh
         run: |
           script/brewery/bundle-windows.ps1 -App target/windows-build/brewery.exe -Cli target/windows-build/cli.exe `
             -Helper target/windows-build/auto_update_helper.exe -Bundle target/bundle/windows-x64 `
-            -RustLicenses "$env:RUNNER_TEMP\licenses.md" -Out target/installer -Iscc "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            -RustLicenses target/windows-build/licenses.md -Out target/installer -Iscc "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
       - name: Smoke (install, update mode, helper swap, uninstall)
         shell: pwsh
         env:
@@ -451,22 +459,22 @@ jobs:
           shared-key: brewery-build
           save-if: ${{ startsWith(github.ref, 'refs/tags/') }}
           cache-on-failure: true
+      # Zed's licences of the Rust dependencies (cargo-about, the version script/generate-licenses
+      # pins; prebuilt, checksum-checked by install-action). They are embedded in the app
+      # (Help > View Dependency Licenses), so they must exist before the build.
+      - uses: taiki-e/install-action@v2.87.27
+        with:
+          tool: cargo-about@0.8.2
+      - name: Generate the Rust dependency licences
+        run: script/generate-licenses assets/licenses.md
       - name: Build
         run: cargo build --locked --profile release-fast -p zed
       # A separate invocation, as Zed's bundle scripts do, so the app's features don't unify into the CLI.
       - name: Build the CLI
         run: cargo build --locked --profile release-fast -p cli
-      # Zed's licences of the Rust dependencies, for the packages. Here the crates are already
-      # fetched; the cargo-about version is the one script/generate-licenses pins (prebuilt,
-      # checksum-checked by install-action).
-      - uses: taiki-e/install-action@v2.87.27
-        if: runner.os == 'Linux'
-        with:
-          tool: cargo-about@0.8.2
-      - name: Generate the Rust dependency licences
-        if: runner.os == 'Linux'
-        run: script/generate-licenses target/release-fast/licenses.md
-      # The artifact holds the app as `brewery`, the CLI as `cli` and (Linux) licenses.md
+      - name: Keep the licences with the binaries
+        run: cp assets/licenses.md target/release-fast/licenses.md
+      # The artifact holds the app as `brewery`, the CLI as `cli` and licenses.md
       # (upload-artifact drops the executable bits; packaging scripts copy and chmod them).
       - uses: actions/upload-artifact@v4
         with:
@@ -569,7 +577,7 @@ jobs:
         run: |
           mkdir -p target/bundle
           tar -xzf target/bundle-macos-aarch64.tar.gz -C target/bundle
-          script/brewery/bundle-mac --app target/mac-build/brewery --cli target/mac-build/cli             --bundle target/bundle/macos-aarch64 --out target/package
+          script/brewery/bundle-mac --app target/mac-build/brewery --cli target/mac-build/cli             --bundle target/bundle/macos-aarch64 --licenses-md target/mac-build/licenses.md --out target/package
       - name: Smoke
         run: script/brewery/smoke-mac-zip "target/package/brewery-$(cat crates/zed/BREWERY_VERSION)-macos-aarch64.zip"
       - name: Contents

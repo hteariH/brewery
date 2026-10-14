@@ -663,6 +663,15 @@ mod rng {
 #[cfg(any(test, feature = "test-support"))]
 pub use rng::RandomCharIter;
 
+/// Get an embedded file as a string, or `None` when the build didn't embed it.
+// brewery: generated assets (licenses.md) may be absent from a build; callers show a notice
+pub fn try_asset_str<A: rust_embed::RustEmbed>(path: &str) -> Option<Cow<'static, str>> {
+    A::get(path).map(|file| match file.data {
+        Cow::Borrowed(bytes) => String::from_utf8_lossy(bytes),
+        Cow::Owned(bytes) => Cow::Owned(String::from_utf8_lossy(&bytes).into_owned()),
+    })
+}
+
 /// Get an embedded file as a string.
 pub fn asset_str<A: rust_embed::RustEmbed>(path: &str) -> Cow<'static, str> {
     match A::get(path).expect(path).data {
@@ -1061,6 +1070,16 @@ mod tests {
         assert_eq!(CLI_LOCATIONS_MACOS, ["./cli"]);
         assert_eq!(CLI_LOCATIONS_WINDOWS, ["bin/brewery.exe", "./cli.exe"]);
         assert_eq!(CLI_LOCATIONS_UNIX, ["../bin/brewery", "./cli"]);
+    }
+
+    // brewery: a missing asset (licenses.md when a build skipped generate-licenses) is None, not a panic
+    #[test]
+    fn test_try_asset_str() {
+        assert!(
+            try_asset_str::<FsEmbedTestAssets>("util.rs")
+                .is_some_and(|text| text.contains("fs_embed"))
+        );
+        assert!(try_asset_str::<FsEmbedTestAssets>("no-such-file.rs").is_none());
     }
 
     #[test]
