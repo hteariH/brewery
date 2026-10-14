@@ -4,8 +4,8 @@
 
 use std::{
     ffi::OsString,
-    os::windows::ffi::OsStringExt,
-    path::Path,
+    os::windows::ffi::{OsStrExt, OsStringExt},
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -13,6 +13,7 @@ use anyhow::Context as _;
 use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
+        Storage::FileSystem::GetLongPathNameW,
         System::{
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -25,7 +26,7 @@ use windows::{
             },
         },
     },
-    core::PWSTR,
+    core::{PCWSTR, PWSTR},
 };
 
 use crate::updater::Job;
@@ -180,6 +181,25 @@ pub(crate) fn classify(image: &Path, app_dir: &Path) -> Option<ProcessKind> {
     }
 }
 
+/// `classify` for a running process. The image path keeps the spelling the process was started
+/// with, which can contain 8.3 short names (`C:\Users\RUNNER~1\...`) while `app_dir` is
+/// canonical (long), so a short-looking image is expanded with `GetLongPathNameW` first.
+fn classify_image(image: &Path, app_dir: &Path) -> Option<ProcessKind> {
+    if !image.to_string_lossy().contains('~') {
+        return classify(image, app_dir);
+    }
+    long_path(image)
+        .and_then(|long| classify(&long, app_dir))
+        .or_else(|| classify(image, app_dir))
+}
+
+fn long_path(path: &Path) -> Option<PathBuf> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut buffer = vec![0u16; 32 * 1024];
+    let len = unsafe { GetLongPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buffer)) } as usize;
+    (len > 0 && len < buffer.len()).then(|| PathBuf::from(OsString::from_wide(&buffer[..len])))
+}
+
 struct OwnedHandle(HANDLE);
 
 impl Drop for OwnedHandle {
@@ -235,7 +255,7 @@ fn app_processes(app_dir: &Path) -> Vec<AppProcess> {
             if let Ok(handle) = opened {
                 let handle = OwnedHandle(handle);
                 if let Some(image) = image_path(&handle)
-                    && let Some(kind) = classify(Path::new(&image), app_dir)
+                    && let Some(kind) = classify_image(Path::new(&image), app_dir)
                 {
                     found.push(AppProcess {
                         pid,
@@ -265,7 +285,7 @@ pub(crate) fn stop_bundled_processes(app_dir: &Path, grace: Duration, kill_wait:
         );
         return;
     }
-    // Resolve junctions and short names once, so the image paths (always long) match.
+    // Resolve junctions and short names once; `classify_image` expands short image paths.
     let canonical = std::fs::canonicalize(app_dir).ok();
     let app_dir = canonical.as_deref().unwrap_or(app_dir);
     let deadline = Instant::now() + grace;
@@ -632,6 +652,64 @@ mod tests {
             unrelated.0.try_wait().unwrap().is_none(),
             "java outside the app dir is never killed"
         );
+    }
+
+    /// The 8.3 form of an existing path, or None when the volume has short names disabled.
+    fn short_path(path: &Path) -> Option<PathBuf> {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut buffer = vec![0u16; 32 * 1024];
+        let len = unsafe {
+            windows::Win32::Storage::FileSystem::GetShortPathNameW(
+                windows::core::PCWSTR(wide.as_ptr()),
+                Some(&mut buffer),
+            )
+        } as usize;
+        (len > 0 && len < buffer.len())
+            .then(|| PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])))
+            .filter(|short| short != path)
+    }
+
+    /// Like the GitHub runner, whose %TEMP% is C:\Users\RUNNER~1\...: the process is started
+    /// through one spelling of the install dir and the helper is given the other.
+    fn assert_stops_across_spellings(start_short: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let long_dir = root.path().join("Brewery Install Directory");
+        std::fs::create_dir_all(long_dir.join(r"jre\bin")).unwrap();
+        let Some(short_dir) = short_path(&long_dir) else {
+            eprintln!("8.3 names are disabled on this volume, skipping");
+            return;
+        };
+        let (start_dir, helper_dir) = if start_short {
+            (&short_dir, &long_dir)
+        } else {
+            (&long_dir, &short_dir)
+        };
+        let mut bundled = spawn_copy_at(start_dir.join(r"jre\bin\java.exe"));
+        let _app = spawn_copy_at(start_dir.join("Brewery.exe"));
+
+        stop_bundled_processes(
+            helper_dir,
+            Duration::from_millis(300),
+            Duration::from_secs(5),
+        );
+
+        assert!(
+            bundled.0.try_wait().unwrap().is_some(),
+            "bundled java started via {} should be stopped by a helper given {}",
+            start_dir.display(),
+            helper_dir.display()
+        );
+    }
+
+    #[test]
+    fn test_stop_bundled_processes_started_via_short_path() {
+        assert_stops_across_spellings(true);
+    }
+
+    #[test]
+    fn test_stop_bundled_processes_started_via_long_path() {
+        assert_stops_across_spellings(false);
     }
 
     #[test]
