@@ -7,7 +7,7 @@
    reads the maven-multi fixture (maven, 3 modules).
 2. lsp_smoke: jdtls started the way the Java extension starts it
    (java-lsp-proxy -> jdtls/brewery-jdtls[.cmd] --jvm-arg=-javaagent:jdtls/tools/lombok.jar)
-   on a copy of that fixture plus one Java file: initialize, ServiceReady,
+   on a plain folder with one Java file (no build files): initialize, ServiceReady,
    java-debug's startDebugSession, documentSymbol; the bundle must stay unchanged.
 
 --require-offline first checks that the network is unreachable, so a run inside
@@ -28,7 +28,10 @@ import lsp_smoke
 
 REPO = Path(__file__).resolve().parent.parent.parent
 FIXTURE = REPO / "brewery-daemon" / "src" / "test" / "resources" / "projects" / "maven-multi"
-JAVA_FILE = "core/src/main/java/demo/Owner.java"
+# jdtls gets a plain source folder (no pom.xml): importing a Maven project needs Maven's
+# default plugins in ~/.m2, which a fresh, offline machine does not have, and that is
+# the user project's business, not the bundle's.
+JAVA_FILE = "src/demo/Owner.java"
 JAVA_SOURCE = """package demo;
 
 public class Owner {
@@ -77,8 +80,7 @@ def main(argv: list | None = None) -> int:
 
     scratch = Path(tempfile.mkdtemp(prefix="smoke-bundle-"))
     try:
-        project = scratch / FIXTURE.name
-        shutil.copytree(FIXTURE, project)
+        project = scratch / "plain-java"
         java_file = project / JAVA_FILE
         java_file.parent.mkdir(parents=True)
         java_file.write_text(JAVA_SOURCE, encoding="utf-8")
