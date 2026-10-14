@@ -42,6 +42,7 @@ jobs:
       windows_check: ${{ steps.plan.outputs.windows_check }}
       windows_build: ${{ steps.plan.outputs.windows_build }}
       other_builds: ${{ steps.plan.outputs.other_builds }}
+      bundle: ${{ steps.plan.outputs.bundle }}
     steps:
       - uses: actions/checkout@v4
         if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
@@ -65,6 +66,9 @@ jobs:
             daemon:
               - 'brewery-daemon/**'
               - '.github/workflows/brewery_ci.yml'
+            bundle:
+              - 'script/brewery/**'
+              - '.github/workflows/brewery_ci.yml'
       - id: plan
         shell: bash
         env:
@@ -72,6 +76,7 @@ jobs:
           REF: ${{ github.ref }}
           RUST_CHANGED: ${{ steps.filter.outputs.rust }}
           DAEMON_CHANGED: ${{ steps.filter.outputs.daemon }}
+          BUNDLE_CHANGED: ${{ steps.filter.outputs.bundle }}
           INPUT_WINDOWS_BUILD: ${{ inputs.windows_build }}
           INPUT_ALL_PLATFORMS: ${{ inputs.all_platforms }}
           HEAD_MESSAGE: ${{ github.event.head_commit.message }}
@@ -81,6 +86,8 @@ jobs:
           rust=false; daemon=false
           if [[ $everything == true || "$RUST_CHANGED" == true ]]; then rust=true; fi
           if [[ $everything == true || "$DAEMON_CHANGED" == true ]]; then daemon=true; fi
+          bundle=false
+          if [[ $everything == true || "$BUNDLE_CHANGED" == true ]]; then bundle=true; fi
           # "[win]" in the pushed commit message asks for the Windows check and exe on a branch.
           win_tag=false
           if [[ "$EVENT" == push && "$HEAD_MESSAGE" == *"[win]"* ]]; then win_tag=true; fi
@@ -101,6 +108,7 @@ jobs:
             echo "windows_check=$windows_check"
             echo "windows_build=$windows_build"
             echo "other_builds=$other_builds"
+            echo "bundle=$bundle"
           } | tee -a "$GITHUB_OUTPUT"
 
   check-linux:
@@ -200,6 +208,105 @@ jobs:
         with:
           name: brewery-daemon-${{ matrix.os }}
           path: brewery-daemon/build/libs/brewery-daemon-all.jar
+          retention-days: 14
+
+  # The offline bundle (script/brewery/fetch_bundle_deps.py): pinned, checksum-verified
+  # downloads, a jlinked JRE (jlink only links for its own OS, hence the matrix), the
+  # jdtls launcher and the daemon jar. Then a smoke test of the daemon and jdtls on the
+  # bundled pieces; on Linux inside a network namespace, so nothing can be downloaded.
+  bundle:
+    name: Bundle (${{ matrix.target }})
+    needs: changes
+    if: needs.changes.outputs.bundle == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: windows-x64
+          - os: ubuntu-24.04
+            target: linux-x64
+          - os: macos-15
+            target: macos-aarch64
+            unsupported: true
+    continue-on-error: ${{ matrix.unsupported == true }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUNDLE: target/bundle/${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      # The launcher and real-jlink tests use the setup-java JDK (it has jmods).
+      - name: Test the bundle scripts
+        env:
+          BREWERY_TEST_JDK: ${{ env.JAVA_HOME }}
+        run: python -m unittest discover -v script/brewery
+      - name: Build the daemon jar
+        working-directory: brewery-daemon
+        run: ./gradlew -Pversion="$(cat ../crates/zed/BREWERY_VERSION)" shadowJar --no-daemon
+      # Content-addressed by the pins; like the other caches, saved from main and tags only.
+      - name: Restore the download cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/brewery-bundle
+          key: brewery-bundle-${{ matrix.target }}-${{ hashFiles('script/brewery/bundle-deps.toml') }}
+      - name: Fetch and lay out the bundle
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          python script/brewery/fetch_bundle_deps.py --os "${TARGET%-*}" --arch "${TARGET#*-}" \
+            --daemon-jar brewery-daemon/build/libs/brewery-daemon-all.jar
+      - name: Save the download cache
+        if: env.SAVE_CACHE == 'true' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/brewery-bundle
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Sizes
+        run: |
+          {
+            echo "### Bundle ${{ matrix.target }}"
+            echo '```'
+            du -sh "$BUNDLE"/*
+            du -sh "$BUNDLE"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      # Hosted Ubuntu blocks unprivileged user namespaces (AppArmor), so fall back to a root
+      # network namespace and drop back to the runner user inside it.
+      - name: Offline smoke (daemon and jdtls, no network)
+        if: runner.os == 'Linux'
+        run: |
+          if unshare -Un --map-current-user true 2>/dev/null; then
+            unshare -Un --map-current-user python script/brewery/smoke_bundle.py "$BUNDLE" --require-offline
+          else
+            sudo unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- env "HOME=$3" "PATH=$4" python script/brewery/smoke_bundle.py "$5" --require-offline' \
+              smoke "$(id -u)" "$(id -g)" "$HOME" "$PATH" "$BUNDLE"
+          fi
+      - name: Smoke (daemon and jdtls)
+        if: runner.os != 'Linux'
+        run: python script/brewery/smoke_bundle.py "$BUNDLE"
+      # A tarball keeps the executable bits that upload-artifact's zip would drop.
+      - name: Pack
+        if: runner.os != 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: tar -C target/bundle -czf "target/bundle-$TARGET.tar.gz" "$TARGET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          path: ${{ runner.os == 'Windows' && env.BUNDLE || format('target/bundle-{0}.tar.gz', matrix.target) }}
           retention-days: 14
 
   # Runs alongside the checks: the release-fast profile shares nothing with the test builds.

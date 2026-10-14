@@ -77,6 +77,65 @@ Windows, the parent of `libexec/` on Linux (`/opt/brewery/libexec/brewery-editor
 `Contents/Resources` in a macOS app. A bundled JRE is used for the daemon before
 `JAVA_HOME` and `PATH`.
 
+## Offline bundle
+
+Everything Java support needs, so a packaged Brewery works on a fresh machine without
+downloads. One target is laid out in `target/bundle/<os>-<arch>/`:
+
+    jre/                          jlinked Temurin 21 for the daemon and jdtls (keeps legal/)
+    jdtls/                        Eclipse JDT LS + brewery-jdtls (sh) or brewery-jdtls.cmd
+    lombok.jar  java-debug.jar  java-lsp-proxy[.exe]
+    extensions/java/              the Java extension, seeded into installed/ when absent
+    brewery-daemon/brewery-daemon.jar
+    licenses/                     one directory per component + README.txt index
+
+Build it on the target OS (jlink can't cross-link), with Python 3.11+ and a JDK 21 for
+the daemon:
+
+    cd brewery-daemon && ./gradlew -Pversion=$(cat ../crates/zed/BREWERY_VERSION) shadowJar && cd ..
+    python script/brewery/fetch_bundle_deps.py --daemon-jar brewery-daemon/build/libs/brewery-daemon-all.jar
+    python script/brewery/smoke_bundle.py target/bundle/<os>-<arch>
+    python -m unittest discover script/brewery
+
+Downloads are cached in `~/.cache/brewery-bundle` (`--cache`) and checked against their
+SHA-256 before anything is unpacked; a mismatch fails the build and leaves the previous
+bundle in place. `smoke_bundle.py` starts the daemon on the bundled JRE and jdtls the
+way the Java extension does (proxy, launcher, Lombok agent, java-debug) against a copy
+of the maven-multi fixture. CI's `bundle` job does the same for Windows, Linux (inside a
+network namespace, `--require-offline`) and macOS (allowed to fail), and uploads
+`bundle-<os>-<arch>` artifacts. It runs on tags, manual runs and changes to
+`script/brewery/`.
+
+Bumping a pin in `script/brewery/bundle-deps.toml`: change `version` and `url`,
+download the file, `sha256sum` it, compare with the checksum the publisher lists
+(Adoptium API, Eclipse `.sha256`, GitHub release asset digest) and set `sha256`. Keep
+jdtls, Lombok, java-debug and java-lsp-proxy at what the pinned Java extension version
+downloads itself (its `src/jdtls.rs`, `debugger.rs`, `proxy.rs`). If a licence changes,
+update the matching file in `script/brewery/licenses/` (the upstream LICENSE at the new
+tag). The JDK entry also names its GPLv2 corresponding source (`source_code`,
+`source_tag`), which ends up in `licenses/jre/SOURCE.txt`.
+
+At startup `brewery_bundle::java_setup` points the extension at the bundle through the
+default settings (user settings still win): `jdtls_launcher`, `lombok_jar`,
+`java_debug_jar`, `lsp_proxy_path`, `jdk_auto_download = false`, `check_updates =
+"once"`. On Windows the launcher and Lombok paths are given in 8.3 form when they
+contain spaces, because java-lsp-proxy runs batch files through `cmd /C`, which breaks
+on a quoted launcher path followed by another quoted argument. Things to know:
+
+- `java_home` is not set when the launcher is bundled: the launcher runs jdtls on
+  `jre/` itself, and `java_home` would only hand the stripped JRE to jdtls as
+  `JAVA_HOME`, the default project runtime. Projects that need a particular JDK set
+  `lsp.jdtls.initialization_options.settings.java.configuration.runtimes`.
+- In launcher mode the extension ignores `min_memory` and `max_memory`; the launcher
+  starts jdtls with `-Xms1G` and the JVM's default maximum heap. To change that, point
+  `jdtls_launcher` at your own script that calls the bundled one with
+  `--jvm-arg=-Xmx4G` (later JVM options win).
+- jdtls writes its configuration and workspaces to the user cache
+  (`%LOCALAPPDATA%\Brewery\jdtls`, `~/Library/Caches/Brewery/jdtls`,
+  `~/.cache/brewery/jdtls`; `BREWERY_JDTLS_CACHE_DIR` overrides), never into the bundle.
+- The Gradle language server is not bundled: editing Gradle build files downloads it
+  on first use.
+
 ## Updates
 
 Brewery checks `https://github.com/hteariH/brewery/releases/latest/download/latest.json`
