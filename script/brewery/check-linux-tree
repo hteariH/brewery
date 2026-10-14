@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Asserts a Brewery Linux tree: the unpacked tarball (`brewery/`) or, with --installed,
+# /opt/brewery as a deb/rpm/AUR package installs it, plus the files the package adds
+# under /usr. Runs the CLI and the bundled Java, so it needs a Linux x86_64 host (or
+# container); no network, no display.
+#
+#   script/brewery/check-linux-tree <root> [--version 0.1.0] [--installed]
+# shellcheck disable=SC2016 # $ORIGIN and the envsubst variable lists are meant literally
+set -euo pipefail
+
+usage() {
+    sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+root=""
+version=""
+installed=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) usage; exit 0 ;;
+        --version) version=$2; shift 2 ;;
+        --installed) installed=true; shift ;;
+        -*) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+        *)
+            if [[ -n "$root" ]]; then echo "Unexpected argument: $1" >&2; exit 2; fi
+            root=$1; shift ;;
+    esac
+done
+if [[ -z "$root" ]]; then usage >&2; exit 2; fi
+if [[ ! -d "$root" ]]; then echo "FAIL: $root is not a directory" >&2; exit 1; fi
+root=$(cd "$root" && pwd -P)
+
+failures=0
+fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
+ok() { echo "ok:   $*"; }
+
+need_file() { if [[ -f "$root/$1" ]]; then ok "$1"; else fail "missing file $1"; fi; }
+need_exec() { if [[ -f "$root/$1" && -x "$root/$1" ]]; then ok "$1 (executable)"; else fail "missing or not executable: $1"; fi; }
+need_dir() { if [[ -d "$root/$1" ]] && [[ -n "$(ls -A "$root/$1")" ]]; then ok "$1/"; else fail "missing or empty directory $1/"; fi; }
+
+need_exec bin/brewery
+need_exec libexec/brewery-editor
+need_dir lib
+need_exec jre/bin/java
+need_file brewery-daemon/brewery-daemon.jar
+need_exec jdtls/brewery-jdtls
+need_exec jdtls/tools/java-lsp-proxy
+need_file jdtls/tools/lombok.jar
+need_file jdtls/tools/java-debug.jar
+need_file extensions/java/extension.toml
+need_file extensions/java/extension.wasm
+need_file share/icons/hicolor/512x512/apps/brewery.png
+need_file share/icons/hicolor/1024x1024/apps/brewery.png
+for licence in README.txt brewery/LICENSE-GPL brewery/LICENSE-APACHE brewery-daemon/LICENSE \
+    brewery-daemon/THIRD-PARTY-NOTICES.txt intellij-icons/NOTICE jre/LICENSE jre/SOURCE.txt \
+    jdtls/LICENSE lombok/LICENSE java-debug/LICENSE java-extension/LICENSE java-lsp-proxy/LICENSE; do
+    need_file "licenses/$licence"
+done
+
+# The desktop file is named after ReleaseChannel::app_id(), or the window won't match it.
+shopt -s nullglob
+desktops=("$root"/share/applications/io.github.htearih.Brewery*.desktop)
+shopt -u nullglob
+desktop=""
+if [[ ${#desktops[@]} -ne 1 ]]; then
+    fail "expected one share/applications/io.github.htearih.Brewery*.desktop, found ${#desktops[@]}"
+else
+    desktop=${desktops[0]}
+    ok "share/applications/${desktop##*/}"
+    for line in '^Name=Brewery' '^GenericName=Java IDE$' '^Keywords=java;spring;ide;$' \
+        '^Exec=brewery %U$' '^TryExec=brewery$' '^Icon=brewery$' '^Type=Application$'; do
+        if grep -q "$line" "$desktop"; then ok "desktop $line"; else fail "desktop file lacks $line"; fi
+    done
+    if grep -qi 'zed' "$desktop"; then fail "desktop file mentions zed: $(grep -i zed "$desktop")"; fi
+    if grep -q '\$' "$desktop"; then fail "desktop file has unexpanded variables"; fi
+fi
+
+if [[ -f "$root/libexec/brewery-editor" ]] && command -v readelf >/dev/null 2>&1; then
+    if readelf -d "$root/libexec/brewery-editor" | grep -E '\((RPATH|RUNPATH)\)' | grep -qF '$ORIGIN/../lib'; then
+        ok 'libexec/brewery-editor rpath $ORIGIN/../lib'
+    else
+        fail 'libexec/brewery-editor has no rpath $ORIGIN/../lib'
+    fi
+fi
+# Every library the app links must resolve, from lib/ or from the system (the package depends).
+if [[ -f "$root/libexec/brewery-editor" ]] && command -v ldd >/dev/null 2>&1; then
+    missing=$(ldd "$root/libexec/brewery-editor" 2>&1 | grep 'not found' || true)
+    if [[ -n "$missing" ]]; then fail "unresolved libraries: $missing"; else ok "ldd libexec/brewery-editor"; fi
+fi
+
+# The CLI finds the app through ../libexec/brewery-editor, and prints its path.
+expected_app="$root/libexec/brewery-editor"
+check_version() {
+    local cli=$1 out
+    if ! out=$("$cli" --version 2>&1); then
+        fail "$cli --version failed: $out"
+        return
+    fi
+    echo "      $cli --version: $out"
+    local before=$failures
+    if [[ "$out" != Brewery\ * ]]; then fail "$cli --version does not start with Brewery"; fi
+    if [[ -n "$version" && "$out" != *" $version"* ]]; then fail "$cli --version lacks $version"; fi
+    if [[ "$out" != *"$expected_app" ]]; then fail "$cli --version does not end in $expected_app"; fi
+    if [[ $failures -eq $before ]]; then ok "$cli --version"; fi
+}
+check_version "$root/bin/brewery"
+
+if out=$("$root/jre/bin/java" -version 2>&1); then
+    ok "jre/bin/java -version: $(head -n1 <<<"$out")"
+else
+    fail "jre/bin/java -version failed: $out"
+fi
+
+if "$installed"; then
+    if [[ -L /usr/bin/brewery && "$(readlink -f /usr/bin/brewery)" == "$root/bin/brewery" ]]; then
+        ok "/usr/bin/brewery -> $root/bin/brewery"
+    else
+        fail "/usr/bin/brewery is not a symlink to $root/bin/brewery"
+    fi
+    if command -v brewery >/dev/null 2>&1; then
+        check_version brewery
+    else
+        fail "brewery is not on PATH"
+    fi
+    if [[ -n "$desktop" ]]; then
+        if cmp -s "$desktop" "/usr/share/applications/${desktop##*/}"; then
+            ok "/usr/share/applications/${desktop##*/}"
+        else
+            fail "/usr/share/applications/${desktop##*/} missing or differs"
+        fi
+    fi
+    for size in 512x512 1024x1024; do
+        icon=/usr/share/icons/hicolor/$size/apps/brewery.png
+        if [[ -f "$icon" ]]; then ok "$icon"; else fail "missing $icon"; fi
+    done
+    if [[ -f /usr/share/doc/brewery/copyright || -f /usr/share/licenses/brewery/LICENSE-GPL || -f /usr/share/licenses/brewery-bin/LICENSE-GPL ]]; then
+        ok "package licence file"
+    else
+        fail "no /usr/share/doc/brewery/copyright or /usr/share/licenses/brewery*/LICENSE-GPL"
+    fi
+fi
+
+if [[ $failures -gt 0 ]]; then
+    echo "$failures check(s) failed for $root" >&2
+    exit 1
+fi
+echo "all checks passed for $root"

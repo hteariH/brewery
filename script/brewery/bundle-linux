@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# Packages a Linux build of Brewery: brewery-<ver>-linux-x86_64.tar.gz with one
+# `brewery/` root laid out as /opt/brewery, and optionally the deb and rpm (nFPM,
+# packaging/nfpm.yaml). Brewery's copy of Zed's script/bundle-linux: it packages
+# binaries built elsewhere (CI's release-fast build) instead of building them, and has
+# no flatpak, remote server or Sentry upload.
+#
+#   script/brewery/bundle-linux --app <brewery> --cli <cli> --bundle <bundle dir>
+#       [--version <ver>] [--channel <channel>] [--licenses-md <licenses.md>]
+#       [--out <dir>] [--deb] [--rpm] [--nfpm <nfpm binary>]
+#
+#   --app          the app binary (cargo's target/<profile>/brewery)
+#   --cli          the CLI binary (cargo's target/<profile>/cli)
+#   --bundle       the offline bundle, script/brewery/fetch_bundle_deps.py's
+#                  target/bundle/linux-x64 (jre/, brewery-daemon/, jdtls/, extensions/, licenses/)
+#   --version      default: crates/zed/BREWERY_VERSION
+#   --channel      default: crates/zed/RELEASE_CHANNEL (must match the build's)
+#   --licenses-md  Zed's generated licences of the Rust dependencies (script/generate-licenses)
+#   --out          default: target/release
+#   --deb, --rpm   also build brewery_<ver>_amd64.deb / brewery-<ver>-1.x86_64.rpm
+#   --nfpm         default: nfpm on PATH (script/brewery/install-nfpm fetches the pinned one)
+#
+# Needs: bash, tar, gzip, ldd, readelf, patchelf (when the app lacks the $ORIGIN/../lib
+# rpath), llvm-objcopy or objcopy, envsubst. Runs from the repository root. The tree is
+# checked with script/brewery/check-linux-tree before it is packed.
+# shellcheck disable=SC2016 # $ORIGIN and the envsubst variable lists are meant literally
+set -euo pipefail
+
+usage() {
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+app="" cli="" bundle="" version="" channel="" licenses_md="" out="target/release" nfpm=""
+want_deb=false want_rpm=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) usage; exit 0 ;;
+        --app) app=$2; shift 2 ;;
+        --cli) cli=$2; shift 2 ;;
+        --bundle) bundle=$2; shift 2 ;;
+        --version) version=$2; shift 2 ;;
+        --channel) channel=$2; shift 2 ;;
+        --licenses-md) licenses_md=$2; shift 2 ;;
+        --out) out=$2; shift 2 ;;
+        --deb) want_deb=true; shift ;;
+        --rpm) want_rpm=true; shift ;;
+        --nfpm) nfpm=$2; shift 2 ;;
+        *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+die() { echo "bundle-linux: $*" >&2; exit 1; }
+
+[[ -f crates/zed/resources/brewery.desktop.in ]] || die "run from the repository root"
+[[ -n "$app" && -n "$cli" && -n "$bundle" ]] || { usage >&2; exit 2; }
+for bin in "$app" "$cli"; do
+    [[ -f "$bin" ]] || die "$bin not found"
+    [[ "$(head -c 4 "$bin" | od -An -c | tr -d ' ')" == '177ELF' ]] || die "$bin is not an ELF binary"
+done
+for path in jre/bin/java brewery-daemon/brewery-daemon.jar jdtls/brewery-jdtls extensions/java/extension.toml licenses/README.txt; do
+    [[ -e "$bundle/$path" ]] || die "$bundle is not a Linux offline bundle (no $path)"
+done
+if [[ -n "$licenses_md" && ! -f "$licenses_md" ]]; then die "$licenses_md not found"; fi
+
+version=${version:-$(tr -d '[:space:]' < crates/zed/BREWERY_VERSION)}
+channel=${channel:-$(tr -d '[:space:]' < crates/zed/RELEASE_CHANNEL)}
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+~-][0-9A-Za-z.]+)?$ ]] || die "bad version $version"
+arch=$(uname -m)
+[[ "$arch" == x86_64 ]] || die "only x86_64 is packaged (host is $arch)"
+
+# Names follow ReleaseChannel::app_id() (crates/release_channel), or windows won't match
+# the desktop file.
+case $channel in
+    stable) APP_NAME="Brewery"; APP_ID="io.github.htearih.Brewery"; suffix="" ;;
+    preview) APP_NAME="Brewery Preview"; APP_ID="io.github.htearih.Brewery-Preview"; suffix="-preview" ;;
+    nightly) APP_NAME="Brewery Nightly"; APP_ID="io.github.htearih.Brewery-Nightly"; suffix="-nightly" ;;
+    dev) APP_NAME="Brewery Dev"; APP_ID="io.github.htearih.Brewery-Dev"; suffix="-dev" ;;
+    *) die "unknown channel $channel" ;;
+esac
+
+objcopy=${OBJCOPY:-$(command -v llvm-objcopy || command -v objcopy || true)}
+[[ -n "$objcopy" ]] || die "needs llvm-objcopy or objcopy (set OBJCOPY)"
+for tool in ldd readelf envsubst tar; do
+    command -v "$tool" >/dev/null || die "needs $tool"
+done
+
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+temp_dir=$(mktemp -d)
+trap 'rm -rf "$temp_dir"' EXIT
+tree="$temp_dir/brewery"
+mkdir -p "$tree/bin" "$tree/libexec" "$tree/lib"
+
+# Binaries, stripped as Zed's script does.
+"$objcopy" --strip-unneeded "$app" "$tree/libexec/brewery-editor"
+"$objcopy" --strip-debug --discard-all "$cli" "$tree/bin/brewery"
+chmod 755 "$tree/libexec/brewery-editor" "$tree/bin/brewery"
+
+# The app finds lib/ through an rpath. bundle-config.toml links it in; CI's release-fast
+# build doesn't, so set it here. DT_RPATH (not RUNPATH) also covers the bundled libraries'
+# own dependencies.
+if ! readelf -d "$tree/libexec/brewery-editor" | grep -E '\((RPATH|RUNPATH)\)' | grep -qF '$ORIGIN/../lib'; then
+    command -v patchelf >/dev/null || die "the app has no \$ORIGIN/../lib rpath and patchelf is missing"
+    patchelf --force-rpath --set-rpath '$ORIGIN/../lib' "$tree/libexec/brewery-editor"
+fi
+
+# Libs, as Zed's find_libs: bundle libstdc++ and the like so older systems run the
+# binary, but never glibc, ALSA or the GLib family (host libraries dlopen'd at runtime are
+# built against the system GLib). What is left out is a package dependency (nfpm.yaml).
+find_libs() {
+    ldd "$1" |
+        awk '$2 == "=>" && $3 ~ /^\// { print $3 }' |
+        grep -v '\<\(libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' |
+        grep -v '\<\(libglib-2.0.so\|libgobject-2.0.so\|libgio-2.0.so\|libgmodule-2.0.so\|libpcre.so\|libpcre2-8.so\|libmount.so\|libblkid.so\|libselinux.so\|libffi.so\|libresolv.so\|libz.so\)' || true
+}
+libs=$(find_libs "$app")
+if [[ -n "$libs" ]]; then
+    # shellcheck disable=SC2086 # one path per line, no spaces in library paths
+    cp -L $libs "$tree/lib/"
+    chmod 644 "$tree"/lib/*
+fi
+
+# The offline bundle: Java runtime, daemon, jdtls (+ tools), the Java extension.
+for dir in jre brewery-daemon jdtls extensions; do
+    cp -a "$bundle/$dir" "$tree/$dir"
+done
+
+# Icons
+mkdir -p "$tree/share/icons/hicolor/512x512/apps" "$tree/share/icons/hicolor/1024x1024/apps"
+cp "crates/zed/resources/app-icon$suffix.png" "$tree/share/icons/hicolor/512x512/apps/brewery.png"
+cp "crates/zed/resources/app-icon$suffix@2x.png" "$tree/share/icons/hicolor/1024x1024/apps/brewery.png"
+chmod 644 "$tree"/share/icons/hicolor/*/apps/brewery.png
+
+# .desktop
+export APP_NAME APP_ID
+export APP_CLI="brewery" APP_ICON="brewery" APP_ARGS="%U" DO_STARTUP_NOTIFY="true"
+mkdir -p "$tree/share/applications"
+envsubst '$APP_NAME $APP_CLI $APP_ICON $APP_ARGS $DO_STARTUP_NOTIFY' \
+    < crates/zed/resources/brewery.desktop.in > "$tree/share/applications/$APP_ID.desktop"
+chmod 644 "$tree/share/applications/$APP_ID.desktop"
+
+# Licences: Brewery's and Zed's, then every bundled component's (the bundle's licenses/).
+lic="$tree/licenses"
+cp -a "$bundle/licenses" "$lic"
+mkdir -p "$lic/brewery" "$lic/intellij-icons"
+cp LICENSE-GPL LICENSE-APACHE "$lic/brewery/"
+cp brewery-daemon/LICENSE "$lic/brewery-daemon/LICENSE"
+cp crates/brewery_theme/icons/NOTICE "$lic/intellij-icons/NOTICE"
+if [[ -n "$licenses_md" ]]; then
+    cp "$licenses_md" "$lic/brewery/licenses.md"
+fi
+{
+    echo "Brewery $version"
+    echo "  License: GPL-3.0-or-later. Brewery is a fork of the Zed editor"
+    echo "  (https://github.com/zed-industries/zed); Zed's code is GPL-3.0-or-later,"
+    echo "  its GPUI framework Apache-2.0: licenses/brewery/LICENSE-GPL, LICENSE-APACHE."
+    if [[ -n "$licenses_md" ]]; then
+        echo "  Rust dependencies, themes and icons: licenses/brewery/licenses.md"
+    fi
+    echo "  Source:  https://github.com/hteariH/brewery"
+    echo ""
+    echo "brewery-daemon $version"
+    echo "  License: Apache-2.0: licenses/brewery-daemon/LICENSE"
+    echo ""
+    echo "IntelliJ Platform icons (brewery_theme)"
+    echo "  License: Apache-2.0, NOTICE: licenses/intellij-icons/NOTICE"
+    echo ""
+    cat "$bundle/licenses/README.txt"
+} > "$lic/README.txt"
+find "$lic" -type f -exec chmod 644 {} +
+
+script/brewery/check-linux-tree "$tree" --version "$version"
+
+archive="$out/brewery-$version-linux-$arch.tar.gz"
+rm -f "$archive"
+tar --owner=0 --group=0 --numeric-owner -C "$temp_dir" -czf "$archive" brewery
+echo "wrote $archive"
+
+if "$want_deb" || "$want_rpm"; then
+    nfpm=${nfpm:-$(command -v nfpm || true)}
+    [[ -n "$nfpm" && -x "$nfpm" ]] || die "needs nfpm (--nfpm, or script/brewery/install-nfpm)"
+    pkg_dir="$temp_dir/pkg"
+    mkdir -p "$pkg_dir"
+    cat > "$pkg_dir/copyright" <<EOF
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Brewery
+Upstream-Contact: https://github.com/hteariH/brewery/issues
+Source: https://github.com/hteariH/brewery
+
+Files: *
+Copyright: Brewery contributors
+           Zed Industries, Inc. and Zed contributors
+License: GPL-3.0-or-later
+Comment: Brewery is a fork of the Zed editor. The packaged Java runtime, Eclipse
+ JDT LS, Lombok, java-debug, the Java extension and the daemon's dependencies keep
+ their own licences, indexed in /opt/brewery/licenses/README.txt with the texts
+ next to it.
+
+License: GPL-3.0-or-later
+ This program is free software: you can redistribute it and/or modify it under
+ the terms of the GNU General Public License as published by the Free Software
+ Foundation, either version 3 of the License, or (at your option) any later
+ version.
+ .
+ On Debian systems, the complete text of the GNU General Public License version 3
+ can be found in /usr/share/common-licenses/GPL-3, and in
+ /opt/brewery/licenses/brewery/LICENSE-GPL.
+EOF
+    # The newest GLIBC_x.y symbol version either binary needs is the libc floor.
+    glibc=$(readelf --dyn-syms -W "$tree/libexec/brewery-editor" "$tree/bin/brewery" |
+        grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)
+    [[ -n "$glibc" ]] || die "no GLIBC symbol versions in the binaries"
+    export BREWERY_VERSION="$version" BREWERY_TREE="$tree" BREWERY_PKG_DIR="$pkg_dir" \
+        BREWERY_APP_ID="$APP_ID" BREWERY_GLIBC="$glibc"
+    envsubst '$BREWERY_VERSION $BREWERY_TREE $BREWERY_PKG_DIR $BREWERY_APP_ID $BREWERY_GLIBC' \
+        < packaging/nfpm.yaml > "$pkg_dir/nfpm.yaml"
+    echo "nfpm: version $version, glibc >= $glibc"
+    if "$want_deb"; then
+        "$nfpm" package --config "$pkg_dir/nfpm.yaml" --packager deb --target "$out/brewery_${version}_amd64.deb"
+    fi
+    if "$want_rpm"; then
+        "$nfpm" package --config "$pkg_dir/nfpm.yaml" --packager rpm --target "$out/brewery-${version}-1.x86_64.rpm"
+    fi
+fi

@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Installs a Brewery deb or rpm in a throwaway container (as root), checks the installed
+# tree with check-linux-tree --installed, validates the desktop file, then removes the
+# package and checks that nothing is left behind. Uses apt (deb) or dnf (rpm) and their
+# repositories for the dependencies.
+#
+#   docker run --rm -v "$PWD:/src:ro" -v "$PWD/target/release:/pkg:ro" -w /src ubuntu:24.04 \
+#       script/brewery/smoke-linux-package /pkg/brewery_0.1.0_amd64.deb [--version 0.1.0]
+#   (fedora:41 with /pkg/brewery-0.1.0-1.x86_64.rpm)
+set -euo pipefail
+
+pkg="" version=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --version) version=$2; shift 2 ;;
+        -*) echo "Unknown option: $1" >&2; exit 2 ;;
+        *) pkg=$1; shift ;;
+    esac
+done
+[[ -f "$pkg" ]] || { echo "usage: $0 <package.deb|package.rpm> [--version V]" >&2; exit 2; }
+[[ "$(id -u)" == 0 ]] || { echo "run as root (in a container)" >&2; exit 2; }
+here=$(cd "$(dirname "$0")" && pwd)
+pkg=$(cd "$(dirname "$pkg")" && pwd)/$(basename "$pkg")
+
+case $pkg in
+    *.deb)
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends desktop-file-utils >/dev/null
+        apt-get install -y --no-install-recommends "$pkg"
+        remove() { apt-get remove -y --purge brewery; }
+        ;;
+    *.rpm)
+        dnf install -y -q desktop-file-utils
+        dnf install -y "$pkg"
+        remove() { dnf remove -y brewery; }
+        ;;
+    *) echo "not a .deb or .rpm: $pkg" >&2; exit 2 ;;
+esac
+
+args=(/opt/brewery --installed)
+if [[ -n "$version" ]]; then args+=(--version "$version"); fi
+"$here/check-linux-tree" "${args[@]}"
+
+for desktop in /usr/share/applications/io.github.htearih.Brewery*.desktop; do
+    desktop-file-validate "$desktop"
+    echo "ok:   desktop-file-validate $desktop"
+done
+
+remove
+leftovers=()
+for path in /opt/brewery /usr/bin/brewery /usr/share/icons/hicolor/512x512/apps/brewery.png \
+    /usr/share/doc/brewery /usr/share/licenses/brewery; do
+    if [[ -e "$path" || -L "$path" ]]; then leftovers+=("$path"); fi
+done
+shopt -s nullglob
+for desktop in /usr/share/applications/io.github.htearih.Brewery*.desktop; do leftovers+=("$desktop"); done
+if [[ ${#leftovers[@]} -gt 0 ]]; then
+    echo "FAIL: left after removing the package: ${leftovers[*]}" >&2
+    exit 1
+fi
+echo "ok:   removed cleanly"
+echo "smoke passed for $(basename "$pkg")"

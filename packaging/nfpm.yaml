@@ -1,0 +1,96 @@
+# deb and rpm for Brewery, built by script/brewery/bundle-linux (--deb/--rpm): it renders
+# this file with envsubst (nFPM doesn't expand variables in contents) and runs nFPM from
+# the repository root. BREWERY_TREE is the tarball's brewery/ tree, BREWERY_GLIBC the
+# newest glibc symbol version the binaries need.
+#
+# Runtime depends are what the tarball doesn't carry: bundle-linux's find_libs leaves out
+# glibc, libgcc, ALSA, GLib and zlib, and the app dlopens the Vulkan loader, Wayland and
+# xkbcommon/xcb. rpm names sonames so it resolves on Fedora and openSUSE alike; deb lists
+# the Ubuntu 24.04 (t64) names with the pre-t64 ones as alternatives.
+name: brewery
+arch: amd64
+platform: linux
+version: ${BREWERY_VERSION}
+release: "1"
+section: devel
+priority: optional
+maintainer: Brewery contributors <https://github.com/hteariH/brewery/issues>
+description: |-
+  Open-source IDE for Java and Spring, built on the Zed editor.
+  Brewery bundles a Java runtime, Eclipse JDT LS and its own analysis daemon,
+  so Java support works without downloads.
+vendor: Brewery contributors
+homepage: https://github.com/hteariH/brewery
+license: GPL-3.0-or-later
+
+contents:
+  - src: ${BREWERY_TREE}
+    dst: /opt/brewery
+    type: tree
+  - src: /opt/brewery/bin/brewery
+    dst: /usr/bin/brewery
+    type: symlink
+  - src: ${BREWERY_TREE}/share/applications/${BREWERY_APP_ID}.desktop
+    dst: /usr/share/applications/${BREWERY_APP_ID}.desktop
+    file_info:
+      mode: 0644
+  - src: ${BREWERY_TREE}/share/icons/hicolor/512x512/apps/brewery.png
+    dst: /usr/share/icons/hicolor/512x512/apps/brewery.png
+    file_info:
+      mode: 0644
+  - src: ${BREWERY_TREE}/share/icons/hicolor/1024x1024/apps/brewery.png
+    dst: /usr/share/icons/hicolor/1024x1024/apps/brewery.png
+    file_info:
+      mode: 0644
+  # Debian wants /usr/share/doc/<package>/copyright; rpm marks its licences %license.
+  - src: ${BREWERY_PKG_DIR}/copyright
+    dst: /usr/share/doc/brewery/copyright
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: ${BREWERY_TREE}/licenses/brewery/LICENSE-GPL
+    dst: /usr/share/licenses/brewery/LICENSE-GPL
+    type: license
+    packager: rpm
+  - src: ${BREWERY_TREE}/licenses/README.txt
+    dst: /usr/share/licenses/brewery/README.txt
+    type: license
+    packager: rpm
+
+scripts:
+  postinstall: packaging/linux/postinstall.sh
+  postremove: packaging/linux/postremove.sh
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= ${BREWERY_GLIBC})
+      - libgcc-s1
+      - zlib1g
+      - libglib2.0-0t64 | libglib2.0-0
+      - libasound2t64 | libasound2
+      - libvulkan1
+      - libwayland-client0
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libx11-xcb1
+    recommends:
+      - git
+  rpm:
+    depends:
+      - libc.so.6(GLIBC_${BREWERY_GLIBC})(64bit)
+      - libgcc_s.so.1()(64bit)
+      - libz.so.1()(64bit)
+      - libglib-2.0.so.0()(64bit)
+      - libasound.so.2()(64bit)
+      - libvulkan.so.1()(64bit)
+      - libwayland-client.so.0()(64bit)
+      - libxkbcommon.so.0()(64bit)
+      - libxkbcommon-x11.so.0()(64bit)
+      - libX11-xcb.so.1()(64bit)
+    recommends:
+      - git
+
+rpm:
+  group: Development/Tools
+  summary: Open-source IDE for Java and Spring

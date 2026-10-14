@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Downloads the pinned nFPM (https://nfpm.goreleaser.com, MIT; a build tool, not shipped)
+# into <dir>/nfpm, refusing it unless the SHA-256 matches the pin.
+#
+#   script/brewery/install-nfpm <dir>
+#
+# Bumping: take a release at least two weeks old, read the SHA-256 of
+# nfpm_<ver>_Linux_x86_64.tar.gz from its checksums.txt and from the GitHub asset digest
+# (`gh api repos/goreleaser/nfpm/releases/tags/v<ver>`), and set both lines below.
+set -euo pipefail
+
+NFPM_VERSION="2.47.0"
+NFPM_SHA256="0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783"
+
+if [[ $# -ne 1 ]]; then
+    sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+fi
+if [[ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]]; then
+    echo "install-nfpm: only Linux x86_64 is pinned" >&2
+    exit 1
+fi
+
+dir=$1
+mkdir -p "$dir"
+if [[ -x "$dir/nfpm" ]] && "$dir/nfpm" --version 2>/dev/null | grep -q "$NFPM_VERSION"; then
+    echo "nfpm $NFPM_VERSION already in $dir"
+    exit 0
+fi
+
+archive="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+url="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/${archive}"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+curl -fsSL --retry 3 -o "$scratch/$archive" "$url"
+echo "$NFPM_SHA256  $scratch/$archive" | sha256sum -c --quiet - || {
+    echo "install-nfpm: SHA-256 mismatch for $url" >&2
+    exit 1
+}
+tar -xzf "$scratch/$archive" -C "$scratch" nfpm
+install -m 755 "$scratch/nfpm" "$dir/nfpm"
+"$dir/nfpm" --version | grep GitVersion

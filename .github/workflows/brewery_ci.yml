@@ -16,9 +16,10 @@ on:
         type: boolean
         default: false
 
-# A newer push to a branch cancels the run it supersedes; main and tags always finish.
+# A newer push to a branch cancels the run it supersedes; main, tags and manual runs always
+# finish (each manual run is its own group, so a push doesn't cancel it).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'push' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
@@ -463,4 +464,66 @@ jobs:
           path: |
             target/release-fast/brewery
             target/release-fast/cli
+          retention-days: 14
+
+  # The Linux tarball, deb and rpm from the Linux build and bundle (script/brewery/bundle-linux),
+  # each package installed and removed in a clean container (script/brewery/smoke-linux-package).
+  package-linux:
+    name: Package (linux-x64)
+    needs: [changes, build-other, bundle]
+    if: needs.changes.outputs.other_builds == 'true' && needs.changes.outputs.bundle == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: brewery-ubuntu-24.04
+          path: target/linux-build
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle-linux-x64
+          path: target
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq patchelf gettext-base
+          script/brewery/install-nfpm "$RUNNER_TEMP/nfpm"
+      # Zed's licences of the Rust dependencies (cargo-about), as Zed's own bundle script does.
+      - name: Generate the Rust dependency licences
+        run: script/generate-licenses "$RUNNER_TEMP/licenses.md"
+      - name: Package
+        run: |
+          mkdir -p target/bundle
+          tar -xzf target/bundle-linux-x64.tar.gz -C target/bundle
+          script/brewery/bundle-linux --app target/linux-build/brewery --cli target/linux-build/cli \
+            --bundle target/bundle/linux-x64 --licenses-md "$RUNNER_TEMP/licenses.md" \
+            --out target/package --deb --rpm --nfpm "$RUNNER_TEMP/nfpm/nfpm"
+      - name: Contents
+        run: |
+          version=$(cat crates/zed/BREWERY_VERSION)
+          dpkg-deb -I "target/package/brewery_${version}_amd64.deb"
+          {
+            echo "### Linux packages"
+            echo '```'
+            ls -l target/package
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Smoke deb (ubuntu:24.04)
+        run: |
+          version=$(cat crates/zed/BREWERY_VERSION)
+          docker run --rm -v "$PWD:/src:ro" -w /src ubuntu:24.04 \
+            script/brewery/smoke-linux-package "target/package/brewery_${version}_amd64.deb" --version "$version"
+      - name: Smoke rpm (fedora:41)
+        run: |
+          version=$(cat crates/zed/BREWERY_VERSION)
+          docker run --rm -v "$PWD:/src:ro" -w /src fedora:41 \
+            script/brewery/smoke-linux-package "target/package/brewery-${version}-1.x86_64.rpm" --version "$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-linux-x64
+          path: |
+            target/package/*.tar.gz
+            target/package/*.deb
+            target/package/*.rpm
           retention-days: 14
