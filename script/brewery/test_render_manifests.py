@@ -167,14 +167,14 @@ class CliTests(unittest.TestCase):
 
 
 class RealTemplateTests(unittest.TestCase):
+    # Windows checkouts may turn the templates into CRLF; render() reads them with universal
+    # newlines and CliTests checks that the rendered files are LF.
     def test_templates_have_the_required_fixed_values(self):
         root = Path(__file__).resolve().parents[2] / "packaging"
         installer = (root / "winget/Brewery.installer.yaml.in").read_text()
         for needle in ("InstallerType: inno", "Scope: user", "  - brewery"):
             self.assertIn(needle, installer)
         self.assertIn("License: GPL-3.0-or-later", (root / "winget/Brewery.locale.en-US.yaml.in").read_text())
-        for path in root.glob("**/*.in"):
-            self.assertNotIn(b"\r", path.read_bytes(), path.name)
 
 
 if __name__ == "__main__":
