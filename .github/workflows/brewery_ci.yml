@@ -337,8 +337,9 @@ jobs:
           shared-key: brewery-build
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
+      # The installer also needs the CLI (bin\brewery.exe) and the update helper.
       - name: Build
-        run: cargo build --locked --profile release-fast -p zed
+        run: cargo build --locked --profile release-fast -p zed -p cli -p auto_update_helper
       - name: Assert exe metadata
         shell: pwsh
         run: |
@@ -354,7 +355,67 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: brewery-windows-2025
-          path: target/release-fast/brewery.exe
+          path: |
+            target/release-fast/brewery.exe
+            target/release-fast/cli.exe
+            target/release-fast/auto_update_helper.exe
+          retention-days: 14
+
+  # The Windows installer (script/brewery/bundle-windows.ps1, Inno Setup) from the Windows build
+  # and bundle, then a silent per-user install, update-mode run, helper swap and uninstall
+  # (script/brewery/smoke-windows-installer.ps1) with the installer's default tasks.
+  package-windows:
+    name: Package (windows-x64)
+    needs: [changes, build-windows, bundle]
+    if: needs.changes.outputs.windows_build == 'true' && needs.changes.outputs.bundle == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: brewery-windows-2025
+          path: target/windows-build
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle-windows-x64
+          path: target/bundle/windows-x64
+      # windows-2025 ships Inno Setup 6 (not on PATH); bundle-windows.ps1 finds it there.
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup 6 not found at $iscc" }
+          (Get-Item $iscc).VersionInfo | Format-List FileVersion
+      # Zed's licences of the Rust dependencies (cargo-about), as Zed's own bundle script does.
+      - name: Generate the Rust dependency licences
+        shell: pwsh
+        run: script/generate-licenses.ps1 "$env:RUNNER_TEMP\licenses.md"
+      - name: Build the installer
+        id: installer
+        shell: pwsh
+        run: |
+          script/brewery/bundle-windows.ps1 -App target/windows-build/brewery.exe -Cli target/windows-build/cli.exe `
+            -Helper target/windows-build/auto_update_helper.exe -Bundle target/bundle/windows-x64 `
+            -RustLicenses "$env:RUNNER_TEMP\licenses.md" -Out target/installer -Iscc "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+      - name: Smoke (install, update mode, helper swap, uninstall)
+        shell: pwsh
+        env:
+          SETUP: ${{ steps.installer.outputs.setup }}
+        run: script/brewery/smoke-windows-installer.ps1 -Setup $env:SETUP
+      - name: Size
+        shell: pwsh
+        env:
+          SETUP: ${{ steps.installer.outputs.setup }}
+        run: |
+          $setup = Get-Item $env:SETUP
+          $line = '{0}  {1:N1} MB' -f $setup.Name, ($setup.Length / 1MB)
+          Write-Host $line
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value @('### Windows installer', '', $line)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-windows-x64
+          path: ${{ steps.installer.outputs.setup }}
           retention-days: 14
 
   # Linux and macOS release builds run on tags, or on a manual run with "all_platforms".
