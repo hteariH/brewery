@@ -290,8 +290,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           if unshare -Un --map-current-user true 2>/dev/null; then
+            echo "network namespace: unprivileged user namespace"
             unshare -Un --map-current-user python script/brewery/smoke_bundle.py "$BUNDLE" --require-offline
           else
+            echo "network namespace: sudo unshare --net + setpriv"
             sudo unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- env "HOME=$3" "PATH=$4" python script/brewery/smoke_bundle.py "$5" --require-offline' \
               smoke "$(id -u)" "$(id -g)" "$HOME" "$PATH" "$BUNDLE"
           fi

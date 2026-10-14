@@ -21,6 +21,7 @@ directory (the bundle) is byte-for-byte untouched afterwards. Exit 0 on success.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import queue
@@ -84,6 +85,8 @@ class Client:
         self.messages: queue.Queue = queue.Queue()
         self.next_id = 1
         self.statuses: list = []
+        # The server's last window/logMessage lines, shown when a check fails.
+        self.server_log: collections.deque = collections.deque(maxlen=40)
         threading.Thread(target=reader, args=(proc.stdout, self.messages), daemon=True).start()
 
     def send(self, msg: dict) -> None:
@@ -135,6 +138,8 @@ class Client:
             if "method" in msg and "id" in msg:
                 self.answer(msg)
                 continue
+            if msg.get("method") == "window/logMessage":
+                self.server_log.append(str(msg.get("params", {}).get("message", ""))[:500])
             if msg.get("method") == "language/status":
                 status = msg.get("params", {})
                 self.statuses.append(status.get("type"))
@@ -242,6 +247,15 @@ def run(args) -> None:
                     tail = stderr_path.read_bytes()[-4000:].decode("utf-8", "replace")
                     if tail.strip():
                         log(f"server stderr (tail):\n{tail}")
+                if failed:
+                    client = getattr(proc, "brewery_client", None)
+                    if client is not None and client.server_log:
+                        log("server log messages:\n" + "\n".join(client.server_log))
+                    # jdtls's own log, in its workspace under the cache dir.
+                    cache = Path(env["BREWERY_JDTLS_CACHE_DIR"])
+                    for jdtls_log in cache.glob("workspace/*/.metadata/.log"):
+                        text = jdtls_log.read_bytes()[-6000:].decode("utf-8", "replace")
+                        log(f"{jdtls_log} (tail):\n{text}")
                 if proc.stdin:
                     try:
                         proc.stdin.close()
@@ -261,6 +275,7 @@ def check(args, proc: subprocess.Popen, project: Path, started: float) -> None:
     root_uri = project.as_uri()
     folders = [{"uri": root_uri, "name": project.name}]
     client = Client(proc, root_uri, folders)
+    proc.brewery_client = client  # for the failure report in run()
     deadline = started + args.timeout
     init_options = {
         "workspaceFolders": [root_uri],
@@ -327,6 +342,7 @@ def check(args, proc: subprocess.Popen, project: Path, started: float) -> None:
         )
         # jdtls answers [] until the file's project is imported, which can take longer
         # than ServiceReady (offline Maven import on a fast runner), so ask again.
+        symbols_until = min(deadline, time.monotonic() + 120)
         while True:
             symbols = client.request(
                 "textDocument/documentSymbol", {"textDocument": {"uri": uri}}, deadline
@@ -334,7 +350,7 @@ def check(args, proc: subprocess.Popen, project: Path, started: float) -> None:
             names = [s.get("name") for s in symbols or []]
             if names:
                 break
-            if time.monotonic() + 1 > deadline:
+            if time.monotonic() + 1 > symbols_until:
                 raise SmokeError(f"no document symbols for {args.open}")
             time.sleep(0.5)
         log(f"documentSymbol {args.open}: {', '.join(names)}")
