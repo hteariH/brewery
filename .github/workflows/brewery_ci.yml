@@ -391,8 +391,15 @@ jobs:
           cache-on-failure: true
       - name: Build
         run: cargo build --locked --profile release-fast -p zed
+      # A separate invocation, as Zed's bundle scripts do, so the app's features don't unify into the CLI.
+      - name: Build the CLI
+        run: cargo build --locked --profile release-fast -p cli
+      # The artifact holds the app as `brewery` and the CLI as `cli` (upload-artifact drops
+      # the executable bits; packaging scripts copy and chmod them).
       - uses: actions/upload-artifact@v4
         with:
           name: brewery-${{ matrix.os }}
-          path: target/release-fast/brewery
+          path: |
+            target/release-fast/brewery
+            target/release-fast/cli
           retention-days: 14
