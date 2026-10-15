@@ -62,7 +62,10 @@ read_key() { plutil -extract "$1" raw -o - "$plist"; }
 [[ "$(read_key CFBundleIdentifier)" == "$id" ]] || fail "CFBundleIdentifier is $(read_key CFBundleIdentifier), expected $id"
 [[ "$(read_key CFBundleExecutable)" == brewery ]] || fail "CFBundleExecutable is $(read_key CFBundleExecutable)"
 [[ "$(read_key CFBundleName)" == "$name" ]] || fail "CFBundleName is $(read_key CFBundleName)"
-[[ "$(read_key CFBundleShortVersionString)" == "$version" ]] || fail "CFBundleShortVersionString is $(read_key CFBundleShortVersionString)"
+# The bundle versions are numeric (0.1.0 for 0.1.0-rc.1); BreweryVersion is the full version.
+[[ "$(read_key CFBundleShortVersionString)" == "${version%%-*}" ]] || fail "CFBundleShortVersionString is $(read_key CFBundleShortVersionString)"
+[[ "$(read_key CFBundleVersion)" == "${version%%-*}" ]] || fail "CFBundleVersion is $(read_key CFBundleVersion)"
+[[ "$(read_key BreweryVersion)" == "$version" ]] || fail "BreweryVersion is $(read_key BreweryVersion)"
 ! plutil -extract CFBundleURLTypes raw -o - "$plist" >/dev/null 2>&1 || fail "the bundle registers a URL scheme"
 ok "Info.plist: $id $version"
 

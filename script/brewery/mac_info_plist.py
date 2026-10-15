@@ -24,13 +24,21 @@ CHANNELS = {
     "stable": ("Brewery", "io.github.htearih.Brewery"),
 }
 MIN_MACOS = "11.0"  # the app is arm64-only; Apple Silicon starts at macOS 11
+# semver without build metadata, as release_assets.py and render_manifests.py accept it
+_NUM = r"(?:0|[1-9]\d*)"
+_PRE_ID = r"(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
+VERSION_RE = re.compile(rf"{_NUM}\.{_NUM}\.{_NUM}(?:-{_PRE_ID}(?:\.{_PRE_ID})*)?")
 
 
 def build_info_plist(channel, version, info_dir):
     if channel not in CHANNELS:
         sys.exit(f"mac_info_plist: unknown channel {channel!r}")
-    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
-        sys.exit(f"mac_info_plist: bad version {version!r} (need x.y.z for CFBundleVersion)")
+    if not VERSION_RE.fullmatch(version):
+        sys.exit(f"mac_info_plist: bad version {version!r} (need x.y.z or x.y.z-pre)")
+    # CFBundleShortVersionString and CFBundleVersion must be dot-separated integers, so a
+    # pre-release (0.1.0-rc.1) keeps only 0.1.0 there; BreweryVersion holds the full version,
+    # which `cli --version` prints.
+    numeric = version.split("-", 1)[0]
     name, identifier = CHANNELS[channel]
     info = {
         "CFBundleDevelopmentRegion": "en",
@@ -41,8 +49,9 @@ def build_info_plist(channel, version, info_dir):
         "CFBundleName": name,
         "CFBundleDisplayName": name,
         "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": version,
-        "CFBundleVersion": version,
+        "CFBundleShortVersionString": numeric,
+        "CFBundleVersion": numeric,
+        "BreweryVersion": version,
         "LSApplicationCategoryType": "public.app-category.developer-tools",
         "LSMinimumSystemVersion": MIN_MACOS,
         "NSHighResolutionCapable": True,

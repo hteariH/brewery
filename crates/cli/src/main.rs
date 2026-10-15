@@ -1303,6 +1303,9 @@ mod mac_os {
     struct InfoPlist {
         #[serde(rename = "CFBundleShortVersionString")]
         bundle_short_version_string: String,
+        // brewery: the full version (0.1.0-rc.1); CFBundleShortVersionString is numeric only
+        #[serde(rename = "BreweryVersion", default)]
+        brewery_version: Option<String>,
     }
 
     enum Bundle {
@@ -1458,7 +1461,11 @@ mod mac_os {
     impl Bundle {
         fn version(&self) -> String {
             match self {
-                Self::App { plist, .. } => plist.bundle_short_version_string.clone(),
+                // brewery: BreweryVersion first
+                Self::App { plist, .. } => plist
+                    .brewery_version
+                    .clone()
+                    .unwrap_or_else(|| plist.bundle_short_version_string.clone()),
                 Self::LocalPath { .. } => "<development>".to_string(),
             }
         }

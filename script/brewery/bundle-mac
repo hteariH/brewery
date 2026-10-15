@@ -62,7 +62,9 @@ if [[ -n "$licenses_md" && ! -f "$licenses_md" ]]; then die "$licenses_md not fo
 
 version=${version:-$(tr -d '[:space:]' < crates/zed/BREWERY_VERSION)}
 channel=${channel:-$(tr -d '[:space:]' < crates/zed/RELEASE_CHANNEL)}
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "bad version $version"
+# x.y.z or a pre-release x.y.z-rc.1; mac_info_plist.py checks it strictly and keeps
+# CFBundleShortVersionString numeric.
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "bad version $version"
 
 # Names follow ReleaseChannel (crates/release_channel); mac_info_plist.py has the same table
 # and its unit test keeps the identifiers equal to ReleaseChannel::app_id().

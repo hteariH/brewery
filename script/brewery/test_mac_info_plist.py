@@ -47,8 +47,15 @@ class InfoPlistTests(unittest.TestCase):
         self.assertEqual(p["CFBundleDisplayName"], "Brewery")
         self.assertEqual(p["CFBundleShortVersionString"], "1.2.3")
         self.assertEqual(p["CFBundleVersion"], "1.2.3")
+        self.assertEqual(p["BreweryVersion"], "1.2.3")
         self.assertEqual(p["CFBundleIconFile"], "Brewery")
         self.assertEqual(self.build("dev")["CFBundleName"], "Brewery Dev")
+
+    def test_prerelease_keeps_the_bundle_versions_numeric(self):
+        p = self.build("stable", "0.1.0-rc.1")
+        self.assertEqual(p["CFBundleShortVersionString"], "0.1.0")
+        self.assertEqual(p["CFBundleVersion"], "0.1.0")
+        self.assertEqual(p["BreweryVersion"], "0.1.0-rc.1")
 
     def test_no_zed_scheme_and_no_zed_names(self):
         p = self.build("stable")
@@ -66,6 +73,10 @@ class InfoPlistTests(unittest.TestCase):
             mip.build_info_plist("beta", "1.0.0", ROOT / "crates/zed/resources/info")
         with self.assertRaises(SystemExit):
             mip.build_info_plist("stable", "v1", ROOT / "crates/zed/resources/info")
+        with self.assertRaises(SystemExit):
+            mip.build_info_plist("stable", "1.0.0+build.1", ROOT / "crates/zed/resources/info")
+        with self.assertRaises(SystemExit):
+            mip.build_info_plist("stable", "01.0.0", ROOT / "crates/zed/resources/info")
 
 
 if __name__ == "__main__":
