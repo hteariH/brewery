@@ -1,6 +1,7 @@
 pub mod items;
 mod toolbar_controls;
 
+mod brewery_unopenable; // brewery: project-level diagnostics on paths without a buffer
 mod buffer_diagnostics;
 mod diagnostic_renderer;
 
@@ -85,6 +86,7 @@ pub(crate) struct ProjectDiagnosticsEditor {
     include_warnings: bool,
     update_excerpts_task: Option<Task<Result<()>>>,
     diagnostic_summary_update: Task<()>,
+    brewery_unopenable: brewery_unopenable::UnopenablePaths, // brewery
     _subscription: Subscription,
 }
 
@@ -137,7 +139,8 @@ impl Render for ProjectDiagnosticsEditor {
                         )
                     })
             } else {
-                div().size_full().child(self.editor.clone())
+                // brewery: list diagnostics of paths that cannot be opened above the editor
+                brewery_unopenable::render_with_editor(self, cx)
             };
 
         div()
@@ -287,6 +290,7 @@ impl ProjectDiagnosticsEditor {
             paths_to_update: Default::default(),
             update_excerpts_task: None,
             diagnostic_summary_update: Task::ready(()),
+            brewery_unopenable: Default::default(), // brewery
             _subscription: project_event_subscription,
         };
         this.refresh(window, cx);
@@ -361,11 +365,14 @@ impl ProjectDiagnosticsEditor {
                     break;
                 };
 
-                if let Some(buffer) = project_handle
+                let opened = project_handle
                     .update(cx, |project, cx| project.open_buffer(path.clone(), cx))
-                    .await
-                    .log_err()
-                {
+                    .await;
+                // brewery: remember paths that cannot be opened (directories) to list them
+                this.update(cx, |this, _| {
+                    this.brewery_unopenable.record(&path, opened.is_ok())
+                })?;
+                if let Some(buffer) = opened.log_err() {
                     this.update_in(cx, |this, window, cx| {
                         let focused = this.editor.focus_handle(cx).contains_focused(window, cx)
                             || this.focus_handle.contains_focused(window, cx);

@@ -9,6 +9,7 @@
 //! - [`LspStore`], which unifies the two under one consistent interface for interacting with language servers.
 //!
 //! Most of the interesting work happens at the local layer, as bulk of the complexity is with managing the lifecycle of language servers. The actual implementation of the LSP protocol is handled by [`lsp`] crate.
+mod brewery_path_diagnostics; // brewery: worktree_diagnostics_for_path
 pub mod clangd_ext;
 pub mod code_lens;
 mod document_colors;
