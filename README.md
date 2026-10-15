@@ -4,7 +4,8 @@ Brewery is an open-source Java IDE for Windows and Linux with Spring and
 database tools, built on a fast, natively compiled, GPU-rendered editor.
 
 > Inspired by the IntelliJ IDEA interface. Not affiliated with or endorsed by
-> JetBrains.
+> JetBrains or Zed Industries. IntelliJ IDEA is a trademark of JetBrains s.r.o.;
+> Zed is a trademark of Zed Industries, Inc.
 
 Brewery is a fork of [Zed](https://github.com/zed-industries/zed). Zed's
 collaboration, account, AI and telemetry features are switched off. Brewery still contacts Zed's extension gallery: it installs Zed's default
@@ -12,8 +13,10 @@ extensions on first start, checks installed extensions for updates, and serves
 the extensions you browse or install. It also downloads Zed's remote server when
 you open a project over SSH.
 
-**Status:** early development (milestone M0 — the fork itself). Not usable for
-Java work yet. See the [design](docs/superpowers/specs/2026-10-10-brewery-design.md).
+**Status:** 0.1, the first release. Java editing, running and debugging, Gradle and
+Maven, Spring Boot, databases and IntelliJ-style Git work; expect rough edges. Windows
+and Linux are supported; the macOS build is unsigned and unsupported. See the
+[design](docs/superpowers/specs/2026-10-10-brewery-design.md).
 
 ## Install
 
@@ -188,4 +191,15 @@ Use Check for Updates in the menu to check now.
 
 ## Licence
 
-The editor is GPL-3.0-or-later, like Zed. See `LICENSE-GPL`.
+- The editor is GPL-3.0-or-later, like Zed (`LICENSE-GPL`); Zed's GPUI framework is
+  Apache-2.0 (`LICENSE-APACHE`).
+- The daemon (`brewery-daemon/`) is Apache-2.0; its dependencies are listed in its
+  generated `THIRD-PARTY-NOTICES.txt`.
+- The IntelliJ Platform icons in `crates/brewery_theme` are Apache-2.0 (see their
+  `NOTICE`).
+- Packages also bring a Temurin Java runtime (GPL-2.0 with the Classpath Exception),
+  the Eclipse JDT language server (EPL-2.0), java-debug (EPL-1.0), Lombok (MIT) and
+  Zed's Java extension with java-lsp-proxy (Apache-2.0). Every package has a
+  `licenses` folder with all of these texts and source links.
+
+See `NOTICE` for a summary.
