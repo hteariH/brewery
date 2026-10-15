@@ -57,7 +57,15 @@ python3 "$here/render_manifests.py" --version "$version" --tarball "$tarball" --
 chown -R builder:builder "$work/release"
 (cd "$work/release/aur" && as_builder bash -c 'makepkg --printsrcinfo > .SRCINFO')
 srcinfo="$work/release/aur/.SRCINFO"
-for want in "pkgbase = brewery-bin" "	pkgver = $version" "	arch = x86_64" "	license = GPL-3.0-or-later" \
+# pkgver cannot contain a hyphen: render_manifests.py writes 0.1.0-rc.1 as 0.1.0_rc.1, which
+# vercmp orders before 0.1.0. The source stays the real tag and file name.
+pkgver=${version//-/_}
+final=${version%%-*}
+if [[ "$version" == *-* ]]; then want_order=-1; else want_order=0; fi
+order=$(vercmp "$pkgver" "$final")
+[[ "$order" == "$want_order" ]] || { echo "FAIL: vercmp $pkgver $final is $order, expected $want_order" >&2; exit 1; }
+echo "ok:   pkgver $pkgver"
+for want in "pkgbase = brewery-bin" "	pkgver = $pkgver" "	arch = x86_64" "	license = GPL-3.0-or-later" \
     "	provides = brewery" "	conflicts = brewery" \
     "	source = https://github.com/hteariH/brewery/releases/download/v$version/brewery-$version-linux-x86_64.tar.gz" \
     "pkgname = brewery-bin"; do

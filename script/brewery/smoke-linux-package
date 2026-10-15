@@ -38,6 +38,29 @@ case $pkg in
     *) echo "not a .deb or .rpm: $pkg" >&2; exit 2 ;;
 esac
 
+# The package version: nFPM writes a semver pre-release with a tilde (0.1.0-rc.1 ->
+# 0.1.0~rc.1), which both dpkg and rpm order before the final 0.1.0.
+if [[ -n "$version" ]]; then
+    pkg_version=${version/-/\~}
+    final=${version%%-*}
+    if [[ "$version" == *-* ]]; then want_order=-1; else want_order=0; fi
+    case $pkg in
+        *.deb)
+            installed=$(dpkg-query -W -f='${Version}' brewery)
+            if dpkg --compare-versions "$pkg_version" lt "$final"; then order=-1
+            elif dpkg --compare-versions "$pkg_version" eq "$final"; then order=0
+            else order=1; fi
+            ;;
+        *.rpm)
+            installed=$(rpm -q --qf '%{VERSION}-%{RELEASE}' brewery)
+            order=$(rpm --eval "%{lua: print(rpm.vercmp('$pkg_version', '$final'))}")
+            ;;
+    esac
+    [[ "$installed" == "$pkg_version-1" ]] || { echo "FAIL: installed version is $installed, expected $pkg_version-1" >&2; exit 1; }
+    [[ "$order" == "$want_order" ]] || { echo "FAIL: $pkg_version vs $final orders as $order, expected $want_order" >&2; exit 1; }
+    echo "ok:   package version $installed"
+fi
+
 args=(/opt/brewery --installed)
 if [[ -n "$version" ]]; then args+=(--version "$version"); fi
 "$here/check-linux-tree" "${args[@]}"
