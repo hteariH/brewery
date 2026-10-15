@@ -393,6 +393,11 @@ jobs:
           if ($info.ProductName -ne $name) { throw "ProductName is '$($info.ProductName)', expected '$name'" }
           if ($info.CompanyName -ne 'Brewery contributors') { throw "CompanyName is '$($info.CompanyName)'" }
           if ($info.FileVersion -ne $expected) { throw "FileVersion is '$($info.FileVersion)', expected '$expected'" }
+          # The binary FILEVERSION is numeric: x.y.z.0, without the pre-release (0.1.0-rc.1 -> 0.1.0.0).
+          $numeric = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
+          $expectedNumeric = ($expected -replace '[-+].*$', '') + '.0'
+          if ($numeric -ne $expectedNumeric) { throw "numeric file version is $numeric, expected $expectedNumeric" }
+          if (-not $info.ProductVersion.StartsWith("$expected+")) { throw "ProductVersion is '$($info.ProductVersion)', expected '$expected+<channel>...'" }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: brewery-windows-2025

@@ -91,8 +91,12 @@ foreach ($exe in @($App, $Cli, $Helper)) {
     $info = (Get-Item -LiteralPath $exe).VersionInfo
     if ($info.ProductName -ne $DisplayName) { Fail "$exe has ProductName '$($info.ProductName)', expected '$DisplayName' (channel $Channel)" }
 }
-$appVersion = (Get-Item -LiteralPath $App).VersionInfo.FileVersion
-if ($appVersion -ne $NumericVersion) { Fail "$App has FileVersion '$appVersion', expected '$NumericVersion'" }
+# windows_resources writes the full version (0.1.0-rc.1) into the FileVersion string and its
+# numeric x.y.z.0 into the binary FILEVERSION, which cannot carry a pre-release.
+$appInfo = (Get-Item -LiteralPath $App).VersionInfo
+if ($appInfo.FileVersion -ne $Version) { Fail "$App has FileVersion '$($appInfo.FileVersion)', expected '$Version'" }
+$appNumeric = '{0}.{1}.{2}.{3}' -f $appInfo.FileMajorPart, $appInfo.FileMinorPart, $appInfo.FileBuildPart, $appInfo.FilePrivatePart
+if ($appNumeric -ne "$NumericVersion.0") { Fail "$App has the numeric file version $appNumeric, expected $NumericVersion.0" }
 
 if (-not $Iscc) {
     $found = Get-Command iscc -ErrorAction SilentlyContinue
