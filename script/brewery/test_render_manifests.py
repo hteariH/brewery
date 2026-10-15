@@ -53,8 +53,15 @@ class RenderTests(unittest.TestCase):
 
     def test_aur_pkgver_has_no_hyphen(self):
         pkgbuild = render(version="0.2.0-rc.1")["aur/PKGBUILD"]
-        self.assertIn("pkgver=0.2.0_rc.1\n", pkgbuild)
+        self.assertIn("pkgver=0.2.0rc.1\n", pkgbuild)
         self.assertIn("/download/v0.2.0-rc.1/brewery-0.2.0-rc.1-linux-x86_64.tar.gz", pkgbuild)
+
+    def test_aur_pkgver_mapping(self):
+        self.assertEqual(rm.aur_pkgver("0.1.0"), "0.1.0")
+        self.assertEqual(rm.aur_pkgver("0.1.0-rc.1"), "0.1.0rc.1")
+        self.assertEqual(rm.aur_pkgver("1.0.0-beta-2"), "1.0.0beta_2")
+        with self.assertRaises(ValueError):
+            rm.aur_pkgver("1.0.0-0.3.7")
 
     def test_winget_installer_fields(self):
         files = render()

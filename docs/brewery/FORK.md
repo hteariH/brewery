@@ -75,7 +75,7 @@ A pre-release such as `0.1.0-rc.1` keeps the full version wherever a string is a
 `0.1.0`: the Windows binary FILEVERSION (`0.1.0.0`), Inno `VersionInfoVersion` and the macOS
 `CFBundleShortVersionString`/`CFBundleVersion` (the full version is in the `BreweryVersion`
 Info.plist key, which `cli --version` reads). Package managers get a version that sorts
-before the final release: `0.1.0~rc.1` in the deb and rpm (nFPM), `0.1.0_rc.1` as the AUR
+before the final release: `0.1.0~rc.1` in the deb and rpm (nFPM), `0.1.0rc.1` as the AUR
 `pkgver`.
 
 ## Bundle layout

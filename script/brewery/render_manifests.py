@@ -62,6 +62,18 @@ def _check_sha(name: str, value) -> str:
     return value.lower()
 
 
+def aur_pkgver(version: str) -> str:
+    """The AUR pkgver of a Brewery version. pkgver cannot contain a hyphen, and vercmp must order
+    a pre-release before its release: 0.1.0-rc.1 becomes 0.1.0rc.1 (letters straight after the
+    digits sort older; a separator such as 0.1.0_rc.1 would sort newer than 0.1.0)."""
+    release, sep, pre = version.partition("-")
+    if not sep:
+        return version
+    if not pre[0].isalpha():
+        raise ValueError(f"AUR needs a pre-release that starts with a letter (rc.1, beta.2), got {version!r}")
+    return release + pre.replace("-", "_")
+
+
 def _aur_source(version: str, repo: str, source_url) -> str:
     filename = f"brewery-{version}-linux-x86_64.tar.gz"
     if source_url is None:
@@ -97,7 +109,7 @@ def render_all(
     out = {}
     if only in (None, "aur"):
         values = {
-            "VERSION": version.replace("-", "_"),  # pkgver cannot contain a hyphen
+            "VERSION": aur_pkgver(version),
             "SOURCE": _aur_source(version, repo, source_url),
             "SHA256": _check_sha("tarball sha256", tarball_sha256),
             "REPO": repo,
