@@ -6,8 +6,12 @@ set -u
 sccache --show-stats
 log=${SCCACHE_ERROR_LOG:-}
 if [[ -n "$log" && -f "$log" ]]; then
+  # Without the colour codes of the server's log.
+  plain=$(mktemp)
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" >"$plain"
+  log=$plain
   echo
-  misses=$(grep -o '\[[^]]*\]: Cache miss' "$log" | sed -E 's/^\[//; s/\]: Cache miss$//' | sort -u)
+  misses=$(grep -o '\[[^] []*\]: Cache miss' "$log" | sed -E 's/^\[//; s/\]: Cache miss$//' | sort -u)
   echo "Crates that missed the cache ($(grep -c . <<<"$misses")):"
   paste -sd' ' <<<"$misses" | fold -s -w 120
   echo
