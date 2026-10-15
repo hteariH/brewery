@@ -15,7 +15,10 @@
    branch, put `[win]` in the commit message for the same, or start the workflow manually.
    A manual run does everything; its "all_platforms" input adds the Linux and macOS
    release builds, which otherwise run only on `v*` tags. Rust caches are saved from main
-   and tags only, and branches reuse main's caches.
+   and tags only, and branches reuse main's caches. Compiled crates come from sccache over
+   the GitHub Actions cache (written from main only, read everywhere); rust-cache keeps only
+   the registry for those jobs. Windows jobs build on a Dev Drive
+   (`script/brewery/setup-dev-drive.ps1`); `target` is a junction to it.
 
 ## Merging upstream (monthly)
 
