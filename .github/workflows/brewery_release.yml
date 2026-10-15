@@ -9,7 +9,9 @@ name: Brewery Release
 on:
   push:
     tags: ["v*"]
-    branches: ["m6e-release-dry-run"] # TEMP: registers the workflow so it can be dispatched from the branch
+    # TEMP: a push to m6e that touches this file runs it as a dry run and registers the workflow for dispatch
+    branches: ["m6e"]
+    paths: [".github/workflows/brewery_release.yml"]
   workflow_dispatch:
     inputs:
       dry_run:
