@@ -9,6 +9,9 @@ name: Brewery Release
 on:
   push:
     tags: ["v*"]
+    # TEMP
+    branches: ["m6e"]
+    paths: [".github/workflows/brewery_release.yml"]
   workflow_dispatch:
     inputs:
       dry_run:
