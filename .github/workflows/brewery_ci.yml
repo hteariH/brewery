@@ -198,6 +198,10 @@ jobs:
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_VERSION: check-windows
+      # MSVC stamps every link with the time, so proc-macro DLLs differ from build to build, and
+      # sccache hashes them as inputs of each crate that uses one; /Brepro makes them reproducible.
+      # (This adds to the rustflags of .cargo/config.toml; RUSTFLAGS would replace them.)
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C link-arg=/Brepro
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Dev Drive
@@ -379,6 +383,10 @@ jobs:
       CARGO_PROFILE_RELEASE_FAST_DEBUG: ${{ inputs.channel == 'stable' && 'none' || 'limited' }}
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_VERSION: build-windows
+      # MSVC stamps every link with the time, so proc-macro DLLs differ from build to build, and
+      # sccache hashes them as inputs of each crate that uses one; /Brepro makes them reproducible.
+      # (This adds to the rustflags of .cargo/config.toml; RUSTFLAGS would replace them.)
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C link-arg=/Brepro
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Dev Drive
