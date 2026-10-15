@@ -1,7 +1,7 @@
 //! The Database tool window: the project's data sources, a lazily loaded schema tree per data
 //! source, the dialog that adds or edits a data source, and query consoles (an SQL editor tab
 //! with a paged result grid). Everything goes through `brewery-daemon` (`db/*` methods).
-//! (CI: a leaf-crate change for the sccache warm runs, take two.)
+//! (CI: a leaf-crate change for the sccache warm runs, take three.)
 
 pub mod completion;
 pub mod console;
