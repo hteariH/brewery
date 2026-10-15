@@ -47,6 +47,17 @@ env:
   SAVE_CACHE: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && inputs.release != true }}
   # "dev" unless a caller asks for another channel (inputs are empty outside workflow_call).
   BREWERY_CHANNEL: ${{ inputs.channel || 'dev' }}
+  # sccache, for the jobs that set RUSTC_WRAPPER: every rustc call is cached in the GitHub
+  # Actions cache, workspace crates included (rust-cache only keeps dependencies). Each job has
+  # its own SCCACHE_GHA_VERSION. Only main writes: entries written from a branch or tag are
+  # scoped to that ref, nothing else can read them, and they evict main's caches from the
+  # 10 GB budget (a branch's full fill did, in ci-speed's measurements).
+  SCCACHE_GHA_ENABLED: "true"
+  # A cache error (the API throttles) compiles locally instead of failing the build.
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # Misses and failed cache writes are logged at debug level (script/brewery/sccache-stats sums them up).
+  SCCACHE_LOG: sccache::server=debug,sccache::compiler::compiler=debug
+  SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && inputs.release != true && 'READ_WRITE' || 'READ_ONLY' }}
 
 jobs:
   # Decides which jobs this run needs. Manual runs, tags and release calls always run everything.
@@ -152,6 +163,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+      # Linux keeps rust-cache's compiled dependencies (warm in ~16 min): there is no room in
+      # the 10 GB cache budget for sccache here as well.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-check
@@ -164,7 +177,7 @@ jobs:
       # util's Windows process-tree tests wait 5 s for PowerShell to start a grandchild, which
       # cold hosted runners often miss. Run them locally.
       - name: Test Brewery hook-ins
-        run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
+        run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p extension_host -p util -p extension_suggest -p diagnostics -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
       - name: Test workspace hook-ins
         run: cargo test --locked -p workspace --lib
       - name: Build the daemon jar
@@ -182,8 +195,18 @@ jobs:
     if: needs.changes.outputs.windows_check == 'true'
     runs-on: windows-2025
     timeout-minutes: 150
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_VERSION: check-windows
+      # MSVC stamps every link with the time, so proc-macro DLLs differ from build to build, and
+      # sccache hashes them as inputs of each crate that uses one; /Brepro makes them reproducible.
+      # (This adds to the rustflags of .cargo/config.toml; RUSTFLAGS would replace them.)
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C link-arg=/Brepro
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Dev Drive
+        shell: pwsh
+        run: script/brewery/setup-dev-drive.ps1
       - name: Install MSVC Spectre libraries
         shell: pwsh
         run: |
@@ -192,9 +215,16 @@ jobs:
           # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
           if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      - name: sccache log
+        shell: bash
+        run: echo "SCCACHE_ERROR_LOG=$RUNNER_TEMP/sccache.log" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-check
+          cache-targets: false
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
       # The Windows release build compiles all of zed when it runs in the same workflow.
@@ -202,9 +232,13 @@ jobs:
         if: needs.changes.outputs.windows_build != 'true'
         run: cargo check -p zed --locked
       - name: Test Brewery hook-ins
-        run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p auto_update_helper -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
+        run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p auto_update_helper -p extension_host -p util -p extension_suggest -p diagnostics -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
       - name: Test workspace hook-ins
         run: cargo test --locked -p workspace --lib
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: script/brewery/sccache-stats
 
   daemon:
     name: Daemon (${{ matrix.os }})
@@ -347,8 +381,17 @@ jobs:
       # release-fast inherits full debuginfo, which is too heavy for hosted runners; the
       # stable channel ships without any.
       CARGO_PROFILE_RELEASE_FAST_DEBUG: ${{ inputs.channel == 'stable' && 'none' || 'limited' }}
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_VERSION: build-windows
+      # MSVC stamps every link with the time, so proc-macro DLLs differ from build to build, and
+      # sccache hashes them as inputs of each crate that uses one; /Brepro makes them reproducible.
+      # (This adds to the rustflags of .cargo/config.toml; RUSTFLAGS would replace them.)
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C link-arg=/Brepro
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Dev Drive
+        shell: pwsh
+        run: script/brewery/setup-dev-drive.ps1
       # The channel is read from this file by the build (release_channel) and by the packaging scripts.
       - name: Select the release channel
         if: env.BREWERY_CHANNEL != 'dev'
@@ -364,9 +407,16 @@ jobs:
           # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
           if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      - name: sccache log
+        shell: bash
+        run: echo "SCCACHE_ERROR_LOG=$RUNNER_TEMP/sccache.log" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-build
+          cache-targets: false
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
       # Zed's licences of the Rust dependencies (cargo-about). They are embedded in the app
@@ -409,6 +459,10 @@ jobs:
             target/release-fast/auto_update_helper.exe
             target/release-fast/licenses.md
           retention-days: 14
+      - name: sccache stats
+        if: always()
+        shell: bash
+        run: script/brewery/sccache-stats
 
   # The Windows installer (script/brewery/bundle-windows.ps1, Inno Setup) from the Windows build
   # and bundle, then a silent per-user install, update-mode run, helper swap and uninstall

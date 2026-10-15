@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# sccache's statistics for the job, then from the server log that SCCACHE_ERROR_LOG points at
+# (SCCACHE_LOG=sccache::server=debug,sccache::compiler::compiler=debug): the crates that
+# missed, and why cache writes failed (throttling by the GitHub Actions cache shows as HTTP 429).
+set -u
+sccache --show-stats
+log=${SCCACHE_ERROR_LOG:-}
+if [[ -n "$log" && -f "$log" ]]; then
+  # Without the colour codes of the server's log.
+  plain=$(mktemp)
+  sed -E 's/\x1b\[[0-9;]*m//g' "$log" >"$plain"
+  log=$plain
+  echo
+  misses=$(grep -o '\[[^] []*\]: Cache miss' "$log" | sed -E 's/^\[//; s/\]: Cache miss$//' | sort -u)
+  echo "Crates that missed the cache ($(grep -c . <<<"$misses")):"
+  paste -sd' ' <<<"$misses" | fold -s -w 120
+  echo
+  echo "Failed cache writes by cause:"
+  grep -o 'Error executing cache write: .*' "$log" | cut -c1-240 \
+    | sed -E 's/[0-9a-f]{16,}/<hash>/g; s/sccache\/[0-9a-f]\/[0-9a-f]\/[0-9a-f]\/[^ ",]*/<key>/g' \
+    | sort | uniq -c | sort -rn | head -n 15
+fi

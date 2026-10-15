@@ -15,13 +15,19 @@
    branch, put `[win]` in the commit message for the same, or start the workflow manually.
    A manual run does everything; its "all_platforms" input adds the Linux and macOS
    release builds, which otherwise run only on `v*` tags. Rust caches are saved from main
-   and tags only, and branches reuse main's caches.
+   and tags only, and branches reuse main's caches. The Windows check and build get their
+   compiled crates (workspace crates too) from sccache over the GitHub Actions cache, written
+   from main only and read everywhere; there rust-cache keeps only the registry, and
+   `/Brepro` makes proc-macro DLLs reproducible, without which sccache misses every crate
+   using one. Linux keeps rust-cache's compiled dependencies: the 10 GB cache budget holds
+   no more. The Windows jobs build on a Dev Drive (`script/brewery/setup-dev-drive.ps1`;
+   `target` is a junction to it).
 
 ## Merging upstream (monthly)
 
     git checkout main
     script/brewery/merge-upstream
-    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
+    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p extension_host -p util -p extension_suggest -p diagnostics -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
     cargo test -p workspace --lib
     script/brewery/list-hooks   # every hook still present?
 
