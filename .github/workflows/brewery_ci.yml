@@ -275,9 +275,11 @@ jobs:
         env:
           BREWERY_TEST_JDK: ${{ env.JAVA_HOME }}
         run: python -m unittest discover -v script/brewery
+      # resolveTestDependencies: this job shares the Daemon job's Gradle cache key and may save
+      # it first, so it fills in the test dependencies too (brewery-daemon/build.gradle.kts).
       - name: Build the daemon jar
         working-directory: brewery-daemon
-        run: ./gradlew -Pversion="$(cat ../crates/zed/BREWERY_VERSION)" shadowJar --no-daemon
+        run: ./gradlew -Pversion="$(cat ../crates/zed/BREWERY_VERSION)" shadowJar resolveTestDependencies --no-daemon
       # Content-addressed by the pins; like the other caches, saved from main and tags only.
       - name: Restore the download cache
         id: cache

@@ -130,3 +130,12 @@ tasks.shadowJar {
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
     mergeServiceFiles()
 }
+
+// CI: the Bundle jobs only build the jar, yet share the Daemon job's setup-java Gradle cache (one key
+// per OS) and may save it first. Resolving the test classpaths there keeps that cache complete, so the
+// Daemon job doesn't fetch the test dependencies from Maven Central on every run.
+tasks.register("resolveTestDependencies") {
+    val classpaths = files(configurations.testCompileClasspath, configurations.testRuntimeClasspath)
+    inputs.files(classpaths)
+    doLast { logger.lifecycle("resolved ${classpaths.files.size} test dependency files") }
+}
