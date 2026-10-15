@@ -9,6 +9,7 @@ name: Brewery Release
 on:
   push:
     tags: ["v*"]
+    branches: ["m6e-release-dry-run"] # TEMP: registers the workflow so it can be dispatched from the branch
   workflow_dispatch:
     inputs:
       dry_run:
@@ -41,11 +42,11 @@ jobs:
       - name: Check the tag against BREWERY_VERSION
         id: check
         env:
-          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           version=$(tr -d '[:space:]' < crates/zed/BREWERY_VERSION)
-          if [[ "$EVENT" == push ]]; then
+          if [[ "$REF" == refs/tags/v* ]]; then
             python script/brewery/release_assets.py check-tag --tag "$REF_NAME" --version-file crates/zed/BREWERY_VERSION
           else
             # A dry run has no tag; check against the one the version would get.
