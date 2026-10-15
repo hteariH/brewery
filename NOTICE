@@ -1,0 +1,31 @@
+Brewery
+Copyright 2026 Brewery contributors.
+
+Brewery is a fork of the Zed editor (https://github.com/zed-industries/zed),
+Copyright Zed Industries, Inc. Zed's code is licensed under GPL-3.0-or-later, its
+GPUI framework under Apache-2.0. Brewery's changes to Zed are GPL-3.0-or-later
+(LICENSE-GPL).
+
+brewery-daemon (brewery-daemon/) is licensed under Apache-2.0
+(brewery-daemon/LICENSE); its third-party dependencies are listed in the generated
+THIRD-PARTY-NOTICES.txt shipped with every package.
+
+The icons in crates/brewery_theme/icons come from the IntelliJ Platform
+(https://github.com/JetBrains/intellij-community), Apache-2.0; see
+crates/brewery_theme/icons/NOTICE.
+
+Release packages also contain, unmodified:
+- Eclipse Temurin JDK 21 runtime image (jlink), GPL-2.0 with the Classpath Exception;
+  source: https://github.com/adoptium/jdk21u
+- Eclipse JDT Language Server, EPL-2.0; source: https://github.com/eclipse-jdtls/eclipse.jdt.ls
+- java-debug, EPL-1.0; source: https://github.com/microsoft/java-debug
+- Project Lombok, MIT; source: https://github.com/projectlombok/lombok
+- Zed's Java extension and java-lsp-proxy, Apache-2.0;
+  source: https://github.com/zed-extensions/java
+- conpty/OpenConsole (Windows), MIT; source: https://github.com/microsoft/terminal
+The exact versions, licence texts and source links are in each package's
+licenses folder.
+
+Brewery is not affiliated with or endorsed by JetBrains or Zed Industries.
+IntelliJ IDEA is a trademark of JetBrains s.r.o. Zed is a trademark of
+Zed Industries, Inc.

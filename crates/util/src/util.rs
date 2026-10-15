@@ -222,19 +222,22 @@ where
 ///
 /// This function checks if the current process is running with root privileges
 /// and terminates the program with an error message unless explicitly allowed via the
-/// `ZED_ALLOW_ROOT` environment variable.
+/// `BREWERY_ALLOW_ROOT` (or Zed's `ZED_ALLOW_ROOT`) environment variable.
 #[cfg(unix)]
 pub fn prevent_root_execution() {
     let is_root = nix::unistd::geteuid().is_root();
-    let allow_root = std::env::var("ZED_ALLOW_ROOT").is_ok_and(|val| val == "true");
+    // brewery: Brewery's own variable and name; Zed's variable still works
+    let allow_root = ["BREWERY_ALLOW_ROOT", "ZED_ALLOW_ROOT"]
+        .iter()
+        .any(|name| std::env::var(name).is_ok_and(|val| val == "true"));
 
     if is_root && !allow_root {
         eprintln!(
             "\
-Error: Running Zed as root or via sudo is unsupported.
-       Doing so (even once) may subtly break things for all subsequent non-root usage of Zed.
-       It is untested and not recommended, don't complain when things break.
-       If you wish to proceed anyways, set `ZED_ALLOW_ROOT=true` in your environment."
+Error: Running Brewery as root or via sudo is unsupported.
+       Doing so (even once) may subtly break things for all later non-root use of Brewery.
+       It is untested and not recommended.
+       If you wish to proceed anyway, set `BREWERY_ALLOW_ROOT=true` in your environment."
         );
         std::process::exit(1);
     }
