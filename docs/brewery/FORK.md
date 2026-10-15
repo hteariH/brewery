@@ -173,11 +173,44 @@ untouched for upstream merges.
 - macOS zip (unsigned, unsupported): `script/brewery/bundle-mac --app ... --cli ... --bundle target/bundle/macos-aarch64`.
 - AUR and winget manifests: `script/brewery/render_manifests.py --version <v> --out <dir> --tarball <tar.gz> --installer <setup.exe>` fills `packaging/aur/PKGBUILD.in` and `packaging/winget/*.yaml.in` with versions, URLs and checksums.
 
-CI builds and installs every package on manual runs (`all_platforms`) and tags: silent
+CI builds and installs every package on manual runs (`all_platforms`) and releases: silent
 install, update mode and uninstall on Windows; deb in `ubuntu:24.04`, rpm in
 `fedora:41`; `makepkg -si` in `archlinux:base-devel`; `winget validate`; macOS zip
-contents (allowed to fail). Publishing to winget, the AUR and GitHub Releases is done
-by hand.
+contents (allowed to fail). Releases are drafted by CI (see "Releasing"); publishing
+them, winget and the AUR is done by hand.
+
+## Releasing
+
+A release is a tag. Everything is built by `.github/workflows/brewery_release.yml`, which
+calls `brewery_ci.yml` for the `stable` channel, so the packages are the ones CI already
+installs and smoke-tests.
+
+1. Set `crates/zed/BREWERY_VERSION` (for example `0.1.0`, or `0.1.0-rc.1`), add a
+   `## <version>` section to `CHANGELOG.md` (without one the release gets a generic install
+   note), merge to `main`.
+2. Dry run: `gh workflow run brewery_release.yml --ref main -R hteariH/brewery`
+   (`dry_run` defaults to true). It builds, packages and tests everything, and uploads the
+   release files as the `release-assets` artifact plus the would-be body as
+   `release-notes.md`. Nothing is created. Takes 1 to 2 hours.
+3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`. The tag must equal `v` plus
+   `BREWERY_VERSION`, or the `version` job fails. A pre-release tag (`v0.1.0-rc.1`) works
+   when the file says `0.1.0-rc.1` too; it creates a pre-release draft.
+4. The `publish` job creates a **draft** release with the packages, `SHA256SUMS`,
+   `latest.json` (what the updater reads), `jre-source.txt` (source of the bundled
+   Temurin JRE, GPLv2 section 3) and zips of the winget manifests and the AUR
+   `PKGBUILD` + `.SRCINFO`. The macOS zip is included when its job passed.
+5. Check the draft, then publish it by hand. Publishing it is what makes
+   `releases/latest/download/latest.json` serve the new version, so installed Windows
+   copies start offering it. Submitting the winget manifests and pushing to the AUR are
+   manual too.
+
+The workflow never publishes the release and never touches winget or the AUR. Only the
+`publish` job has `contents: write`. The channel is selected by writing it into
+`crates/zed/RELEASE_CHANNEL` inside each CI job; the file in the repository stays `dev`.
+`script/brewery/release_assets.py` (tests: `python -m unittest discover script/brewery`)
+checks the tag, checksums the files, writes `latest.json` and checks it with a Python
+mirror of the updater's rules in `crates/auto_update/src/brewery_update.rs`: change the
+two together. Tag pushes are no longer built by `brewery_ci.yml` itself.
 
 ## Updates
 

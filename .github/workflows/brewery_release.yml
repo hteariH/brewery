@@ -1,0 +1,133 @@
+name: Brewery Release
+
+# A v* tag builds Brewery for the stable channel, packages and smoke-tests it on every
+# platform (by calling brewery_ci.yml), and creates a DRAFT GitHub Release. The owner
+# publishes the draft; this workflow never does, and never pushes to winget or the AUR.
+# A manual run (dry_run, the default) does everything except create the release and keeps
+# the would-be release files as the "release-files" artifact.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and assemble everything but do not create a release (only a tag push does)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The tag must be v + crates/zed/BREWERY_VERSION (a pre-release tag only when the file says
+  # the same pre-release).
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Releases are created by tag pushes
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run != true
+        run: |
+          echo "::error::Only a v* tag push creates a release. Run this with dry_run, or push the tag."
+          exit 1
+      - name: Check the tag against BREWERY_VERSION
+        id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(tr -d '[:space:]' < crates/zed/BREWERY_VERSION)
+          if [[ "$EVENT" == push ]]; then
+            python script/brewery/release_assets.py check-tag --tag "$REF_NAME" --version-file crates/zed/BREWERY_VERSION
+          else
+            # A dry run has no tag; check against the one the version would get.
+            python script/brewery/release_assets.py check-tag --tag "v$version" --version-file crates/zed/BREWERY_VERSION
+          fi
+
+  # Build, bundle, package and smoke test, for the stable channel.
+  ci:
+    name: CI
+    needs: version
+    uses: ./.github/workflows/brewery_ci.yml
+    with:
+      channel: stable
+      release: true
+
+  # Collects the packages into the release files, checks them and uploads the result. Also
+  # runs on a dry run, which is how the assembly is verified before the first tag.
+  assemble:
+    name: Assemble the release files
+    needs: [version, ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test the release scripts
+        run: python -m unittest discover -v -s script/brewery -p 'test_re*.py'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: target/artifacts
+      - name: Artifacts
+        run: find target/artifacts -type f -printf '%s\t%p\n' | sort -k2
+      - name: Assemble
+        run: python script/brewery/release_assets.py assemble --version "$VERSION" --artifacts target/artifacts --out target/release
+      - name: Release files
+        run: |
+          {
+            echo "### Release files for v$VERSION"
+            echo '```'
+            (cd target/release/assets && ls -l)
+            echo '```'
+            echo
+            echo "### Release notes (draft body)"
+            echo
+            cat target/release/release-notes.md
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          include-hidden-files: true
+          if-no-files-found: error
+          path: target/release
+          retention-days: 14
+
+  # Tag pushes only: a draft release holding exactly what "assemble" produced.
+  publish:
+    name: Draft the GitHub Release
+    needs: [version, assemble]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.version.outputs.version }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: release
+      - name: Create the draft release
+        run: |
+          flags=()
+          if [[ "$PRERELEASE" == true ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" release/assets/* --draft --verify-tag "${flags[@]}" \
+            --title "Brewery $VERSION" --notes-file release/release-notes.md
