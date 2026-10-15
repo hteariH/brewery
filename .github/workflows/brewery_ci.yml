@@ -50,14 +50,14 @@ env:
   # sccache, for the jobs that set RUSTC_WRAPPER: every rustc call is cached in the GitHub
   # Actions cache, workspace crates included (rust-cache only keeps dependencies). Each job has
   # its own SCCACHE_GHA_VERSION. Only main writes: entries written from a branch or tag are
-  # scoped to that ref, nothing else can read them, and they would only take budget.
+  # scoped to that ref, nothing else can read them, and they evict main's caches from the
+  # 10 GB budget (a branch's full fill did, in ci-speed's measurements).
   SCCACHE_GHA_ENABLED: "true"
   # A cache error (the API throttles) compiles locally instead of failing the build.
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
   # Misses and failed cache writes are logged at debug level (script/brewery/sccache-stats sums them up).
   SCCACHE_LOG: sccache::server=debug,sccache::compiler::compiler=debug
-  # TEMP: ci-speed writes too, to measure cold and warm runs.
-  SCCACHE_GHA_RW_MODE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-speed') && inputs.release != true && 'READ_WRITE' || 'READ_ONLY' }}
+  SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && inputs.release != true && 'READ_WRITE' || 'READ_ONLY' }}
 
 jobs:
   # Decides which jobs this run needs. Manual runs, tags and release calls always run everything.
