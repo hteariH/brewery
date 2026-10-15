@@ -47,6 +47,14 @@ env:
   SAVE_CACHE: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && inputs.release != true }}
   # "dev" unless a caller asks for another channel (inputs are empty outside workflow_call).
   BREWERY_CHANNEL: ${{ inputs.channel || 'dev' }}
+  # sccache, for the jobs that set RUSTC_WRAPPER: every rustc call is cached in the GitHub
+  # Actions cache, workspace crates included (rust-cache only keeps dependencies). Each job has
+  # its own SCCACHE_GHA_VERSION. Only main writes: entries written from a branch or tag are
+  # scoped to that ref, nothing else can read them, and they would only take budget.
+  SCCACHE_GHA_ENABLED: "true"
+  # A cache error (the API throttles) compiles locally instead of failing the build.
+  SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && inputs.release != true && 'READ_WRITE' || 'READ_ONLY' }}
 
 jobs:
   # Decides which jobs this run needs. Manual runs, tags and release calls always run everything.
@@ -140,6 +148,9 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_VERSION: check-linux
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -152,9 +163,14 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+      # Registry and git checkouts only; sccache keeps the compiled crates.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-check
+          cache-targets: false
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
       - name: Check
@@ -175,6 +191,9 @@ jobs:
         env:
           BREWERY_DAEMON_JAR: ${{ github.workspace }}/brewery-daemon/build/libs/brewery-daemon-all.jar
         run: cargo test --locked -p brewery_daemon_client
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   check-windows:
     name: Check and test (windows-2025)
@@ -182,8 +201,14 @@ jobs:
     if: needs.changes.outputs.windows_check == 'true'
     runs-on: windows-2025
     timeout-minutes: 150
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_VERSION: check-windows
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Dev Drive
+        shell: pwsh
+        run: script/brewery/setup-dev-drive.ps1
       - name: Install MSVC Spectre libraries
         shell: pwsh
         run: |
@@ -192,9 +217,13 @@ jobs:
           # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
           if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-check
+          cache-targets: false
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
       # The Windows release build compiles all of zed when it runs in the same workflow.
@@ -205,6 +234,9 @@ jobs:
         run: cargo test --locked -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p auto_update_helper -p extension_host -p util -p extension_suggest -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
       - name: Test workspace hook-ins
         run: cargo test --locked -p workspace --lib
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   daemon:
     name: Daemon (${{ matrix.os }})
@@ -347,8 +379,13 @@ jobs:
       # release-fast inherits full debuginfo, which is too heavy for hosted runners; the
       # stable channel ships without any.
       CARGO_PROFILE_RELEASE_FAST_DEBUG: ${{ inputs.channel == 'stable' && 'none' || 'limited' }}
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_VERSION: build-windows
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Dev Drive
+        shell: pwsh
+        run: script/brewery/setup-dev-drive.ps1
       # The channel is read from this file by the build (release_channel) and by the packaging scripts.
       - name: Select the release channel
         if: env.BREWERY_CHANNEL != 'dev'
@@ -364,9 +401,13 @@ jobs:
           # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
           if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-build
+          cache-targets: false
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
       # Zed's licences of the Rust dependencies (cargo-about). They are embedded in the app
@@ -409,6 +450,9 @@ jobs:
             target/release-fast/auto_update_helper.exe
             target/release-fast/licenses.md
           retention-days: 14
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   # The Windows installer (script/brewery/bundle-windows.ps1, Inno Setup) from the Windows build
   # and bundle, then a silent per-user install, update-mode run, helper swap and uninstall
@@ -480,6 +524,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
+            sccache: true
           - os: macos-15
             unsupported: true
     continue-on-error: ${{ matrix.unsupported == true }}
@@ -487,6 +532,9 @@ jobs:
     timeout-minutes: 240
     env:
       CARGO_PROFILE_RELEASE_FAST_DEBUG: ${{ inputs.channel == 'stable' && 'none' || 'limited' }}
+      # An empty wrapper is no wrapper.
+      RUSTC_WRAPPER: ${{ matrix.sccache && 'sccache' || '' }}
+      SCCACHE_GHA_VERSION: build-${{ matrix.os }}
     steps:
       - name: Free disk space
         if: runner.os == 'Linux'
@@ -504,9 +552,14 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: script/linux
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        if: matrix.sccache
+        with:
+          version: v0.18.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-build
+          cache-targets: ${{ !matrix.sccache }}
           save-if: ${{ github.ref == 'refs/heads/main' && inputs.release != true }}
           cache-on-failure: true
       # Zed's licences of the Rust dependencies (cargo-about, the version script/generate-licenses
@@ -535,6 +588,9 @@ jobs:
             target/release-fast/licenses.md
           if-no-files-found: error
           retention-days: 14
+      - name: sccache stats
+        if: always() && matrix.sccache
+        run: sccache --show-stats
 
   # The Linux tarball, deb and rpm from the Linux build and bundle (script/brewery/bundle-linux),
   # each package installed and removed in a clean container (script/brewery/smoke-linux-package).
