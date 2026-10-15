@@ -2,8 +2,8 @@ name: Brewery CI
 
 on:
   push:
+    # Tags are built by brewery_release.yml, which calls this workflow for the stable channel.
     branches: ["**"]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -13,6 +13,19 @@ on:
         default: true
       all_platforms:
         description: "Also build Linux and macOS release-fast"
+        type: boolean
+        default: false
+  # brewery_release.yml: the build, bundle and package jobs for a release. "release" runs
+  # everything (as a manual run does); "channel" is written into crates/zed/RELEASE_CHANNEL
+  # before building and packaging.
+  workflow_call:
+    inputs:
+      channel:
+        description: "Release channel to build: dev or stable"
+        type: string
+        default: dev
+      release:
+        description: "Run every job, as for a release"
         type: boolean
         default: false
 
@@ -31,9 +44,11 @@ env:
   # Caches are saved from main and tags only. Branches restore main's caches, so they
   # can't evict them from the repository's 10 GB cache budget.
   SAVE_CACHE: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
+  # "dev" unless a caller asks for another channel (inputs are empty outside workflow_call).
+  BREWERY_CHANNEL: ${{ inputs.channel || 'dev' }}
 
 jobs:
-  # Decides which jobs this run needs. Manual runs and tags always run everything.
+  # Decides which jobs this run needs. Manual runs, tags and release calls always run everything.
   changes:
     name: Changes
     runs-on: ubuntu-24.04
@@ -46,10 +61,10 @@ jobs:
       bundle: ${{ steps.plan.outputs.bundle }}
     steps:
       - uses: actions/checkout@v4
-        if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+        if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && inputs.release != true
       - uses: dorny/paths-filter@v3
         id: filter
-        if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+        if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && inputs.release != true
         with:
           filters: |
             rust:
@@ -81,10 +96,15 @@ jobs:
           BUNDLE_CHANGED: ${{ steps.filter.outputs.bundle }}
           INPUT_WINDOWS_BUILD: ${{ inputs.windows_build }}
           INPUT_ALL_PLATFORMS: ${{ inputs.all_platforms }}
+          RELEASE: ${{ inputs.release }}
           HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
+          if [[ "$BREWERY_CHANNEL" != dev && "$BREWERY_CHANNEL" != stable ]]; then
+            echo "::error::channel must be dev or stable, got '$BREWERY_CHANNEL'"
+            exit 1
+          fi
           everything=false
-          if [[ "$EVENT" == workflow_dispatch || "$REF" == refs/tags/* ]]; then everything=true; fi
+          if [[ "$EVENT" == workflow_dispatch || "$REF" == refs/tags/* || "$RELEASE" == true ]]; then everything=true; fi
           rust=false; daemon=false
           if [[ $everything == true || "$RUST_CHANGED" == true ]]; then rust=true; fi
           if [[ $everything == true || "$DAEMON_CHANGED" == true ]]; then daemon=true; fi
@@ -98,11 +118,11 @@ jobs:
             windows_check=true
           fi
           windows_build=false
-          if [[ "$REF" == refs/tags/* || $win_tag == true ]]; then windows_build=true; fi
+          if [[ "$REF" == refs/tags/* || "$RELEASE" == true || $win_tag == true ]]; then windows_build=true; fi
           if [[ "$REF" == refs/heads/main && "$EVENT" == push && $rust == true ]]; then windows_build=true; fi
           if [[ "$EVENT" == workflow_dispatch && "$INPUT_WINDOWS_BUILD" == true ]]; then windows_build=true; fi
           other_builds=false
-          if [[ "$REF" == refs/tags/* ]]; then other_builds=true; fi
+          if [[ "$REF" == refs/tags/* || "$RELEASE" == true ]]; then other_builds=true; fi
           if [[ "$EVENT" == workflow_dispatch && "$INPUT_ALL_PLATFORMS" == true ]]; then other_builds=true; fi
           {
             echo "rust=$rust"
@@ -321,10 +341,18 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 240
     env:
-      # release-fast inherits full debuginfo, which is too heavy for hosted runners.
-      CARGO_PROFILE_RELEASE_FAST_DEBUG: limited
+      # release-fast inherits full debuginfo, which is too heavy for hosted runners; the
+      # stable channel ships without any.
+      CARGO_PROFILE_RELEASE_FAST_DEBUG: ${{ inputs.channel == 'stable' && 'none' || 'limited' }}
     steps:
       - uses: actions/checkout@v4
+      # The channel is read from this file by the build (release_channel) and by the packaging scripts.
+      - name: Select the release channel
+        if: env.BREWERY_CHANNEL != 'dev'
+        shell: bash
+        run: |
+          echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
+          echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
       - name: Install MSVC Spectre libraries
         shell: pwsh
         run: |
@@ -385,6 +413,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # The channel is read from this file by the build (release_channel) and by the packaging scripts.
+      - name: Select the release channel
+        if: env.BREWERY_CHANNEL != 'dev'
+        shell: bash
+        run: |
+          echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
+          echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           name: brewery-windows-2025
@@ -443,7 +478,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
     env:
-      CARGO_PROFILE_RELEASE_FAST_DEBUG: limited
+      CARGO_PROFILE_RELEASE_FAST_DEBUG: ${{ inputs.channel == 'stable' && 'none' || 'limited' }}
     steps:
       - name: Free disk space
         if: runner.os == 'Linux'
@@ -451,6 +486,13 @@ jobs:
         with:
           tool-cache: false
       - uses: actions/checkout@v4
+      # The channel is read from this file by the build (release_channel) and by the packaging scripts.
+      - name: Select the release channel
+        if: env.BREWERY_CHANNEL != 'dev'
+        shell: bash
+        run: |
+          echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
+          echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: script/linux
@@ -496,6 +538,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      # The channel is read from this file by the build (release_channel) and by the packaging scripts.
+      - name: Select the release channel
+        if: env.BREWERY_CHANNEL != 'dev'
+        shell: bash
+        run: |
+          echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
+          echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           name: brewery-ubuntu-24.04
@@ -560,6 +609,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # The channel is read from this file by the build (release_channel) and by the packaging scripts.
+      - name: Select the release channel
+        if: env.BREWERY_CHANNEL != 'dev'
+        shell: bash
+        run: |
+          echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
+          echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
