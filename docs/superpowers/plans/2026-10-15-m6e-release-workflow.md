@@ -24,11 +24,11 @@
 
 ### Task 1: Reusable CI for stable builds
 **Files:** `.github/workflows/brewery_ci.yml`.
-- [ ] `workflow_call` inputs, channel switch step in each build job, debug-info off for stable, `changes` job treats a call as "run everything"; dispatch test: `gh workflow run brewery_ci.yml --ref <branch> -R hteariH/brewery -f all_platforms=true` still green (dev channel), plus one run through a temporary caller or the release workflow dry run with channel stable showing ProductName `Brewery`.
-- [ ] Commit `ci: reusable builds for the stable channel`.
+- [x] `workflow_call` inputs, channel switch step in each build job, debug-info off for stable, `changes` job treats a call as "run everything"; dispatch test: `gh workflow run brewery_ci.yml --ref <branch> -R hteariH/brewery -f all_platforms=true` still green (dev channel), plus one run through a temporary caller or the release workflow dry run with channel stable showing ProductName `Brewery`.
+- [x] Commit `ci: reusable builds for the stable channel`.
 
 ### Task 2: Release workflow and assets
 **Files:** `.github/workflows/brewery_release.yml`, `script/brewery/release_assets.py` (+ tests), `CHANGELOG.md` (with a `## 0.1.0` section draft), FORK.md "Releasing".
-- [ ] TDD `release_assets.py`: SHA256SUMS format (`<hash>  <name>`), latest.json content and rules, notes body assembly, missing optional macOS asset handled.
-- [ ] Dry run via `workflow_dispatch` on the branch: green, artifacts contain every asset with stable names.
-- [ ] Commit `ci: release workflow with a draft GitHub Release`.
+- [x] TDD `release_assets.py`: SHA256SUMS format (`<hash>  <name>`), latest.json content and rules, notes body assembly, missing optional macOS asset handled.
+- [x] Dry run (run 38658320993, through a temporary push trigger because dispatch needs the workflow on main): green, artifacts contain every asset with stable names.
+- [x] Commit `ci: release workflow with a draft GitHub Release`.

@@ -29,7 +29,10 @@ PACKAGE_IDENTIFIER = "hteariH.Brewery"
 # key is "<AppId>_is1", which winget uses to match an installed copy for upgrades.
 STABLE_PRODUCT_CODE = "{96B775F6-6B94-45D9-B9AB-17BEEACD3A33}_is1"
 
-VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.]*)?")
+# semver 2.0 as the updater reads it (see release_assets.py)
+_NUM = r"(?:0|[1-9]\d*)"
+_PRE_ID = r"(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
+VERSION_RE = re.compile(rf"{_NUM}\.{_NUM}\.{_NUM}(?:-{_PRE_ID}(?:\.{_PRE_ID})*)?")
 SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 PLACEHOLDER_RE = re.compile(r"@([A-Z_0-9]+)@")

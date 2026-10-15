@@ -34,7 +34,11 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_REPO = "hteariH/brewery"
 BUNDLE_DEPS = HERE / "bundle-deps.toml"
 
-VERSION_RE = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.]*)?")
+# semver 2.0 without build metadata, as semver::Version::parse (the updater) reads it: no leading
+# zeros in numbers, non-empty dot-separated pre-release identifiers of [0-9A-Za-z-].
+_NUM = r"(?:0|[1-9]\d*)"
+_PRE_ID = r"(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
+VERSION_RE = re.compile(rf"{_NUM}\.{_NUM}\.{_NUM}(?:-{_PRE_ID}(?:\.{_PRE_ID})*)?")
 SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 # brewery_update.rs: MAX_MANIFEST_BYTES
 MAX_MANIFEST_BYTES = 64 * 1024
@@ -95,7 +99,8 @@ def _release_url(repo: str, version: str, name: str) -> str:
 
 
 def latest_json(version: str, sums: dict, *, repo: str = DEFAULT_REPO, published_at: str = None) -> str:
-    """The updater manifest. `sums` maps package file name to SHA-256."""
+    """The updater manifest. `sums` maps package file name to SHA-256. `published_at` is when the
+    files were assembled, not when the owner publishes the draft; the updater ignores it."""
     names = package_names(version)
     assets = {}
     for kind, key in UPDATER_KEYS.items():
@@ -153,14 +158,17 @@ def validate_manifest(data: bytes, version: str, *, repo: str = DEFAULT_REPO) ->
     return manifest
 
 
-INSTALL_TEMPLATE = """## Brewery {version}
+INTRO = """## Brewery {version}
 
 Open-source IDE for Java and Spring, built on the Zed editor. It bundles its own JRE, so nothing else needs installing.
+"""
 
-### Install
+# Follows the changelog section, or INTRO when there is none: the downloads and the unsigned warning
+# are what people need on the page they download from.
+INSTALL_NOTES = """### Install
 
 - **Windows (x86_64):** run `{windows}`. It installs per user and needs no administrator rights. Brewery updates itself from GitHub Releases.
-- **Linux (x86_64):** install `{deb}` or `{rpm}`, or unpack `{linux}` anywhere. On Arch, use the `brewery-bin` PKGBUILD from `{aur}`.
+- **Linux (x86_64):** install `{deb}` or `{rpm}`, or unpack `{linux}` anywhere. On Arch, `{aur}` holds the `brewery-bin` PKGBUILD.
 - **macOS (Apple silicon, unsupported):** unzip `{macos}`.
 
 ### Unsigned builds
@@ -188,12 +196,12 @@ def _changelog_section(version: str, changelog: str):
 
 def release_notes(version: str, changelog, sums_text: str) -> str:
     section = _changelog_section(version, changelog) if changelog else None
-    if section:
-        body = section + "\n"
-    else:
-        names = package_names(version)
-        body = INSTALL_TEMPLATE.format(version=version, aur=f"brewery-{version}-aur.zip", **names)
-    return f"{body.rstrip()}\n\n### SHA256SUMS\n\n```\n{sums_text.rstrip()}\n```\n"
+    head = section if section else INTRO.format(version=version)
+    install = INSTALL_NOTES.format(aur=f"brewery-{version}-aur.zip", **package_names(version))
+    nl = chr(10)
+    fence = "```"
+    parts = [head.rstrip(), install.rstrip(), "### SHA256SUMS", fence + nl + sums_text.rstrip() + nl + fence]
+    return (nl + nl).join(parts) + nl
 
 
 def jre_source_text(bundle_deps: Path = BUNDLE_DEPS) -> str:

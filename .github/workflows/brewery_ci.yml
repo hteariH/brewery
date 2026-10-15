@@ -43,7 +43,8 @@ env:
   CARGO_INCREMENTAL: 0
   # Caches are saved from main and tags only. Branches restore main's caches, so they
   # can't evict them from the repository's 10 GB cache budget.
-  SAVE_CACHE: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
+  # Release calls (stable channel, other cache keys) never save: they would only fill the budget.
+  SAVE_CACHE: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && inputs.release != true }}
   # "dev" unless a caller asks for another channel (inputs are empty outside workflow_call).
   BREWERY_CHANNEL: ${{ inputs.channel || 'dev' }}
 
@@ -60,9 +61,9 @@ jobs:
       other_builds: ${{ steps.plan.outputs.other_builds }}
       bundle: ${{ steps.plan.outputs.bundle }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && inputs.release != true
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         id: filter
         if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && inputs.release != true
         with:
@@ -141,17 +142,17 @@ jobs:
     timeout-minutes: 150
     steps:
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Linux dependencies
         run: script/linux
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: 21
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-check
           save-if: ${{ env.SAVE_CACHE }}
@@ -182,7 +183,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install MSVC Spectre libraries
         shell: pwsh
         run: |
@@ -191,7 +192,7 @@ jobs:
           # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
           if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-check
           save-if: ${{ env.SAVE_CACHE }}
@@ -216,8 +217,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: 21
@@ -226,7 +227,7 @@ jobs:
         working-directory: brewery-daemon
         shell: bash
         run: ./gradlew test shadowJar --no-daemon
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: brewery-daemon-${{ matrix.os }}
           path: brewery-daemon/build/libs/brewery-daemon-all.jar
@@ -260,11 +261,11 @@ jobs:
     env:
       BUNDLE: target/bundle/${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
           java-version: 21
@@ -280,7 +281,7 @@ jobs:
       # Content-addressed by the pins; like the other caches, saved from main and tags only.
       - name: Restore the download cache
         id: cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/brewery-bundle
           key: brewery-bundle-${{ matrix.target }}-${{ hashFiles('script/brewery/bundle-deps.toml') }}
@@ -292,7 +293,7 @@ jobs:
             --daemon-jar brewery-daemon/build/libs/brewery-daemon-all.jar
       - name: Save the download cache
         if: env.SAVE_CACHE == 'true' && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/brewery-bundle
           key: ${{ steps.cache.outputs.cache-primary-key }}
@@ -327,7 +328,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: tar -C target/bundle -czf "target/bundle-$TARGET.tar.gz" "$TARGET"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bundle-${{ matrix.target }}
           path: ${{ runner.os == 'Windows' && env.BUNDLE || format('target/bundle-{0}.tar.gz', matrix.target) }}
@@ -345,7 +346,7 @@ jobs:
       # stable channel ships without any.
       CARGO_PROFILE_RELEASE_FAST_DEBUG: ${{ inputs.channel == 'stable' && 'none' || 'limited' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The channel is read from this file by the build (release_channel) and by the packaging scripts.
       - name: Select the release channel
         if: env.BREWERY_CHANNEL != 'dev'
@@ -361,14 +362,14 @@ jobs:
           # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
           if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
           if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-build
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
       # Zed's licences of the Rust dependencies (cargo-about). They are embedded in the app
       # (Help > View Dependency Licenses), so they must exist before the build.
-      - uses: taiki-e/install-action@v2.87.27
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: cargo-about@0.8.2
       - name: Generate the Rust dependency licences
@@ -392,7 +393,7 @@ jobs:
           if ($info.ProductName -ne $name) { throw "ProductName is '$($info.ProductName)', expected '$name'" }
           if ($info.CompanyName -ne 'Brewery contributors') { throw "CompanyName is '$($info.CompanyName)'" }
           if ($info.FileVersion -ne $expected) { throw "FileVersion is '$($info.FileVersion)', expected '$expected'" }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: brewery-windows-2025
           path: |
@@ -412,7 +413,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The channel is read from this file by the build (release_channel) and by the packaging scripts.
       - name: Select the release channel
         if: env.BREWERY_CHANNEL != 'dev'
@@ -420,11 +421,11 @@ jobs:
         run: |
           echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
           echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: brewery-windows-2025
           path: target/windows-build
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: bundle-windows-x64
           path: target/bundle/windows-x64
@@ -456,7 +457,7 @@ jobs:
           $line = '{0}  {1:N1} MB' -f $setup.Name, ($setup.Length / 1MB)
           Write-Host $line
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value @('### Windows installer', '', $line)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-windows-x64
           path: ${{ steps.installer.outputs.setup }}
@@ -482,10 +483,10 @@ jobs:
     steps:
       - name: Free disk space
         if: runner.os == 'Linux'
-        uses: jlumbroso/free-disk-space@v1.3.1
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: false
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The channel is read from this file by the build (release_channel) and by the packaging scripts.
       - name: Select the release channel
         if: env.BREWERY_CHANNEL != 'dev'
@@ -496,15 +497,15 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: script/linux
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-build
-          save-if: ${{ startsWith(github.ref, 'refs/tags/') }}
+          save-if: ${{ github.ref == 'refs/heads/main' && inputs.release != true }}
           cache-on-failure: true
       # Zed's licences of the Rust dependencies (cargo-about, the version script/generate-licenses
       # pins; prebuilt, checksum-checked by install-action). They are embedded in the app
       # (Help > View Dependency Licenses), so they must exist before the build.
-      - uses: taiki-e/install-action@v2.87.27
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: cargo-about@0.8.2
       - name: Generate the Rust dependency licences
@@ -518,7 +519,7 @@ jobs:
         run: cp assets/licenses.md target/release-fast/licenses.md
       # The artifact holds the app as `brewery`, the CLI as `cli` and licenses.md
       # (upload-artifact drops the executable bits; packaging scripts copy and chmod them).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: brewery-${{ matrix.os }}
           path: |
@@ -537,7 +538,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The channel is read from this file by the build (release_channel) and by the packaging scripts.
       - name: Select the release channel
         if: env.BREWERY_CHANNEL != 'dev'
@@ -545,11 +546,11 @@ jobs:
         run: |
           echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
           echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: brewery-ubuntu-24.04
           path: target/linux-build
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: bundle-linux-x64
           path: target
@@ -588,7 +589,7 @@ jobs:
           version=$(cat crates/zed/BREWERY_VERSION)
           docker run --rm -v "$PWD:/src:ro" -w /src fedora:41 \
             script/brewery/smoke-linux-package "target/package/brewery-${version}-1.x86_64.rpm" --version "$version"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-linux-x64
           path: |
@@ -608,7 +609,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The channel is read from this file by the build (release_channel) and by the packaging scripts.
       - name: Select the release channel
         if: env.BREWERY_CHANNEL != 'dev'
@@ -616,16 +617,16 @@ jobs:
         run: |
           echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
           echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Test the Info.plist writer
         run: python -m unittest discover -v -s script/brewery -p 'test_mac_info_plist.py'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: brewery-macos-15
           path: target/mac-build
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: bundle-macos-aarch64
           path: target
@@ -645,7 +646,7 @@ jobs:
             unzip -l target/package/*.zip | head -n 40
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-macos-aarch64
           path: target/package/*.zip
@@ -661,8 +662,8 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Render
@@ -686,7 +687,7 @@ jobs:
           winget validate --manifest target/manifests/broken | Out-Host
           if ($LASTEXITCODE -eq 0) { throw "winget validate accepted a manifest with an invalid Scope" }
           $global:LASTEXITCODE = 0
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-winget-manifests
           path: target/manifests/winget
@@ -701,8 +702,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: package-linux-x64
           path: target/package
@@ -715,7 +716,7 @@ jobs:
             archlinux:base-devel script/brewery/smoke-aur-package "/pkg/brewery-${version}-linux-x86_64.tar.gz" \
             --version "$version" --out /out
           cat target/aur/.SRCINFO
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-aur
           include-hidden-files: true

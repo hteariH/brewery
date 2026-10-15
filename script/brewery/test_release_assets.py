@@ -43,6 +43,26 @@ class TagTests(unittest.TestCase):
                 ra.check_tag(tag, file)
 
 
+class SemverTests(unittest.TestCase):
+    """The updater parses versions with semver::Version::parse."""
+
+    def test_accepts_semver(self):
+        for v in ["0.1.0", "1.0.0-rc.1", "1.0.0-rc-1", "1.0.0-alpha", "10.20.30", "1.0.0-0.3.7", "1.0.0-x.7.z.92"]:
+            with self.subTest(v=v):
+                self.assertEqual(ra.check_tag(f"v{v}", v)[0], v)
+
+    def test_rejects_what_semver_rejects(self):
+        for v in ["0.1.0-rc.", "0.1.0-rc..1", "01.0.0", "1.0.0-01", "1.0", "1.0.0-", "1.0.0-rc.01"]:
+            with self.subTest(v=v), self.assertRaises(ValueError):
+                ra.check_tag(f"v{v.strip()}", v)
+
+    def test_validate_manifest_rejects_a_version_the_updater_cannot_parse(self):
+        data = json.loads(ra.latest_json(VERSION, SHA, published_at="2026-10-15T00:00:00Z"))
+        data["version"] = "01.0.0"
+        with self.assertRaises(ValueError):
+            ra.validate_manifest(json.dumps(data).encode(), "01.0.0")
+
+
 class ChecksumTests(unittest.TestCase):
     def test_sha256sums_format_and_order(self):
         text = ra.sha256sums({"b.zip": "b" * 64, "a.exe": "A" * 64})
@@ -127,7 +147,17 @@ class NotesTests(unittest.TestCase):
         self.assertIn("- second", body)
         self.assertNotIn("later", body)
         self.assertNotIn("- old", body)
-        self.assertNotIn("Install", body)
+
+    def test_install_notes_follow_the_changelog_section(self):
+        body = ra.release_notes(VERSION, self.CHANGELOG, self.SUMS)
+        self.assertLess(body.index("- first thing"), body.index("### Install"))
+        self.assertLess(body.index("### Install"), body.index("### SHA256SUMS"))
+        self.assertIn("Brewery-0.1.0-x86_64-setup.exe", body)
+        self.assertIn("unsigned", body.lower())
+        self.assertIn("SmartScreen", body)
+        self.assertIn("xattr", body)
+        self.assertIn("jre-source.txt", body)
+        self.assertEqual(body.count("## Brewery 0.1.0"), 0)
 
     def test_template_when_no_section(self):
         body = ra.release_notes(VERSION, "# Changelog\n", self.SUMS)

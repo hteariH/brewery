@@ -190,10 +190,14 @@ installs and smoke-tests.
    note), merge to `main`.
 2. Dry run: `gh workflow run brewery_release.yml --ref main -R hteariH/brewery`
    (`dry_run` defaults to true). It builds, packages and tests everything, and uploads the
-   release files as the `release-assets` artifact plus the would-be body as
-   `release-notes.md`. Nothing is created. Takes 1 to 2 hours.
+   release files as the `release-files` artifact (`assets/`, `winget/`, `aur/` and
+   `release-notes.md`, the would-be body, also in the run summary). Nothing is created. Takes 1 to 2 hours.
 3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`. The tag must equal `v` plus
-   `BREWERY_VERSION`, or the `version` job fails. A pre-release tag (`v0.1.0-rc.1`) works
+   `BREWERY_VERSION` and its commit must be on `main`, or the `version` job fails. Try the
+   tag path with a pre-release first (`BREWERY_VERSION` `0.1.0-rc.1`, tag `v0.1.0-rc.1`),
+   check the draft and delete it and the tag. A hyphenated version has not been through the
+   Windows version assert and the deb/rpm smoke tests yet. If a release for the tag exists,
+   `publish` fails: delete the draft (and fix a moved tag) before re-running. A pre-release tag (`v0.1.0-rc.1`) works
    when the file says `0.1.0-rc.1` too; it creates a pre-release draft.
 4. The `publish` job creates a **draft** release with the packages, `SHA256SUMS`,
    `latest.json` (what the updater reads), `jre-source.txt` (source of the bundled
