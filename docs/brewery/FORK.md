@@ -69,6 +69,15 @@ metadata and used for packages and auto-update. Zed's own version (the `zed` cra
 `CARGO_PKG_VERSION`) stays as it is: the SSH remote server, extensions and the LSP
 client info depend on it.
 
+A pre-release such as `0.1.0-rc.1` keeps the full version wherever a string is allowed
+(About, `--version`, file names, the Windows FileVersion/ProductVersion strings, Inno
+`AppVersion`, winget `PackageVersion`, `latest.json`). Fields that must be numeric get
+`0.1.0`: the Windows binary FILEVERSION (`0.1.0.0`), Inno `VersionInfoVersion` and the macOS
+`CFBundleShortVersionString`/`CFBundleVersion` (the full version is in the `BreweryVersion`
+Info.plist key, which `cli --version` reads). Package managers get a version that sorts
+before the final release: `0.1.0~rc.1` in the deb and rpm (nFPM), `0.1.0_rc.1` as the AUR
+`pkgver`.
+
 ## Bundle layout
 
 `brewery_bundle` finds the files shipped next to the app: `jre/`, `brewery-daemon/
