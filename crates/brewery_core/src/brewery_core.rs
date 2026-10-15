@@ -135,7 +135,10 @@ mod tests {
         assert_eq!(BREWERY_VERSION, file.trim());
         let parsed = semver::Version::parse(file.trim()).expect("semver");
         assert_eq!(brewery_version(), parsed);
-        assert_eq!(BREWERY_VERSION, "0.1.0");
+        // A release (0.1.0) or a pre-release (0.1.0-rc.1); no build metadata, which the
+        // updater's semver comparison and the package versions would ignore.
+        assert!(parsed.build.is_empty(), "no +build metadata: {parsed}");
+        assert_ne!(parsed, semver::Version::new(0, 0, 0));
     }
 
     #[test]
