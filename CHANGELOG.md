@@ -3,6 +3,10 @@
 The text under `## <version>` is the top of that version's GitHub Release (install notes and checksums are added below it; see
 "Releasing" in docs/brewery/FORK.md). A version without a section gets a generic intro in its place.
 
+## 0.1.1
+
+- Project Diagnostics (Alt+6) now lists problems that belong to a whole project or folder, such as jdtls's "The project cannot be built until build path errors are resolved". Before, the error count showed 1 but the Diagnostics tab was empty.
+
 ## 0.1.0
 
 First public release of Brewery, an open-source IDE for Java and Spring built on the Zed editor.
