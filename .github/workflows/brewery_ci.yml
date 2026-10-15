@@ -151,9 +151,6 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_VERSION: check-linux
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -166,17 +163,11 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.18.0
-      - name: sccache log
-        shell: bash
-        run: echo "SCCACHE_ERROR_LOG=$RUNNER_TEMP/sccache.log" >> "$GITHUB_ENV"
-      # Registry and git checkouts only; sccache keeps the compiled crates.
+      # Linux keeps rust-cache's compiled dependencies (warm in ~16 min): there is no room in
+      # the 10 GB cache budget for sccache here as well.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-check
-          cache-targets: false
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
       - name: Check
@@ -197,10 +188,6 @@ jobs:
         env:
           BREWERY_DAEMON_JAR: ${{ github.workspace }}/brewery-daemon/build/libs/brewery-daemon-all.jar
         run: cargo test --locked -p brewery_daemon_client
-      - name: sccache stats
-        if: always()
-        shell: bash
-        run: script/brewery/sccache-stats
 
   check-windows:
     name: Check and test (windows-2025)
@@ -539,7 +526,6 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            sccache: true
           - os: macos-15
             unsupported: true
     continue-on-error: ${{ matrix.unsupported == true }}
@@ -547,9 +533,6 @@ jobs:
     timeout-minutes: 240
     env:
       CARGO_PROFILE_RELEASE_FAST_DEBUG: ${{ inputs.channel == 'stable' && 'none' || 'limited' }}
-      # An empty wrapper is no wrapper.
-      RUSTC_WRAPPER: ${{ matrix.sccache && 'sccache' || '' }}
-      SCCACHE_GHA_VERSION: build-${{ matrix.os }}
     steps:
       - name: Free disk space
         if: runner.os == 'Linux'
@@ -567,17 +550,9 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: script/linux
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        if: matrix.sccache
-        with:
-          version: v0.18.0
-      - name: sccache log
-        if: matrix.sccache
-        run: echo "SCCACHE_ERROR_LOG=$RUNNER_TEMP/sccache.log" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: brewery-build
-          cache-targets: ${{ !matrix.sccache }}
           save-if: ${{ github.ref == 'refs/heads/main' && inputs.release != true }}
           cache-on-failure: true
       # Zed's licences of the Rust dependencies (cargo-about, the version script/generate-licenses
@@ -606,9 +581,6 @@ jobs:
             target/release-fast/licenses.md
           if-no-files-found: error
           retention-days: 14
-      - name: sccache stats
-        if: always() && matrix.sccache
-        run: script/brewery/sccache-stats
 
   # The Linux tarball, deb and rpm from the Linux build and bundle (script/brewery/bundle-linux),
   # each package installed and removed in a clean container (script/brewery/smoke-linux-package).
