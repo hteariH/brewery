@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# sccache's statistics for the job, then why cache writes failed (from the server log that
+# SCCACHE_ERROR_LOG points at, with SCCACHE_LOG=sccache::server=debug). Throttling by the
+# GitHub Actions cache shows up there as HTTP 429.
+set -u
+sccache --show-stats
+log=${SCCACHE_ERROR_LOG:-}
+if [[ -n "$log" && -f "$log" ]]; then
+  echo
+  echo "Failed cache writes by cause:"
+  grep -o 'Error executing cache write: .*' "$log" | cut -c1-240 \
+    | sed -E 's/[0-9a-f]{16,}/<hash>/g; s/sccache\/[0-9a-f]\/[0-9a-f]\/[0-9a-f]\/[^ ",]*/<key>/g' \
+    | sort | uniq -c | sort -rn | head -n 15
+fi
