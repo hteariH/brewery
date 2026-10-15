@@ -54,8 +54,8 @@ env:
   SCCACHE_GHA_ENABLED: "true"
   # A cache error (the API throttles) compiles locally instead of failing the build.
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
-  # The server logs failed cache writes at debug level (script/brewery/sccache-stats sums them up).
-  SCCACHE_LOG: sccache::server=debug
+  # Misses and failed cache writes are logged at debug level (script/brewery/sccache-stats sums them up).
+  SCCACHE_LOG: sccache::server=debug,sccache::compiler::compiler=debug
   # TEMP: ci-speed writes too, to measure cold and warm runs.
   SCCACHE_GHA_RW_MODE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-speed') && inputs.release != true && 'READ_WRITE' || 'READ_ONLY' }}
 

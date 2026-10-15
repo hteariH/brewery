@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# sccache's statistics for the job, then why cache writes failed (from the server log that
-# SCCACHE_ERROR_LOG points at, with SCCACHE_LOG=sccache::server=debug). Throttling by the
-# GitHub Actions cache shows up there as HTTP 429.
+# sccache's statistics for the job, then from the server log that SCCACHE_ERROR_LOG points at
+# (SCCACHE_LOG=sccache::server=debug,sccache::compiler::compiler=debug): the crates that
+# missed, and why cache writes failed (throttling by the GitHub Actions cache shows as HTTP 429).
 set -u
 sccache --show-stats
 log=${SCCACHE_ERROR_LOG:-}
 if [[ -n "$log" && -f "$log" ]]; then
+  echo
+  misses=$(grep -o '\[[^]]*\]: Cache miss' "$log" | sed -E 's/^\[//; s/\]: Cache miss$//' | sort -u)
+  echo "Crates that missed the cache ($(grep -c . <<<"$misses")):"
+  paste -sd' ' <<<"$misses" | fold -s -w 120
   echo
   echo "Failed cache writes by cause:"
   grep -o 'Error executing cache write: .*' "$log" | cut -c1-240 \
