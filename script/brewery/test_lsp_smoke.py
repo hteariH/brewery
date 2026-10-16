@@ -51,6 +51,7 @@ FAKE_SERVER = textwrap.dedent(
         if method == "initialize":
             if MODE == "silent":
                 continue
+            root = msg["params"]["rootUri"]
             # Ask the client something first; a real jdtls does this too.
             send({"jsonrpc": "2.0", "id": "s1", "method": "workspace/configuration",
                   "params": {"items": [{"section": "java"}]}})
@@ -61,8 +62,35 @@ FAKE_SERVER = textwrap.dedent(
                   "result": {"capabilities": {"documentSymbolProvider": True},
                              "serverInfo": {"name": "fake", "version": str(len(bundles))}}})
         elif method == "initialized":
+            if MODE == "build-error":
+                # How jdtls reports a failed Gradle import.
+                send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                      "params": {"uri": root + "/build.gradle.kts", "diagnostics": [
+                          {"severity": 1, "message": "Could not run phased build action"}]}})
+            # Hints on build files are fine.
+            send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                  "params": {"uri": root + "/settings.gradle.kts", "diagnostics": [
+                      {"severity": 3, "message": "The build file has been changed"}]}})
             send({"jsonrpc": "2.0", "method": "language/status",
                   "params": {"type": "ServiceReady", "message": "ServiceReady"}})
+        elif method == "textDocument/hover":
+            send({"jsonrpc": "2.0", "id": msg["id"],
+                  "result": {"contents": {"kind": "markdown", "value": "demo.Owner\n\nOwns things."}}})
+        elif method == "workspace/didChangeWatchedFiles":
+            send({"jsonrpc": "2.0", "method": "language/actionableNotification",
+                  "params": {"severity": 3, "message": "A build file was modified.",
+                             "commands": [{"title": "Yes",
+                                           "command": "java.projectConfiguration.status"}]}})
+        elif method == "java/projectConfigurationUpdate":
+            if MODE == "update-fails":
+                send({"jsonrpc": "2.0", "method": "window/logMessage", "params": {"type": 1,
+                      "message": "An internal error occurred during: \"Updating project configurations\".\n"
+                                 "org.gradle.tooling.BuildException: Could not run build action\n"
+                                 "Caused by: java.lang.IllegalArgumentException: The specified"
+                                 " initialization script 'init.gradle' does not exist."}})
+            else:
+                send({"jsonrpc": "2.0", "method": "language/status",
+                      "params": {"type": "ProjectStatus", "message": "OK"}})
         elif method == "workspace/executeCommand":
             send({"jsonrpc": "2.0", "id": msg["id"], "result": 50505})
         elif method == "textDocument/documentSymbol":
@@ -155,6 +183,34 @@ class LspSmokeTest(unittest.TestCase):
             )
         self.assertNotEqual(code, 0)
         self.assertIn("timed out", err.getvalue())
+
+    def test_hover_text(self):
+        code, log = self.smoke("ok", "--hover", "src/Owner.java:1:7:Owns things.")
+        self.assertEqual(code, 0, log)
+        self.assertIn("hover src/Owner.java:1:7", log)
+        code, log = self.smoke("ok", "--timeout", "4", "--hover", "src/Owner.java:1:7:Nope")
+        self.assertNotEqual(code, 0)
+        self.assertIn("has no 'Nope'", log)
+
+    def test_clean_build_files(self):
+        code, log = self.smoke("ok", "--wait-ready", "--clean-build-files")
+        self.assertEqual(code, 0, log)
+        self.assertIn("no errors on build files", log)
+        code, log = self.smoke("build-error", "--wait-ready", "--clean-build-files")
+        self.assertNotEqual(code, 0)
+        self.assertIn("build.gradle.kts: Could not run phased build action", log)
+
+    def test_change_build_file_updates_the_project(self):
+        (self.project / "build.gradle.kts").write_text("plugins { java }\n", encoding="utf-8")
+        code, log = self.smoke("ok", "--wait-ready", "--change-build-file", "build.gradle.kts")
+        self.assertEqual(code, 0, log)
+        self.assertIn("project updated (OK)", log)
+        self.assertEqual(
+            (self.project / "build.gradle.kts").read_text(encoding="utf-8"), "plugins { java }\n\n"
+        )
+        code, log = self.smoke("update-fails", "--wait-ready", "--change-build-file", "build.gradle.kts")
+        self.assertNotEqual(code, 0)
+        self.assertIn("initialization script 'init.gradle' does not exist", log)
 
     def test_unchanged_dir_check(self):
         watched = self.tmp / "bundle"
