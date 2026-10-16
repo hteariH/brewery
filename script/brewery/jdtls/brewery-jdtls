@@ -11,7 +11,8 @@
 #   java       <bundle>/jre/bin/java, else $JAVA_HOME/bin/java, else PATH
 #   config     shared, read-only: <bundle>/jdtls/config_<os>[_arm]
 #              writable: <cache>/config/<sha1 of this jdtls directory>
-#   workspace  -data when given, else <cache>/workspace/jdtls-<sha1 of the cwd>
+#   workspace  -data when given, else <cache>/workspace/jdtls-<sha1 of the cwd>;
+#              rebuilt when this jdtls changes (see the stamp below)
 #   cache      $BREWERY_JDTLS_CACHE_DIR, else ~/Library/Caches/Brewery/jdtls
 #              (macOS) or ${XDG_CACHE_HOME:-~/.cache}/brewery/jdtls
 #
@@ -110,6 +111,37 @@ fi
 config_area=$cache/config/$(sha1 "$jdtls_home")
 if [ -z "$data" ]; then
     data=$cache/workspace/jdtls-$(sha1 "$(pwd)")
+fi
+
+# A workspace remembers paths into the configuration area: Gradle projects keep
+# "--init-script <config>/org.eclipse.osgi/<bundle id>/0/.cp/gradle/init/init.gradle"
+# in their Buildship settings. When this jdtls is replaced (a Brewery update),
+# Equinox reinstalls its bundles under new ids and those paths stop existing, so
+# Gradle imports fail until the workspace is rebuilt. The stamp names this jdtls;
+# a workspace from another one (or from before the stamp) is moved away and
+# deleted, and jdtls imports the project again.
+file_stamp() {
+    for f in "$@"; do
+        [ -e "$f" ] || continue
+        printf '|%s|' "${f##*/}"
+        stat -c '%s|%Y' "$f" 2>/dev/null || stat -f '%z|%m' "$f" 2>/dev/null || echo '?'
+    done
+}
+stamp="$config_area$(file_stamp "$shared/config.ini" "$jdtls_home"/plugins/org.eclipse.jdt.ls.core_*.jar)"
+stamp_file=$data/.metadata/brewery-jdtls.stamp
+if [ ! -f "$stamp_file" ] || [ "$(cat "$stamp_file" 2>/dev/null)" != "$stamp" ]; then
+    wiped=yes
+    if [ -d "$data/.metadata" ]; then
+        stale=$data.stale-$$
+        if mv "$data" "$stale" 2>/dev/null; then
+            rm -rf "$stale" 2>/dev/null || true
+        else
+            wiped=no
+        fi
+    fi
+    if [ "$wiped" = yes ] && mkdir -p "$data/.metadata" 2>/dev/null; then
+        printf '%s\n' "$stamp" >"$stamp_file" 2>/dev/null || true
+    fi
 fi
 
 eval "exec \"\$java\" \
