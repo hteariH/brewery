@@ -1,5 +1,7 @@
 package dev.brewery.daemon.db
 
+import org.postgresql.core.BaseConnection
+import org.postgresql.core.TransactionState
 import java.sql.Connection
 import java.sql.DatabaseMetaData
 import java.sql.Types
@@ -27,7 +29,42 @@ class Introspector(private val connection: Connection, private val includeSystem
     private val dialect = Dialect.detect(meta)
     private val depth = if (dialect.namespace == Dialect.Namespace.NONE) 0 else 1
 
-    fun children(path: List<String>): List<DbNode> {
+    fun children(path: List<String>): List<DbNode> = isolated { childrenOf(path) }
+
+    /**
+     * Runs [block] so that a failing query cannot abort a PostgreSQL transaction that is open on the connection (the
+     * user's BEGIN or the implicit streaming one): inside a transaction it runs under a savepoint and a failure rolls
+     * back to it. Elsewhere a failed metadata query does not poison the session, so nothing is wrapped.
+     */
+    private fun <T> isolated(block: () -> T): T {
+        if (!inPostgresTransaction()) return block()
+        sql("SAVEPOINT $SAVEPOINT")
+        val result = try {
+            block()
+        } catch (t: Throwable) {
+            runCatching { sql("ROLLBACK TO SAVEPOINT $SAVEPOINT") }
+            runCatching { sql("RELEASE SAVEPOINT $SAVEPOINT") }
+            throw t
+        }
+        sql("RELEASE SAVEPOINT $SAVEPOINT")
+        return result
+    }
+
+    private fun inPostgresTransaction(): Boolean {
+        if (dialect != Dialect.POSTGRESQL) return false
+        if (!connection.autoCommit) return true
+        // A user's BEGIN leaves JDBC autocommit on; pgjdbc knows the server's state.
+        return runCatching {
+            connection.isWrapperFor(BaseConnection::class.java) &&
+                connection.unwrap(BaseConnection::class.java).transactionState != TransactionState.IDLE
+        }.getOrDefault(false)
+    }
+
+    private fun sql(text: String) {
+        connection.createStatement().use { it.execute(text) }
+    }
+
+    private fun childrenOf(path: List<String>): List<DbNode> {
         if (path.isEmpty() && depth == 1) return namespaces()
         val ns = path.take(depth)
         val rest = path.drop(depth)
@@ -51,7 +88,9 @@ class Introspector(private val connection: Connection, private val includeSystem
      * namespace gets an equal share, and what small namespaces do not use goes to the larger ones, so a huge
      * schema cannot starve the others. Output is in namespace name order, tables before views, by name.
      */
-    fun snapshot(maxTables: Int): DbSchema {
+    fun snapshot(maxTables: Int): DbSchema = isolated { snapshotOf(maxTables) }
+
+    private fun snapshotOf(maxTables: Int): DbSchema {
         val namespaces = if (depth == 0) listOf(emptyList()) else namespaces().map { it.path }
         val found = namespaces.map { tableList(it) }
         val keep = IntArray(found.size)
@@ -148,8 +187,11 @@ class Introspector(private val connection: Connection, private val includeSystem
         val out = mutableListOf<DbNode>()
         out += tables.sortedBy { it.name.lowercase() }
         out += views.sortedBy { it.name.lowercase() }
-        // pg_sequences needs PostgreSQL 10; losing the sequences must not lose the tables.
-        if (dialect == Dialect.POSTGRESQL && ns.isNotEmpty()) out += runCatching { sequences(ns[0]) }.getOrDefault(emptyList())
+        // pg_sequences needs PostgreSQL 10; losing the sequences (no permission, a lookalike server) must not lose the tables.
+        val hasPgSequences = runCatching { meta.databaseMajorVersion >= 10 }.getOrDefault(false)
+        if (dialect == Dialect.POSTGRESQL && ns.isNotEmpty() && hasPgSequences) {
+            out += runCatching { isolated { sequences(ns[0]) } }.getOrDefault(emptyList())
+        }
         return out
     }
 
@@ -197,8 +239,10 @@ class Introspector(private val connection: Connection, private val includeSystem
     private fun columns(ns: List<String>, table: String, path: List<String>): List<DbNode> {
         val primaryKey = mutableSetOf<String>()
         runCatching {
-            meta.getPrimaryKeys(catalogOf(ns), schemaOf(ns), table).use { rs ->
-                while (rs.next()) rs.getString("COLUMN_NAME")?.let(primaryKey::add)
+            isolated {
+                meta.getPrimaryKeys(catalogOf(ns), schemaOf(ns), table).use { rs ->
+                    while (rs.next()) rs.getString("COLUMN_NAME")?.let(primaryKey::add)
+                }
             }
         }
         val cols = mutableListOf<Pair<Int, DbNode>>()
@@ -278,6 +322,7 @@ class Introspector(private val connection: Connection, private val includeSystem
     }
 
     private companion object {
+        const val SAVEPOINT = "brewery_introspect"
         const val FOLDER_COLUMNS = "columns"
         const val FOLDER_INDEXES = "indexes"
         const val FOLDER_FOREIGN_KEYS = "foreignKeys"

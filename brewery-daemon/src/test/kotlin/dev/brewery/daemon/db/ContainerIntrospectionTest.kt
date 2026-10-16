@@ -47,10 +47,41 @@ class PostgresIntrospectionTest {
                 st.executeUpdate("CREATE SCHEMA axb")
                 st.executeUpdate("CREATE TABLE a_b.t (only_in_a_b int)")
                 st.executeUpdate("CREATE TABLE axb.t (only_in_axb int)")
+                // A user for whom the sequence query fails (like PostgreSQL < 10 or Redshift, where pg_sequences is missing).
+                st.executeUpdate("CREATE TABLE app.notes (n int)")
+                st.executeUpdate("CREATE ROLE limited LOGIN PASSWORD 'limited'")
+                st.executeUpdate("GRANT USAGE ON SCHEMA app TO limited")
+                st.executeUpdate("GRANT SELECT, INSERT ON app.notes TO limited")
+                st.executeUpdate("REVOKE SELECT ON pg_catalog.pg_sequences FROM PUBLIC")
             }
         }
         service = DbService(Files.createTempDirectory("brewery-pg"), InMemorySecretStore())
         id = service.save(ConnectionInfo("", "pg", "postgresql", postgres.jdbcUrl, postgres.username, false, emptyMap()), postgres.password).id
+        limited = service.save(ConnectionInfo("", "limited", "postgresql", postgres.jdbcUrl, "limited", false, emptyMap()), "limited").id
+    }
+
+    private lateinit var limited: String
+
+    @Test
+    fun `a failing introspection query does not abort the user's transaction`() {
+        service.execute(limited, "BEGIN")
+        service.execute(limited, "INSERT INTO app.notes VALUES (1)")
+        val nodes = service.introspect(limited, listOf("app"))
+        assertTrue(nodes.any { it.name == "notes" }, nodes.toString())
+        assertTrue(nodes.none { it.kind == "sequence" }, nodes.toString())
+        service.execute(limited, "INSERT INTO app.notes VALUES (2)")
+        service.execute(limited, "COMMIT")
+        val count = service.execute(limited, "SELECT count(*) FROM app.notes WHERE n IN (1, 2)")
+        assertEquals(listOf(listOf("2")), service.fetch(count.cursorId!!, 0, 1).rows)
+    }
+
+    @Test
+    fun `a failing introspection query keeps streaming cursors alive`() {
+        val cursor = service.execute(limited, "SELECT generate_series(1, 100000) AS g").cursorId!!
+        assertEquals(listOf(listOf("1")), service.fetch(cursor, 0, 1).rows)
+        service.introspect(limited, listOf("app"))
+        assertEquals(listOf(listOf("2")), service.fetch(cursor, 1, 1).rows)
+        service.closeCursor(cursor)
     }
 
     @AfterAll
