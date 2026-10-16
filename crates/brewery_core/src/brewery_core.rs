@@ -1,5 +1,7 @@
 //! Brewery-wide switches and glue that sit next to Zed's own crates.
 
+use std::any::TypeId;
+
 use command_palette_hooks::CommandPaletteFilter;
 use gpui::{App, Menu, MenuItem};
 
@@ -9,12 +11,23 @@ pub use brewery_cloud::ZED_CLOUD_ENABLED;
 /// `auto_update` is not one: Brewery updates from its own GitHub Releases.
 pub const HIDDEN_CLOUD_NAMESPACES: &[&str] = &["client", "collab", "collab_panel"];
 
-/// Hides Zed-cloud actions. Call after `command_palette::init`.
+/// Single actions hidden from the command palette, by name (their crates depend
+/// on brewery_core). `auto_update::ViewReleaseNotesLocally` opens the same GitHub
+/// release page as `auto_update::ViewReleaseNotes`, so "locally" would mislead.
+pub const HIDDEN_ACTIONS: &[&str] = &["auto_update::ViewReleaseNotesLocally"];
+
+/// Hides Zed-cloud actions and [`HIDDEN_ACTIONS`]. Call after `command_palette::init`.
 pub fn init(cx: &mut App) {
+    let hidden_actions: Vec<TypeId> = HIDDEN_ACTIONS
+        .iter()
+        .filter_map(|name| cx.build_action(name, None).ok())
+        .map(|action| action.as_any().type_id())
+        .collect();
     CommandPaletteFilter::update_global(cx, |filter, _| {
         for namespace in HIDDEN_CLOUD_NAMESPACES {
             filter.hide_namespace(namespace);
         }
+        filter.hide_action_types(&hidden_actions);
     });
 }
 
@@ -162,10 +175,11 @@ mod tests {
         assert_eq!(based_on_zed("1.25.0"), "based on Zed 1.25.0");
     }
 
-    /// Stand-in for `auto_update::Check` (brewery_core cannot depend on
-    /// auto_update, which depends on it); the filter works by namespace.
+    /// Stand-ins for `auto_update::Check` and auto_update_ui's
+    /// `auto_update::ViewReleaseNotesLocally` (brewery_core cannot depend on
+    /// either crate, which depend on it); the filter finds actions by name.
     mod update_actions {
-        gpui::actions!(auto_update, [Check]);
+        gpui::actions!(auto_update, [Check, ViewReleaseNotesLocally]);
     }
 
     fn action(name: &str) -> MenuItem {
@@ -247,6 +261,8 @@ mod tests {
             // Updates come from Brewery's GitHub Releases, so `auto_update: check` stays.
             assert!(!filter.is_hidden(&update_actions::Check));
             assert!(!HIDDEN_CLOUD_NAMESPACES.contains(&"auto_update"));
+            // It opens the same GitHub release page as "auto_update: view release notes".
+            assert!(filter.is_hidden(&update_actions::ViewReleaseNotesLocally));
         });
     }
 
