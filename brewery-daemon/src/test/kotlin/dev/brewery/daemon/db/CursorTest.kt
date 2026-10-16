@@ -109,8 +109,13 @@ class CursorTest {
         assertEquals(3L, upd.updateCount)
         val ddl = service.execute(id, "CREATE TABLE u (a INTEGER)")
         assertNull(ddl.cursorId)
-        // The count of a DDL statement is whatever the driver reports (SQLite repeats the previous change count).
-        assertNotNull(ddl.updateCount)
+        // SQLite's own count would repeat the previous statement's 3; like PostgreSQL, DDL reports 0.
+        assertEquals(0L, ddl.updateCount)
+        assertEquals(2L, service.execute(id, "INSERT INTO u VALUES (1), (2)").updateCount)
+        assertEquals(0L, service.execute(id, "ALTER TABLE u ADD COLUMN b TEXT").updateCount)
+        assertEquals(0L, service.execute(id, "CREATE INDEX u_a ON u (a)").updateCount)
+        assertEquals(0L, service.execute(id, "UPDATE u SET b = 'x' WHERE a > 5").updateCount)
+        assertEquals(0L, service.execute(id, "DROP TABLE u").updateCount)
     }
 
     @Test

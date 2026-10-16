@@ -2,6 +2,7 @@ package dev.brewery.daemon.db
 
 import org.postgresql.core.BaseConnection
 import org.postgresql.core.TransactionState
+import org.sqlite.SQLiteConnection
 import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.SQLException
@@ -226,11 +227,15 @@ class CursorManager(
                     runCatching { statement.maxRows = (rowLimit + 1).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() }
                 }
             }
+            val changesBefore = sqliteTotalChanges(connection)
             val started = System.nanoTime()
             val hasResultSet = statement.execute(sql)
             val elapsedMs = (System.nanoTime() - started) / 1_000_000
             if (!hasResultSet) {
-                return DbExecuteResult(null, emptyList(), statement.updateCount.toLong().coerceAtLeast(0), elapsedMs)
+                // SQLite reports the previous statement's change count for one that changes no rows (DDL).
+                val unchanged = changesBefore != null && sqliteTotalChanges(connection) == changesBefore
+                val count = if (unchanged) 0L else statement.updateCount.toLong().coerceAtLeast(0)
+                return DbExecuteResult(null, emptyList(), count, elapsedMs)
             }
             val rs = statement.resultSet
             val meta = rs.metaData
@@ -259,6 +264,12 @@ class CursorManager(
             if (!kept) runCatching { statement.close() }
         }
     }
+
+    /** `sqlite3_total_changes()` of a bundled-driver SQLite connection (no query), or null for anything else. */
+    private fun sqliteTotalChanges(c: Connection): Long? = runCatching {
+        if (!c.isWrapperFor(SQLiteConnection::class.java)) return null
+        c.unwrap(SQLiteConnection::class.java).database.total_changes()
+    }.getOrNull()
 
     /**
      * Rows [offset, offset + limit) of the cursor (limit capped at [MAX_LIMIT]). The result set is forward-only:
