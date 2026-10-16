@@ -18,7 +18,8 @@
 //! - a text filter adds `--all-match`, so a graph search on a text-filtered log finds commits
 //!   matching both the filter and the query (git ORs several `--grep`s otherwise).
 //! - each user value is one argv element (`--author=<v>`, `--grep=<v>`), never split and never
-//!   passed through a shell; ref names starting with `-` are refused, and paths come after `--`.
+//!   passed through a shell; ref names starting with `-` are refused, and paths come after `--`
+//!   as `:(literal)` pathspecs.
 
 use git::repository::{Branch, LogSource, RepoPath, commit_hash_search_query};
 use gpui::SharedString;
@@ -245,7 +246,12 @@ impl LogFilter {
             args.extend(branches.iter().map(|name| name.to_string()));
         }
         args.push("--".into());
-        args.extend(self.paths.iter().map(|path| path.as_unix_str().to_string()));
+        // Literal paths, as in IntelliJ: no globs or `:(magic)`.
+        args.extend(
+            self.paths
+                .iter()
+                .map(|path| format!(":(literal){}", path.as_unix_str())),
+        );
         if args.iter().any(|arg| arg.contains('\0')) {
             return Err(LogFilterError::NulByte);
         }

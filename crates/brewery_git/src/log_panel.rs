@@ -797,8 +797,20 @@ impl LogPanel {
         }
         // A different repository starts unfiltered (its branches and paths differ).
         let repo = repo_id.and_then(|repo_id| self.repository(repo_id, cx));
-        self.filter_bar
-            .update(cx, |bar, cx| bar.set_repository(repo, window, cx));
+        let project_dir = repo.as_ref().and_then(|repo| {
+            let work_dir = repo.read(cx).work_directory_abs_path.clone();
+            self.project
+                .read(cx)
+                .visible_worktrees(cx)
+                .find_map(|tree| {
+                    let root = tree.read(cx).abs_path();
+                    let dir = root.strip_prefix(&work_dir).ok()?;
+                    Some(dir.to_string_lossy().replace('\\', "/"))
+                })
+        });
+        self.filter_bar.update(cx, |bar, cx| {
+            bar.set_repository(repo, project_dir, window, cx)
+        });
         match repo_id {
             Some(repo_id) => {
                 let source = self.filter_source(cx);

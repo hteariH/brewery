@@ -123,9 +123,18 @@ async fn open_real<'a>(
     repo: &TestRepo,
     cx: &'a mut TestAppContext,
 ) -> (Fixture, &'a mut VisualTestContext) {
+    open_real_at(repo, &repo.work, cx).await
+}
+
+/// A project of `root`, a folder in `repo`.
+async fn open_real_at<'a>(
+    repo: &TestRepo,
+    root: &std::path::Path,
+    cx: &'a mut TestAppContext,
+) -> (Fixture, &'a mut VisualTestContext) {
     cx.executor().allow_parking();
     crate::cli::set_test_env(repo.env.clone());
-    let project = Project::test(RealFs::new(None, cx.executor()), [repo.work.as_path()], cx).await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root], cx).await;
     let tree = project.read_with(cx, |project, cx| {
         project.worktrees(cx).next().expect("worktree")
     });
@@ -1170,4 +1179,41 @@ async fn an_option_like_branch_never_enters_the_filter(cx: &mut TestAppContext) 
         assert_eq!(bar.error().cloned(), Some("not a branch name: -foo".into()));
     });
     assert_eq!(panel_source(&fixture, cx), None);
+}
+
+#[gpui::test]
+async fn paths_are_literal_and_relative_to_a_project_inside_the_repository(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    std::fs::create_dir(repo.work.join("sub")).expect("sub dir");
+    let c1 = repo.commit("sub/a.txt", "1\n", "a");
+    let c2 = repo.commit("sub/[ab].txt", "1\n", "brackets");
+    let _c3 = repo.commit("root.txt", "1\n", "root");
+    let (fixture, cx) = open_real_at(&repo, &repo.work.join("sub"), cx).await;
+    cx.dispatch_action(ToggleLogPanel);
+    wait_for_commits(&fixture, 3, cx);
+    let bar = bar(&fixture, cx);
+
+    // Typed relative to the project, matched literally: `[ab]` is not a glob.
+    let rejected = bar.update(cx, |bar, cx| bar.set_paths_text("[ab].txt", cx));
+    assert!(rejected.is_empty());
+    assert_eq!(
+        bar.read_with(cx, |bar, _| bar.filter().paths.clone()),
+        vec![RepoPath::new("sub/[ab].txt").expect("path")]
+    );
+    cx.run_until_parked();
+    assert_eq!(wait_for_graph(&fixture, cx), BTreeSet::from([c2]));
+    assert_eq!(
+        bar.read_with(cx, |bar, cx| bar.path_texts(cx)),
+        vec!["[ab].txt".to_string()],
+        "shown as typed"
+    );
+
+    // "." is the project folder.
+    bar.update(cx, |bar, cx| bar.set_paths_text(".", cx));
+    cx.run_until_parked();
+    let shas = wait_for_graph(&fixture, cx);
+    assert!(shas.contains(&c1) && shas.len() == 2, "{shas:?}");
 }
