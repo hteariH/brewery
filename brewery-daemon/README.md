@@ -30,7 +30,10 @@ The daemon owns database access for the editor's Database tool window.
   (`//user:password@host`, `?password=`, `pwd=`) or a `password`/`pwd` driver option is
   moved to the OS secret store on save, and the save is refused when there is no store.
 - `db/introspect { connectionId, path }`: lazy schema tree (catalogs or schemas, tables,
-  views, sequences, then `columns`, `indexes` and `foreignKeys` folders).
+  views, sequences, then `columns`, `indexes` and `foreignKeys` folders). On MariaDB/MySQL
+  it reads on a short-lived separate connection like `db/schema`, so results still being
+  read in a console stay alive (if that connection cannot be opened it falls back to the
+  session and ends its unfinished cursors).
 - `db/schema { connectionId, refresh? }`: flat snapshot for SQL completion (schemas, each
   with tables and views, each with columns and types; at most 5000 tables, then
   `truncated: true`). SQLite has one schema named `""`, MariaDB/MySQL catalogs are
@@ -41,7 +44,7 @@ The daemon owns database access for the editor's Database tool window.
   never ends streaming cursors: on MariaDB/MySQL (whose driver drains a pending result
   when another command runs) it uses a short-lived separate connection on its own thread
   (chosen from the saved URL, no probe connection; if that connection cannot be opened it
-  falls back to the session and ends unfinished cursors like `db/introspect`); elsewhere it
+  falls back to the session and ends unfinished cursors); elsewhere it
   runs on the connection's session. When there are more than 5000 tables the
   limit is shared fairly between schemas. Changes made outside the editor, or by
   statements such as `SELECT ... INTO`, `CALL` or `ATTACH`, show up after `refresh: true`.

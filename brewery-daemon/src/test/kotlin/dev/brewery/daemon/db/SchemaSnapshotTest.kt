@@ -286,11 +286,27 @@ class SchemaSnapshotTest {
         service.schema(connectionId, true)
 
         assertEquals(2, service.fetch(cursor, 1, 10).rows.size)
-        // introspection still expires them (user-initiated), the snapshot did not.
+        // Expanding the schema tree uses the separate connection too.
         val another = service.execute(connectionId, "SELECT id FROM owners").cursorId!!
         assertEquals(1, service.fetch(another, 0, 1).rows.size)
-        service.introspect(connectionId, emptyList())
-        assertEquals(-32013, assertFailsWith<DbException> { service.fetch(another, 1, 1) }.code)
+        assertEquals(listOf("owners", "pets", "pet_names"), service.introspect(connectionId, emptyList()).map { it.name })
+        assertEquals(listOf("id", "name", "email"), service.introspect(connectionId, listOf("owners", "columns")).map { it.name })
+        assertEquals(2, service.fetch(another, 1, 10).rows.size)
+    }
+
+    @Test
+    fun `introspection falls back to the session when no separate connection can be opened`() {
+        service.close()
+        service = DbService(root, InMemorySecretStore(), manageTransactions = { false }, expireUnfinishedBeforeCommands = { true }, snapshotOnSeparateConnection = { true })
+        service.openMetadataConnection = { throw DbException(DbErrorCodes.CONNECTION_FAILED, "too many connections") }
+        DriverManager.getConnection("jdbc:sqlite:$db").use { c ->
+            c.createStatement().use { st -> st.executeUpdate("INSERT INTO owners (id, name) VALUES (1, 'a'), (2, 'b')") }
+        }
+        val cursor = service.execute(connectionId, "SELECT id FROM owners").cursorId!!
+        assertEquals(1, service.fetch(cursor, 0, 1).rows.size)
+        assertEquals(listOf("owners", "pets", "pet_names"), service.introspect(connectionId, emptyList()).map { it.name })
+        assertEquals(-32013, assertFailsWith<DbException> { service.fetch(cursor, 1, 1) }.code)
+        assertEquals(DbErrorCodes.NOT_FOUND, assertFailsWith<DbException> { service.introspect("missing", emptyList()) }.code)
     }
 
     @Test

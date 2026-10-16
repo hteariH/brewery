@@ -25,7 +25,7 @@ class DbService(
     private val expireUnfinishedBeforeCommands: (Connection) -> Boolean = ::isMariaDb,
     /** Most tables and views one `db/schema` snapshot holds; tests inject a small value. */
     private val maxSchemaTables: Int = SchemaSnapshot.MAX_TABLES,
-    /** Whether snapshots of a saved connection are built on a separate connection (its driver drains pending results); decided without connecting. */
+    /** Whether snapshots and introspection of a saved connection use a separate connection (its driver drains pending results); decided without connecting. */
     private val snapshotOnSeparateConnection: (ConnectionInfo) -> Boolean = { isMariaDbUrl(it.url) },
 ) : AutoCloseable {
     private val projectKey: String = try {
@@ -206,16 +206,27 @@ class DbService(
             ?: throw SQLException("The ${driverId} driver does not accept this URL", "08001")
     }
 
-    /** Lazily lists the children of [path] in the schema tree of connection [connectionId]. */
-    fun introspect(connectionId: String, path: List<String>, includeSystem: Boolean = false): List<DbNode> =
-        sessions.runIn(connectionId) { session, c ->
-            cursorManagers[connectionId]?.takeIf { it.session === session }?.expireUnfinishedIfNeeded(c)
-            try {
-                Introspector(c, includeSystem).children(path)
-            } catch (e: SQLException) {
-                throw queryFailure(e)
-            }
+    /**
+     * Lazily lists the children of [path] in the schema tree of connection [connectionId]. Like [schema], MariaDB/MySQL
+     * connections are read on a short-lived separate connection, so expanding the tree does not end results still
+     * being read in a console; when that connection cannot be opened, the session is used and its unfinished
+     * cursors end (fetch -> -32013).
+     */
+    fun introspect(connectionId: String, path: List<String>, includeSystem: Boolean = false): List<DbNode> {
+        val saved = store.connection(connectionId) ?: throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $connectionId")
+        fun on(c: Connection) = try {
+            Introspector(c, includeSystem).children(path)
+        } catch (e: SQLException) {
+            throw queryFailure(e)
         }
+        if (snapshotOnSeparateConnection(saved)) {
+            onMetadataThread(connectionId, ::on)?.let { return it }
+        }
+        return sessions.runIn(connectionId) { session, c ->
+            cursorManagers[connectionId]?.takeIf { it.session === session }?.expireUnfinishedIfNeeded(c)
+            on(c)
+        }
+    }
 
     private val schemas = SchemaCache()
     /** How many snapshots were built (cache misses and refreshes); tests use it to prove a cache hit. */
@@ -241,7 +252,7 @@ class DbService(
      * settings, closed afterwards, network timeout [METADATA_TIMEOUT_MS]) on a thread of its own per connection,
      * created only for such connections; the session and its cursors are not touched. If that connection cannot be
      * opened (server connection limit, ...) the build falls back to the session, which then ends the session's
-     * unfinished cursors exactly like [introspect] does (fetch -> -32013). Every other database (PostgreSQL,
+     * unfinished cursors exactly like the fallback of [introspect] does (fetch -> -32013). Every other database (PostgreSQL,
      * SQLite, generic) builds on the session thread: metadata queries leave PostgreSQL portals and the streaming
      * transaction alone, and a separate connection would not see a private SQLite database such as `:memory:`.
      */
@@ -270,8 +281,8 @@ class DbService(
      * Runs [block] with a fresh connection of saved connection [id] on that id's metadata thread and closes it
      * afterwards. Null when the connection cannot be opened (the caller falls back); other failures propagate.
      */
-    private fun onMetadataThread(id: String, block: (Connection) -> DbSchema): DbSchema? {
-        val task = Callable<DbSchema?> {
+    private fun <T : Any> onMetadataThread(id: String, block: (Connection) -> T): T? {
+        val task = Callable<T?> {
             val c = try {
                 openMetadataConnection(id)
             } catch (e: DbException) {

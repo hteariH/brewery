@@ -124,6 +124,16 @@ class MariaDbSchemaTest {
     }
 
     @Test
+    fun `expanding the schema tree leaves an unfinished streaming cursor alive`() {
+        val cursor = service.execute(id, "SELECT seq FROM seq_1_to_5000").cursorId!!
+        assertEquals(10, service.fetch(cursor, 0, 10).rows.size)
+        assertTrue("shop" in service.introspect(id, emptyList()).map { it.name })
+        assertEquals(listOf("id", "name", "note"), service.introspect(id, listOf("shop", "customers", "columns")).map { it.name })
+        assertEquals(10, service.fetch(cursor, 10, 10).rows.size)
+        service.closeCursor(cursor)
+    }
+
+    @Test
     fun `catalogs are the schemas without system databases`() {
         val snapshot = service.schema(id, true)
         val names = snapshot.schemas.map { it.name }
