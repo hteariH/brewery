@@ -23,6 +23,8 @@ use ui::{
 };
 
 pub const REMOTE_TOOLTIP: &str = "Filters work in local projects";
+const TEXT_TOOLTIP: &str = "Text in commit messages, ignoring case, or a commit hash. While a \
+    text or user filter is set, the Log search ignores case too.";
 /// How many recent commits the User choices are collected from.
 const AUTHOR_SCAN_LIMIT: usize = 2000;
 const GIT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -374,7 +376,28 @@ impl LogFilterBar {
 
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let text = Some(text.trim().to_string()).filter(|text| !text.is_empty());
-        self.change(|filter| filter.text = text, cx);
+        self.change(
+            |filter| {
+                if filter.text != text {
+                    filter.text = text;
+                    filter.text_is_hash = None;
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Marks the hash-like text as not a commit, so it greps the messages instead; ignored
+    /// when the text changed since it was looked up.
+    pub fn set_text_not_a_commit(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.change(
+            |filter| {
+                if filter.text.as_deref().map(str::trim) == Some(text) {
+                    filter.text_is_hash = Some(false);
+                }
+            },
+            cx,
+        );
     }
 
     fn confirm_text(&mut self, _: &menu::Confirm, _: &mut Window, cx: &mut Context<Self>) {
@@ -613,7 +636,10 @@ impl Render for LogFilterBar {
             .rounded_sm()
             .border_1()
             .border_color(cx.theme().colors().border_variant)
-            .when(self.enabled, |this| this.child(self.text_editor.clone()))
+            .when(self.enabled, |this| {
+                this.child(self.text_editor.clone())
+                    .tooltip(Tooltip::text(TEXT_TOOLTIP))
+            })
             .when(!self.enabled, |this| {
                 this.child(
                     Label::new("Text or hash")

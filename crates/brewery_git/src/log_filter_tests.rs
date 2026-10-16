@@ -221,6 +221,18 @@ fn a_hash_goes_to_the_commit_instead_of_grepping() {
 }
 
 #[test]
+fn a_hash_like_text_that_is_not_a_commit_greps_the_messages() {
+    let filter = LogFilter {
+        text: Some("20261013".into()),
+        text_is_hash: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(filter.commit_hash(), None);
+    assert!(args(&filter).contains(&"--grep=20261013".to_string()));
+    assert!(filter.log_source().expect("valid").is_some(), "it filters");
+}
+
+#[test]
 fn paths_rewrite_parents_and_follow_the_separator() {
     let filter = LogFilter {
         paths: vec![path("src/main.rs"), path("-odd dir/x")],
@@ -251,6 +263,7 @@ fn every_field_combined() {
         until: Some(DateBound::Day(date!(2026 - 12 - 31))),
         paths: vec![path("b.txt")],
         text: Some("fix".into()),
+        text_is_hash: None,
     };
     assert_eq!(
         args(&filter),

@@ -11,7 +11,10 @@
 //!   are passed as `<email>`, brackets included, which is an exact email match; typed text
 //!   stays a substring.
 //! - for the same reason the graph search's "case sensitive" toggle has no effect while an
-//!   author or text filter is set (`--regexp-ignore-case` is global too).
+//!   author or text filter is set (`--regexp-ignore-case` is global too). The text field's
+//!   tooltip says so.
+//! - a hash-like text (7 to 64 hex digits) first goes to that commit; when `rev-parse` does
+//!   not resolve it, it greps the messages like any other text (`LogFilter::text_is_hash`).
 //! - a text filter adds `--all-match`, so a graph search on a text-filtered log finds commits
 //!   matching both the filter and the query (git ORs several `--grep`s otherwise).
 //! - each user value is one argv element (`--author=<v>`, `--grep=<v>`), never split and never
@@ -162,6 +165,10 @@ pub struct LogFilter {
     pub paths: Vec<RepoPath>,
     /// Text in the commit message, or a commit hash (7 or more hex digits) to go to.
     pub text: Option<String>,
+    /// Whether a hash-like `text` names a commit, once `rev-parse` has said so: `None` until
+    /// then (the Log goes to it), `Some(false)` when it does not, and the text greps the
+    /// messages instead (a date like `20261013`, a ticket number, "deadbeef").
+    pub text_is_hash: Option<bool>,
 }
 
 fn non_blank(values: &[String]) -> impl Iterator<Item = &str> {
@@ -177,14 +184,18 @@ impl LogFilter {
         !self.limits_commits() && self.commit_hash().is_none()
     }
 
-    /// The text, when it is a commit hash: the Log goes to that commit instead of grepping.
+    /// The text, when it looks like a commit hash and is not known to be something else: the
+    /// Log goes to that commit instead of grepping.
     pub fn commit_hash(&self) -> Option<&str> {
+        if self.text_is_hash == Some(false) {
+            return None;
+        }
         self.text.as_deref().and_then(commit_hash_search_query)
     }
 
     fn grep_text(&self) -> Option<&str> {
         let text = self.text.as_deref()?.trim();
-        if text.is_empty() || commit_hash_search_query(text).is_some() {
+        if text.is_empty() || self.commit_hash().is_some() {
             return None;
         }
         Some(text)

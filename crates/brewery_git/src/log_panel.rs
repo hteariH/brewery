@@ -322,9 +322,10 @@ impl LogPanel {
             };
             this.update_in(cx, |this, window, cx| match sha {
                 Some(sha) => this.select_commit(&sha, window, cx),
-                None => this.filter_bar.update(cx, |bar, cx| {
-                    bar.set_error(Some(format!("No commit {hash}").into()), cx)
-                }),
+                // Not a commit (a date, a ticket number): search the messages for it.
+                None => this
+                    .filter_bar
+                    .update(cx, |bar, cx| bar.set_text_not_a_commit(&hash, cx)),
             })
             .ok();
         })

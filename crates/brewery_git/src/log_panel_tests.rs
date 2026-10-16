@@ -833,19 +833,25 @@ async fn a_hash_goes_to_the_commit_without_filtering(cx: &mut TestAppContext) {
         "the same graph"
     );
 
-    // An unknown hash says so.
-    apply(
-        &fixture,
-        LogFilter {
-            text: Some("0000000".into()),
-            ..Default::default()
-        },
-        cx,
-    );
+    // Hex text that is not a commit (a date, a ticket number) searches the messages instead.
     let bar = bar(&fixture, cx);
-    wait_until(cx, "the error", |cx| {
-        bar.read_with(cx, |bar, _| bar.error().cloned()) == Some("No commit 0000000".into())
+    bar.update(cx, |bar, cx| bar.set_text("0000000", cx));
+    wait_until(cx, "the message search", |cx| {
+        panel_source(&fixture, cx).is_some()
     });
+    let LogSource::Args(args) = panel_source(&fixture, cx).expect("filtered") else {
+        panic!("a filtered source");
+    };
+    assert!(args.iter().any(|arg| arg == "--grep=0000000"), "{args:?}");
+    assert_eq!(wait_for_graph(&fixture, cx), BTreeSet::new());
+    assert_eq!(bar.read_with(cx, |bar, _| bar.error().cloned()), None);
+
+    // A new text is a hash again until looked up.
+    bar.update(cx, |bar, cx| bar.set_text(&history.c[2][..9], cx));
+    wait_until(cx, "the commit to be selected", |cx| {
+        selected_sha(&fixture, cx) == Some(history.c[2].clone())
+    });
+    assert_eq!(panel_source(&fixture, cx), None, "not filtered");
 }
 
 #[gpui::test]
