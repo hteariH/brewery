@@ -35,7 +35,7 @@ actions!(
 
 pub fn init(cx: &mut App) {
     notify_if_app_was_updated(cx);
-    // brewery: Linux and macOS notification for a newer release
+    // brewery: Linux, macOS and Preview notification for a newer release
     notify_when_update_is_available(cx);
     cx.observe_new(|workspace: &mut Workspace, _window, cx| {
         workspace.register_action(|workspace, _: &ViewReleaseNotesLocally, window, cx| {
@@ -349,7 +349,7 @@ fn show_update_notification(cx: &mut App) {
     }
 }
 
-// brewery: Linux and macOS are told about a newer Brewery release instead of installing it
+// brewery: Linux, macOS and Preview are told about a newer Brewery release instead of installing it
 struct UpdateAvailableNotification;
 
 fn notify_when_update_is_available(cx: &mut App) {

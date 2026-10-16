@@ -256,7 +256,10 @@ and `tools\auto_update_helper.exe` swaps the files on quit, including the `jre`,
 `brewery-daemon`, `jdtls` and `extensions` directories. The helper waits up to 5 s for
 processes started from those directories and then stops them. On Linux and macOS
 Brewery only shows a notification with a link to the release notes; packages update
-through the package manager. Don't set `ZED_UPDATE_EXPLANATION` in builds: it turns
+through the package manager. Preview builds poll the same (Stable) manifest but only
+notify, on every OS: the Stable installer has another AppId and install directory, so
+a Preview build never runs it. Give Preview its own manifest before publishing
+Preview releases that should update each other. Don't set `ZED_UPDATE_EXPLANATION` in builds: it turns
 the check off completely. To test updates, set `BREWERY_UPDATE_MANIFEST_URL` to an
 HTTPS URL of a test manifest (for example a file in a public test release or a gist);
 draft release files are not public, so they don't work. Brewery logs when the
