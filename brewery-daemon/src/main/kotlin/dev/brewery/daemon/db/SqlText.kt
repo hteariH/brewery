@@ -6,10 +6,10 @@ object SqlText {
         /** A plain read: SELECT/WITH/VALUES/TABLE/SHOW/EXPLAIN without locking, writing or INTO. */
         READ,
 
-        /** BEGIN / START TRANSACTION: the user takes over transaction control. */
+        /** BEGIN / START TRANSACTION / COMMIT AND CHAIN: the user (still) has transaction control. */
         TX_BEGIN,
 
-        /** COMMIT / END / ROLLBACK / ABORT: the user's transaction is over. */
+        /** COMMIT / END / ROLLBACK / ABORT (without AND CHAIN) / PREPARE TRANSACTION: the user's transaction is over. */
         TX_END,
         OTHER,
     }
@@ -17,14 +17,26 @@ object SqlText {
     private val READ_WORDS = setOf("SELECT", "WITH", "VALUES", "TABLE", "SHOW", "EXPLAIN")
     private val NOT_PLAIN = Regex("\\b(FOR\\s+(NO\\s+KEY\\s+)?(UPDATE|SHARE)|FOR\\s+KEY\\s+SHARE|RETURNING|INSERT|UPDATE|DELETE|MERGE|INTO)\\b", RegexOption.IGNORE_CASE)
 
+    private val CHAIN = Regex("\\bAND\\s+CHAIN\\b", RegexOption.IGNORE_CASE)
+
+    /**
+     * Judged from the first statement's keywords. A script of several statements is never a plain [Kind.READ]; its
+     * transaction effect is only guessed, so callers that can ask the server (PostgreSQL) do.
+     */
     fun classify(sql: String): Kind {
         val clean = sanitize(sql)
         val (first, second) = firstWords(clean)
         return when (first) {
-            in READ_WORDS -> if (NOT_PLAIN.containsMatchIn(clean)) Kind.OTHER else Kind.READ
+            in READ_WORDS ->
+                if (NOT_PLAIN.containsMatchIn(clean) || clean.split(';').count { it.isNotBlank() } > 1) Kind.OTHER else Kind.READ
             "BEGIN", "START" -> Kind.TX_BEGIN
-            "COMMIT", "END", "ROLLBACK", "ABORT" ->
-                if (second == "PREPARED" || (first == "ROLLBACK" && second == "TO")) Kind.OTHER else Kind.TX_END
+            "PREPARE" -> if (second == "TRANSACTION") Kind.TX_END else Kind.OTHER
+            "COMMIT", "END", "ROLLBACK", "ABORT" -> when {
+                second == "PREPARED" || (first == "ROLLBACK" && second == "TO") -> Kind.OTHER
+                // ... AND CHAIN ends the transaction and opens the next one at once.
+                CHAIN.containsMatchIn(clean) -> Kind.TX_BEGIN
+                else -> Kind.TX_END
+            }
             else -> Kind.OTHER
         }
     }

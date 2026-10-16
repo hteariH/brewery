@@ -117,6 +117,55 @@ class PostgresCursorTest {
         assertEquals(listOf(listOf("0")), count.rows)
     }
 
+    private fun count(table: String): String? =
+        service.fetch(service.execute(id, "SELECT count(*) FROM $table").cursorId!!, 0, 1).rows.single()[0]
+
+    @Test
+    fun `COMMIT AND CHAIN keeps the chained transaction the user's`() {
+        service.execute(id, "CREATE TABLE IF NOT EXISTS chain_t (a int)")
+        service.execute(id, "TRUNCATE chain_t")
+        service.execute(id, "BEGIN")
+        service.execute(id, "INSERT INTO chain_t VALUES (1)")
+        service.execute(id, "COMMIT AND CHAIN")
+        // Releasing this cursor must not commit the chained transaction.
+        val read = service.execute(id, "SELECT a FROM chain_t")
+        service.fetch(read.cursorId!!, 0, 10)
+        service.closeCursor(read.cursorId!!)
+        service.execute(id, "INSERT INTO chain_t VALUES (2)")
+        service.execute(id, "ROLLBACK AND CHAIN")
+        service.execute(id, "SELECT 1").cursorId?.let(service::closeCursor)
+        service.execute(id, "INSERT INTO chain_t VALUES (3)")
+        service.execute(id, "ROLLBACK")
+        assertEquals("1", count("chain_t"))
+    }
+
+    @Test
+    fun `a BEGIN inside a script starts a user transaction`() {
+        service.execute(id, "CREATE TABLE IF NOT EXISTS script_t (a int)")
+        service.execute(id, "TRUNCATE script_t")
+        service.execute(id, "SELECT 1; BEGIN")
+        service.execute(id, "SELECT 1").cursorId?.let(service::closeCursor)
+        service.execute(id, "INSERT INTO script_t VALUES (1)")
+        service.execute(id, "ROLLBACK")
+        assertEquals("0", count("script_t"))
+    }
+
+    @Test
+    fun `a failed COMMIT ends the user transaction`() {
+        service.execute(id, "CREATE TABLE IF NOT EXISTS fk_p (id int PRIMARY KEY)")
+        service.execute(id, "CREATE TABLE IF NOT EXISTS fk_c (p int REFERENCES fk_p DEFERRABLE INITIALLY DEFERRED)")
+        service.execute(id, "BEGIN")
+        service.execute(id, "INSERT INTO fk_c VALUES (42)")
+        assertEquals(-32012, assertFailsWith<DbException> { service.execute(id, "COMMIT") }.code)
+        // The server is idle again: reads stream in an implicit transaction and writes commit at once.
+        val read = service.execute(id, "SELECT generate_series(1, 100000) AS g")
+        assertEquals(false, service.sessions.run(id) { it.autoCommit })
+        service.closeCursor(read.cursorId!!)
+        service.execute(id, "INSERT INTO fk_p VALUES (7)")
+        assertEquals(true, service.sessions.run(id) { it.autoCommit })
+        assertEquals("1", count("fk_p WHERE id = 7"))
+    }
+
     @Test
     fun `insert returning commits at once`() {
         service.execute(id, "CREATE TABLE IF NOT EXISTS ret_t (a int)")

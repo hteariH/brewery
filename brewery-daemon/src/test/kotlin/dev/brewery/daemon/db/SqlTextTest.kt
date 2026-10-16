@@ -36,6 +36,24 @@ class SqlTextTest {
     }
 
     @Test
+    fun `chained and prepared transaction ends`() {
+        for (sql in listOf("COMMIT AND CHAIN", "rollback and chain;", "COMMIT WORK AND CHAIN", "END TRANSACTION AND CHAIN")) {
+            assertEquals(Kind.TX_BEGIN, kind(sql), sql)
+        }
+        for (sql in listOf("COMMIT AND NO CHAIN", "ROLLBACK WORK AND NO CHAIN", "PREPARE TRANSACTION 'x'")) {
+            assertEquals(Kind.TX_END, kind(sql), sql)
+        }
+    }
+
+    @Test
+    fun `a script of several statements is never a plain read`() {
+        for (sql in listOf("SELECT 1; BEGIN", "select 1; insert into t values (1)", "SELECT 1;\nSELECT 2")) {
+            assertEquals(Kind.OTHER, kind(sql), sql)
+        }
+        for (sql in listOf("SELECT 1;", "select ';' ; -- trailing", "select 1 /* ; */")) assertEquals(Kind.READ, kind(sql), sql)
+    }
+
+    @Test
     fun `keywords inside literals identifiers and comments do not matter`() {
         val d = "$"
         val plain = listOf(

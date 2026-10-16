@@ -8,6 +8,9 @@ import java.sql.DriverManager
 import java.sql.SQLException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import org.postgresql.core.BaseConnection
+import org.postgresql.core.TransactionState
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -142,6 +145,49 @@ class StreamingTransactionTest {
         assertEquals(3, session.run { manager.fetch(again.cursorId!!, 0, 10) }.rows.size)
         assertTrue(session.run { it.autoCommit })
         assertEquals(null, r.updateCount)
+    }
+
+    /** SQLite that reports [state] as its server transaction state, the way pgjdbc's [BaseConnection] does. */
+    private fun reporting(real: Connection, state: AtomicReference<TransactionState>): Connection {
+        lateinit var proxy: Connection
+        proxy = Proxy.newProxyInstance(javaClass.classLoader, arrayOf(BaseConnection::class.java)) { _, method, args ->
+            when (method.name) {
+                "getTransactionState" -> state.get()
+                "isWrapperFor" -> (args!![0] as Class<*>).isInstance(proxy) || real.isWrapperFor(args[0] as Class<*>)
+                "unwrap" -> if ((args!![0] as Class<*>).isInstance(proxy)) proxy else real.unwrap(args[0] as Class<*>)
+                else -> try {
+                    method.invoke(real, *(args ?: emptyArray()))
+                } catch (e: InvocationTargetException) {
+                    throw e.targetException
+                }
+            }
+        } as Connection
+        return proxy
+    }
+
+    @Test
+    fun `the server transaction state wins over the statement keywords`() {
+        val state = AtomicReference(TransactionState.IDLE)
+        val session = Session("s", { reporting(DriverManager.getConnection("jdbc:sqlite:$db"), state) }, { now }).also(toClose::add)
+        val manager = CursorManager(session, ConcurrentHashMap(), manageTransactions = { true })
+        // COMMIT AND CHAIN, a CALL or a BEGIN inside a script: the keywords say "no transaction", the server says open.
+        state.set(TransactionState.OPEN)
+        session.run { manager.execute(it, "UPDATE t SET name = name WHERE id = 1") }
+        val inUserTx = session.run { manager.execute(it, "SELECT id FROM t") }
+        assertTrue(session.run { it.autoCommit }, "a read inside the user's transaction must not be wrapped")
+        session.run { manager.close(inUserTx.cursorId!!) }
+        // The keywords say "BEGIN", but the server is idle (e.g. the BEGIN failed): reads stream again.
+        state.set(TransactionState.IDLE)
+        session.run { manager.execute(it, "UPDATE t SET name = name WHERE id = 1") }
+        val streamed = session.run { manager.execute(it, "SELECT id FROM t") }
+        assertEquals(false, session.run { it.autoCommit })
+        session.run { manager.close(streamed.cursorId!!) }
+        assertTrue(session.run { it.autoCommit })
+        // A failed transaction is still the user's to end.
+        state.set(TransactionState.FAILED)
+        session.run { manager.execute(it, "UPDATE t SET name = name WHERE id = 1") }
+        session.run { manager.execute(it, "SELECT id FROM t") }
+        assertTrue(session.run { it.autoCommit })
     }
 
     private fun flaky(real: Connection, failNextCreate: AtomicBoolean): Connection =

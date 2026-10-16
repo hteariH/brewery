@@ -1,5 +1,7 @@
 package dev.brewery.daemon.db
 
+import org.postgresql.core.BaseConnection
+import org.postgresql.core.TransactionState
 import java.sql.Connection
 import java.sql.ResultSet
 import java.sql.SQLException
@@ -45,6 +47,7 @@ private class Cursor(
  *    cancelled `fetch` aborts the transaction and drops all streaming cursors.
  *  - BEGIN / START TRANSACTION switches the session to the user's control: nothing is wrapped, committed or
  *    rolled back by the manager and results are buffered by the driver, until COMMIT / END / ROLLBACK / ABORT.
+ *    On pgjdbc the server's own transaction state decides instead of the keywords (see [serverInTransaction]).
  *    (SET autocommit style statements are not tracked.)
  *  - Any unexpected failure restores autocommit; the manager never leaves a transaction without an owner.
  *
@@ -91,6 +94,7 @@ class CursorManager(
         expireUnfinishedIfNeeded(connection)
         if (!managesTransactions(connection)) return runStatement(connection, sql, ownsTx = false)
         val kind = SqlText.classify(sql)
+        serverInTransaction(connection)?.let { userTx = it }
         if (userTx) return runTracking(connection, sql, kind)
         if (synchronized(cursors) { txOwners } > 0) {
             if (kind == SqlText.Kind.READ) return executeInOpenTransaction(connection, sql)
@@ -132,14 +136,31 @@ class CursorManager(
     }
 
     private fun runTracking(c: Connection, sql: String, kind: SqlText.Kind): DbExecuteResult {
-        val result = runStatement(c, sql, ownsTx = false)
-        when (kind) {
-            SqlText.Kind.TX_BEGIN -> userTx = true
-            SqlText.Kind.TX_END -> userTx = false
-            else -> {}
+        var ran = false
+        try {
+            return runStatement(c, sql, ownsTx = false).also { ran = true }
+        } finally {
+            // Also after a failure: a failed COMMIT ends the transaction, a failed statement after BEGIN aborts it.
+            val server = serverInTransaction(c)
+            when {
+                server != null -> userTx = server
+                !ran -> {}
+                kind == SqlText.Kind.TX_BEGIN -> userTx = true
+                kind == SqlText.Kind.TX_END -> userTx = false
+            }
         }
-        return result
     }
+
+    /**
+     * Whether the server has a transaction open, as pgjdbc tracks it from every ReadyForQuery message (open or
+     * failed counts as open): COMMIT AND CHAIN, PREPARE TRANSACTION, a failed COMMIT, a CALL that commits or a
+     * BEGIN inside a script all show up here, keywords cannot see them. Null when unknown (not pgjdbc) or while
+     * autocommit is off (then the driver itself keeps a transaction open).
+     */
+    private fun serverInTransaction(c: Connection): Boolean? = runCatching {
+        if (!c.autoCommit || !c.isWrapperFor(BaseConnection::class.java)) return null
+        c.unwrap(BaseConnection::class.java).transactionState != TransactionState.IDLE
+    }.getOrNull()
 
     private fun executeFresh(c: Connection, sql: String): DbExecuteResult {
         c.autoCommit = false
