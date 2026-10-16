@@ -740,6 +740,58 @@ async fn a_schema_change_refreshes_the_completion(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn an_abandoned_schema_change_still_refreshes_the_completion(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_at("SELECT * FROM |", "ow", cx);
+    assert_eq!(console.fixture.calls_of("db/schema").len(), 1);
+
+    // Cancelled, the driver ignores it and the console gives up waiting; the DDL ends later.
+    console.fixture.state.hold("db/execute");
+    console.type_sql("CREATE TABLE vets (id int)", cx);
+    console.run(cx);
+    console.console.update_in(cx, |console, window, cx| {
+        console.cancel(&CancelStatement, window, cx)
+    });
+    cx.executor()
+        .advance_clock(CANCEL_GIVE_UP + Duration::from_millis(1));
+    cx.run_until_parked();
+    console.fixture.state.release("db/execute");
+    cx.run_until_parked();
+    assert_eq!(
+        console.fixture.calls_of("db/schema").last(),
+        Some(&json!({"connectionId": "c1", "refresh": true}))
+    );
+
+    // The tab is closed while the DDL runs: the next console of the data source rebuilds.
+    console.type_sql("DROP TABLE vets", cx);
+    console.run(cx);
+    let Console { fixture, console } = console;
+    close_console(&fixture, console, cx);
+    fixture.state.release("db/execute");
+    cx.run_until_parked();
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select(Some(RowKey::data_source("c1")), cx);
+        panel.new_query_console(window, cx)
+    });
+    cx.run_until_parked();
+    let console = Console {
+        console: fixture
+            .workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item_as::<QueryConsole>(cx)
+            })
+            .expect("a new console"),
+        fixture,
+    };
+    console.type_at("SELECT * FROM |", "ow", cx);
+    assert_eq!(
+        console.fixture.calls_of("db/schema").last(),
+        Some(&json!({"connectionId": "c1", "refresh": true}))
+    );
+    assert_eq!(console.fixture.calls_of("db/schema").len(), 3);
+}
+
+#[gpui::test]
 async fn completion_without_a_schema_still_offers_keywords(cx: &mut TestAppContext) {
     let (console, cx) = console(cx).await;
     console
@@ -800,6 +852,15 @@ async fn completing_inside_a_quoted_name_replaces_it_whole(cx: &mut TestAppConte
     console.type_at("SELECT o.\"F|rst\" FROM owners o", "i", cx);
     console.accept(cx);
     assert_eq!(console.text(cx), "SELECT o.\"First Name\" FROM owners o");
+}
+
+#[gpui::test]
+async fn completing_inside_a_word_replaces_the_rest_of_it(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_at("SELECT * FROM o|ners", "w", cx);
+    assert_eq!(console.menu(cx)[0], "owners table · public");
+    console.accept(cx);
+    assert_eq!(console.text(cx), "SELECT * FROM owners");
 }
 
 #[gpui::test]

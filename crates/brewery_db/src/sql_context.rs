@@ -50,6 +50,8 @@ pub struct SqlContext {
     pub replace_end: usize,
     /// What was typed of that identifier before the cursor, without the quote.
     pub prefix: String,
+    /// The rest of a bare word the cursor is inside (`ners` in `ow|ners`); see `replace_end_for`.
+    suffix: String,
     /// The tables of the statement under the cursor, in order, subqueries included.
     pub tables: Vec<TableRef>,
     /// For each of `tables`, the inside of the subquery it belongs to (`STATEMENT` at the top).
@@ -58,6 +60,23 @@ pub struct SqlContext {
 }
 
 impl SqlContext {
+    /// Where accepting `label` ends its replacement: inside a bare word (`ow|ners`), through the
+    /// end of the word when `label` ends with the rest of it (as Zed's default `lsp_insert_mode`,
+    /// `replace_suffix`, does), else `replace_end`.
+    pub fn replace_end_for(&self, label: &str) -> usize {
+        let ends_with_suffix = !self.suffix.is_empty()
+            && label
+                .len()
+                .checked_sub(self.suffix.len())
+                .and_then(|start| label.get(start..))
+                .is_some_and(|end| end.eq_ignore_ascii_case(&self.suffix));
+        if ends_with_suffix {
+            self.replace_end + self.suffix.len()
+        } else {
+            self.replace_end
+        }
+    }
+
     /// Indices of `tables` by level: the innermost subquery around the cursor first, then the
     /// levels around it; last, every table of the statement as a fallback.
     fn levels(&self) -> Vec<Vec<usize>> {
@@ -635,6 +654,7 @@ pub fn context_at(sql: &str, offset: usize) -> SqlContext {
         prefix_start: offset,
         replace_end: offset,
         prefix: String::new(),
+        suffix: String::new(),
         tables: Vec::new(),
         scopes: Vec::new(),
         offset,
@@ -661,6 +681,7 @@ pub fn context_at(sql: &str, offset: usize) -> SqlContext {
             && matches!(token.kind, Kind::Word | Kind::Quoted | Kind::Number)
     });
     let mut replace_end = offset;
+    let mut suffix = String::new();
     let (prefix_start, prefix, before_end) = match typing.map(|ix| (ix, statement[ix])) {
         Some((_, token)) if token.kind == Kind::Number => return nothing,
         Some((ix, token)) => {
@@ -678,6 +699,7 @@ pub fn context_at(sql: &str, offset: usize) -> SqlContext {
                     sql[token.range.start + quote_len..offset].to_string()
                 }
             } else {
+                suffix = sql[offset..token.range.end].to_string();
                 sql[token.range.start..offset].to_string()
             };
             (token.range.start, prefix, ix)
@@ -723,6 +745,7 @@ pub fn context_at(sql: &str, offset: usize) -> SqlContext {
         prefix_start,
         replace_end,
         prefix,
+        suffix,
         tables,
         scopes,
         offset,

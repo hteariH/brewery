@@ -232,6 +232,7 @@ impl QueryConsole {
             cx,
         );
         let daemon = self.daemon.clone();
+        let connection_id = self.connection.id.clone();
         // Detached rather than owned, so that a cursor opened after the tab was closed (or after
         // the run was abandoned) is still closed.
         cx.spawn(async move |this, cx| {
@@ -240,10 +241,12 @@ impl QueryConsole {
                 .as_ref()
                 .ok()
                 .and_then(|result| result.cursor_id.clone());
+            // The schema changed even when nobody waits for this run any more.
+            if changes_schema && result.is_ok() {
+                cx.update(|cx| SchemaCache::refresh_connection(&daemon, &connection_id, cx));
+            }
             let shown = this
-                .update(cx, |this, cx| {
-                    this.finish_run(run_id, result, note, changes_schema, cx)
-                })
+                .update(cx, |this, cx| this.finish_run(run_id, result, note, cx))
                 .unwrap_or(false);
             if !shown && let Some(cursor) = cursor {
                 let close = cx.update(|cx| daemon.read(cx).db_close(cursor, cx));
@@ -260,7 +263,6 @@ impl QueryConsole {
         run_id: u64,
         result: anyhow::Result<ExecuteResult>,
         note: Option<SharedString>,
-        changes_schema: bool,
         cx: &mut Context<Self>,
     ) -> bool {
         if run_id != self.run_id || self.running.is_none() {
@@ -269,13 +271,8 @@ impl QueryConsole {
         self.running = None;
         self.cancel_timeout = None;
         if result.is_ok() {
-            self.schema_cache.update(cx, |cache, cx| {
-                if changes_schema {
-                    cache.refresh(cx);
-                } else {
-                    cache.retry_after_failure();
-                }
-            });
+            self.schema_cache
+                .update(cx, |cache, _| cache.retry_after_failure());
         }
         self.outcome = match result {
             Ok(ExecuteResult {

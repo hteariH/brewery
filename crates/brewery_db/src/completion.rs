@@ -29,7 +29,8 @@ pub struct SqlCompletion {
 pub struct Dialect {
     pub driver_id: String,
     /// The schema unqualified names resolve to; tables of other schemas are inserted as
-    /// `schema.table`. `None` never qualifies (SQLite, or nothing known).
+    /// `schema.table`. `None` never qualifies (SQLite, or nothing known), except for MySQL and
+    /// MariaDB, where it means no database is selected and every table is qualified.
     pub default_schema: Option<String>,
 }
 
@@ -79,12 +80,16 @@ impl Dialect {
         }
     }
 
+    /// Whether a table of `schema` can be written unqualified. MySQL and MariaDB connected
+    /// without a database have none selected, so every table needs its database.
     fn is_default(&self, schema: &str) -> bool {
-        schema.is_empty()
-            || self
-                .default_schema
-                .as_deref()
-                .is_none_or(|default| default.eq_ignore_ascii_case(schema))
+        if schema.is_empty() {
+            return true;
+        }
+        match self.default_schema.as_deref() {
+            Some(default) => default.eq_ignore_ascii_case(schema),
+            None => !matches!(self.driver_id.as_str(), "mysql" | "mariadb"),
+        }
     }
 }
 
@@ -316,18 +321,20 @@ impl CompletionProvider for SqlCompletionProvider {
         _window: &mut Window,
         cx: &mut Context<Editor>,
     ) -> Task<Result<Vec<CompletionResponse>>> {
-        let (context, replace_range) = {
-            let buffer = buffer.read(cx);
-            let offset = buffer_position.to_offset(buffer);
-            let context = context_at(&buffer.text(), offset);
-            let start = buffer.anchor_before(context.prefix_start.min(offset));
-            // Inside `"Fi|"` the closing quote is replaced too.
-            let end = if context.replace_end > offset {
-                buffer.anchor_after(context.replace_end)
+        let buffer = buffer.read(cx).snapshot();
+        let offset = buffer_position.to_offset(&buffer);
+        let context = context_at(&buffer.text(), offset);
+        let start = buffer.anchor_before(context.prefix_start.min(offset));
+        // Inside `"Fi|"` the closing quote is replaced too, inside `ow|ners` the rest of the
+        // word when the name ends with it.
+        let replace_range = |label: &str| {
+            let end = context.replace_end_for(label);
+            let end = if end > offset {
+                buffer.anchor_after(end)
             } else {
                 buffer_position
             };
-            (context, start..end)
+            start..end
         };
         let schema = if context.kind == ContextKind::Nothing {
             None
@@ -346,7 +353,7 @@ impl CompletionProvider for SqlCompletionProvider {
         let completions = completions_for(&context, schema.as_deref(), &self.dialect)
             .into_iter()
             .map(|item| Completion {
-                replace_range: replace_range.clone(),
+                replace_range: replace_range(&item.label),
                 new_text: item.insert,
                 label: CodeLabel::plain(item.label, None),
                 documentation: Some(CompletionDocumentation::SingleLine(item.detail.into())),
