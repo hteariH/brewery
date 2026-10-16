@@ -4,6 +4,7 @@
 //! the extension at the bundled version (`auto_update_extensions`). Without a bundle (dev
 //! builds) nothing changes.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gpui::{App, BorrowAppContext as _};
@@ -240,7 +241,104 @@ pub fn setup_bundled_java(extensions_dir: &Path, cx: &mut App) {
         crate::bundle_root().as_deref(),
         &extensions_dir.join("installed"),
     );
+    let launcher = defaults.jdtls.contains_key("jdtls_launcher");
     apply_bundle_defaults(defaults, cx);
+    if launcher {
+        track_jdtls_memory(cx);
+    }
+}
+
+/// The variables the bundled launcher turns into `-Xms` and `-Xmx`.
+pub const MIN_MEMORY_ENV: &str = "BREWERY_JDTLS_MIN_MEMORY";
+pub const MAX_MEMORY_ENV: &str = "BREWERY_JDTLS_MAX_MEMORY";
+
+/// The launcher's environment for `min_memory` / `max_memory` in `lsp.jdtls.settings`,
+/// which the extension only passes to a jdtls it starts itself. As in the extension's
+/// `build_jdtls_launch_args`, the minimum defaults to 1G and a minimum above the maximum
+/// is swapped with it. A size the JVM would reject is dropped: jdtls would not start.
+pub fn memory_env(settings: Option<&Value>) -> BTreeMap<String, String> {
+    let size = |key: &str| {
+        let value = settings?.get(key)?.as_str()?.trim();
+        if memory_bytes(value).is_none() {
+            log::warn!("brewery: ignoring lsp.jdtls.settings.{key} {value:?}, not a JVM heap size");
+            return None;
+        }
+        Some(value.to_string())
+    };
+    let (min, max) = (size("min_memory"), size("max_memory"));
+    let mut env = BTreeMap::new();
+    if min.is_none() && max.is_none() {
+        return env;
+    }
+    let mut min = min.unwrap_or_else(|| "1G".to_string());
+    let mut max = max;
+    if let Some(max) = max.as_mut()
+        && memory_bytes(&min) > memory_bytes(max)
+    {
+        std::mem::swap(&mut min, max);
+    }
+    env.insert(MIN_MEMORY_ENV.to_string(), min);
+    if let Some(max) = max {
+        env.insert(MAX_MEMORY_ENV.to_string(), max);
+    }
+    env
+}
+
+/// The bytes in a JVM size like `512m` or `4G`.
+fn memory_bytes(value: &str) -> Option<u64> {
+    let (digits, unit) = match value.char_indices().last()? {
+        (index, unit) if unit.is_ascii_alphabetic() => (&value[..index], unit.to_ascii_lowercase()),
+        _ => (value, 'b'),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let shift = match unit {
+        'b' => 0,
+        'k' => 10,
+        'm' => 20,
+        'g' => 30,
+        't' => 40,
+        _ => return None,
+    };
+    digits.parse::<u64>().ok()?.checked_mul(1 << shift)
+}
+
+/// Keeps the default `lsp.jdtls.binary.env` in step with [`memory_env`] of the user's
+/// `lsp.jdtls.settings` (Zed adds `binary.env` to the extension's command), so the
+/// bundled launcher sees `min_memory` / `max_memory`. Project settings are not followed.
+pub fn track_jdtls_memory(cx: &mut App) {
+    let mut applied = BTreeMap::new();
+    sync_jdtls_memory(cx, &mut applied);
+    cx.observe_global::<SettingsStore>(move |cx| sync_jdtls_memory(cx, &mut applied))
+        .detach();
+}
+
+fn sync_jdtls_memory(cx: &mut App, applied: &mut BTreeMap<String, String>) {
+    let settings = cx
+        .global::<SettingsStore>()
+        .merged_settings()
+        .project
+        .lsp
+        .0
+        .get(JDTLS_SERVER)
+        .and_then(|server| server.settings.clone());
+    let env = memory_env(settings.as_ref());
+    if env == *applied {
+        return;
+    }
+    let previous = std::mem::replace(applied, env.clone());
+    cx.update_global::<SettingsStore, _>(|store, cx| {
+        store.update_default_settings(cx, |defaults| {
+            let server = defaults.project.lsp.0.entry(JDTLS_SERVER.into()).or_default();
+            let binary = server.binary.get_or_insert_default();
+            let vars = binary.env.get_or_insert_default();
+            for key in previous.keys() {
+                vars.remove(key);
+            }
+            vars.extend(env);
+        });
+    });
 }
 
 /// Copies `<bundled>` to `<installed_dir>/<id>` unless that already exists. Returns
@@ -644,6 +742,90 @@ mod tests {
             );
             let options = jdtls_initialization_options(cx).unwrap();
             assert_eq!(options.pointer(home), Some(&Value::String("/my/jdk".into())));
+        });
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn memory_settings_become_the_launcher_env() {
+        let settings = |json: Value| memory_env(Some(&json));
+        assert!(memory_env(None).is_empty());
+        assert!(settings(serde_json::json!({"lombok_jar": "x"})).is_empty());
+        assert_eq!(
+            settings(serde_json::json!({"min_memory": "512m", "max_memory": "4G"})),
+            env(&[(MIN_MEMORY_ENV, "512m"), (MAX_MEMORY_ENV, "4G")])
+        );
+        // Like the extension: min defaults to 1G, and a min above max is swapped, which the
+        // JVM would otherwise refuse to start with.
+        assert_eq!(
+            settings(serde_json::json!({"max_memory": "4G"})),
+            env(&[(MIN_MEMORY_ENV, "1G"), (MAX_MEMORY_ENV, "4G")])
+        );
+        assert_eq!(
+            settings(serde_json::json!({"max_memory": "512m"})),
+            env(&[(MIN_MEMORY_ENV, "512m"), (MAX_MEMORY_ENV, "1G")])
+        );
+        assert_eq!(
+            settings(serde_json::json!({"min_memory": "2g"})),
+            env(&[(MIN_MEMORY_ENV, "2g")])
+        );
+        // A size the JVM would reject is dropped rather than keeping jdtls from starting.
+        assert_eq!(
+            settings(serde_json::json!({"min_memory": "lots", "max_memory": "2G & x"})),
+            BTreeMap::new()
+        );
+    }
+
+    fn jdtls_binary_env(cx: &App) -> Option<BTreeMap<String, String>> {
+        cx.global::<SettingsStore>()
+            .merged_settings()
+            .project
+            .lsp
+            .0
+            .get(JDTLS_SERVER)
+            .and_then(|server| server.binary.as_ref())
+            .and_then(|binary| binary.env.clone())
+    }
+
+    #[gpui::test]
+    fn memory_settings_follow_the_user_settings(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::new(cx, &settings::default_settings());
+            cx.set_global(store);
+            track_jdtls_memory(cx);
+        });
+        cx.update(|cx| {
+            assert_eq!(jdtls_binary_env(cx), None);
+            set_user_settings(
+                cx,
+                r#"{"lsp": {"jdtls": {
+                    "settings": {"max_memory": "4G"},
+                    "binary": {"env": {"OTHER": "1"}}
+                }}}"#,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                jdtls_binary_env(cx),
+                Some(env(&[(MAX_MEMORY_ENV, "4G"), (MIN_MEMORY_ENV, "1G"), ("OTHER", "1")]))
+            );
+            set_user_settings(cx, r#"{"lsp": {"jdtls": {"settings": {"min_memory": "256m"}}}}"#);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(jdtls_binary_env(cx), Some(env(&[(MIN_MEMORY_ENV, "256m")])));
+            set_user_settings(cx, "{}");
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(jdtls_binary_env(cx).unwrap_or_default().is_empty());
         });
     }
 

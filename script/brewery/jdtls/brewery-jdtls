@@ -10,6 +10,7 @@
 #
 #   java       <bundle>/jre/bin/java, else $JAVA_HOME/bin/java, else PATH
 #   Gradle     $JAVA_HOME (see brewery.gradle.java.home below)
+#   heap       -Xms$BREWERY_JDTLS_MIN_MEMORY (else 1G) -Xmx$BREWERY_JDTLS_MAX_MEMORY
 #   config     shared, read-only: <bundle>/jdtls/config_<os>[_arm]
 #              writable: <cache>/config/<sha1 of this jdtls directory>
 #   workspace  -data when given, else <cache>/workspace/jdtls-<sha1 of the cwd>;
@@ -137,6 +138,14 @@ case $(uname -m) in
 esac
 [ -f "$shared/config.ini" ] || die "$shared/config.ini not found"
 
+# The heap: the extension passes lsp.jdtls.settings.min_memory / max_memory only to
+# a jdtls it starts itself, so Brewery hands them over in lsp.jdtls.binary.env.
+# --jvm-arg options come later and win.
+jvm_memory=$(quote "-Xms${BREWERY_JDTLS_MIN_MEMORY:-1G}")
+if [ -n "${BREWERY_JDTLS_MAX_MEMORY:-}" ]; then
+    jvm_memory="$jvm_memory $(quote "-Xmx$BREWERY_JDTLS_MAX_MEMORY")"
+fi
+
 jvm_args=
 jdtls_args=
 data=
@@ -218,7 +227,7 @@ eval "exec \"\$java\" \
     -Djava.import.generatesMetadataFilesAtProjectRoot=false \
     -Djava.net.preferIPv4Stack=true \
     \"-Dbrewery.gradle.java.home=\$gradle_java_home\" \
-    -Xms1G \
+    $jvm_memory \
     --add-modules=ALL-SYSTEM \
     --add-opens java.base/java.util=ALL-UNNAMED \
     --add-opens java.base/java.lang=ALL-UNNAMED \

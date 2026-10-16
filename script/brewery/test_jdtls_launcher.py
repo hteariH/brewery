@@ -260,6 +260,23 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(args[-1], "--extra")
         self.assertEqual(args[0], "-data")
 
+    def test_heap_from_the_memory_env(self):
+        # Brewery sets these in lsp.jdtls.binary.env from min_memory / max_memory, which
+        # the extension does not pass to a launcher.
+        launcher = self.make_bundle(self.tmp / "bundle")
+        env = self.env(BREWERY_JDTLS_MIN_MEMORY="512m", BREWERY_JDTLS_MAX_MEMORY="3G")
+        jvm, _, _ = self.parse(self.run_launcher(launcher, "--jvm-arg=-Xss2m", env=env).stdout)
+        self.assertIn("-Xms512m", jvm)
+        self.assertIn("-Xmx3G", jvm)
+        self.assertNotIn("-Xms1G", jvm)
+        self.assertGreater(jvm.index("-Xss2m"), jvm.index("-Xmx3G"))
+        env = self.env(BREWERY_JDTLS_MAX_MEMORY="2G")
+        jvm, _, _ = self.parse(self.run_launcher(launcher, env=env).stdout)
+        self.assertIn("-Xms1G", jvm)
+        self.assertIn("-Xmx2G", jvm)
+        jvm, _, _ = self.parse(self.run_launcher(launcher).stdout)
+        self.assertFalse([a for a in jvm if a.startswith("-Xmx")], jvm)
+
     def test_launcher_in_a_directory_with_spaces(self):
         launcher = self.make_bundle(self.tmp / "Brewery bundle")
         jvm, props, args = self.parse(self.run_launcher(launcher).stdout)

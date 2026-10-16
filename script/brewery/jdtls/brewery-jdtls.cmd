@@ -10,6 +10,7 @@ rem The JVM arguments match the extension's own build_jdtls_launch_args.
 rem
 rem   java       <bundle>\jre\bin\java.exe, else %JAVA_HOME%\bin\java.exe, else PATH
 rem   Gradle     %JAVA_HOME% (see brewery.gradle.java.home below)
+rem   heap       -Xms%BREWERY_JDTLS_MIN_MEMORY% (else 1G) -Xmx%BREWERY_JDTLS_MAX_MEMORY%
 rem   config     shared, read-only: <bundle>\jdtls\config_win
 rem              writable: <cache>\config\<sha1 of this jdtls directory>
 rem   workspace  -data when given, else <cache>\workspace\jdtls-<sha1 of the cwd>;
@@ -101,6 +102,14 @@ goto gradle_java_home_done
 :no_gradle_java_home
 set "GRADLE_JAVA_HOME="
 :gradle_java_home_done
+
+rem The heap: the extension passes lsp.jdtls.settings.min_memory / max_memory only to
+rem a jdtls it starts itself, so Brewery hands them over in lsp.jdtls.binary.env.
+rem --jvm-arg options come later and win.
+set "MIN_MEMORY=1G"
+if defined BREWERY_JDTLS_MIN_MEMORY set "MIN_MEMORY=%BREWERY_JDTLS_MIN_MEMORY%"
+set JVM_MEMORY="-Xms%MIN_MEMORY%"
+if defined BREWERY_JDTLS_MAX_MEMORY set JVM_MEMORY=%JVM_MEMORY% "-Xmx%BREWERY_JDTLS_MAX_MEMORY%"
 
 set "LAUNCHER="
 if exist "%JDTLS_HOME%\plugins\org.eclipse.equinox.launcher.jar" set "LAUNCHER=%JDTLS_HOME%\plugins\org.eclipse.equinox.launcher.jar"
@@ -203,5 +212,5 @@ if not exist "%DATA%\.metadata" mkdir "%DATA%\.metadata" >nul 2>&1
 <nul set /p "=%STAMP%" >"%STAMP_FILE%" 2>nul
 :workspace_ready
 
-"%JAVA%" -Declipse.application=org.eclipse.jdt.ls.core.id1 -Dosgi.bundles.defaultStartLevel=4 -Declipse.product=org.eclipse.jdt.ls.core.product -Dosgi.checkConfiguration=true "-Dosgi.sharedConfiguration.area=%SHARED_CONFIG%" -Dosgi.sharedConfiguration.area.readOnly=true -Dosgi.configuration.cascaded=true "-Dosgi.configuration.area=%CONFIG_AREA%" -Djava.import.generatesMetadataFilesAtProjectRoot=false -Djava.net.preferIPv4Stack=true "-Dbrewery.gradle.java.home=%GRADLE_JAVA_HOME%" -Xms1G --add-modules=ALL-SYSTEM --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED %JVM_ARGS% -jar "%LAUNCHER%" -data "%DATA%" %JDTLS_ARGS%
+"%JAVA%" -Declipse.application=org.eclipse.jdt.ls.core.id1 -Dosgi.bundles.defaultStartLevel=4 -Declipse.product=org.eclipse.jdt.ls.core.product -Dosgi.checkConfiguration=true "-Dosgi.sharedConfiguration.area=%SHARED_CONFIG%" -Dosgi.sharedConfiguration.area.readOnly=true -Dosgi.configuration.cascaded=true "-Dosgi.configuration.area=%CONFIG_AREA%" -Djava.import.generatesMetadataFilesAtProjectRoot=false -Djava.net.preferIPv4Stack=true "-Dbrewery.gradle.java.home=%GRADLE_JAVA_HOME%" %JVM_MEMORY% --add-modules=ALL-SYSTEM --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED %JVM_ARGS% -jar "%LAUNCHER%" -data "%DATA%" %JDTLS_ARGS%
 exit /b %ERRORLEVEL%

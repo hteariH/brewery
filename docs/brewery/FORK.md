@@ -167,10 +167,13 @@ names (Dev Drive/ReFS, `fsutil 8dot3name`) and a spaced install path, Brewery se
   (`GradleJvm`) leaves `org.gradle.java.home` in gradle.properties to Gradle, else
   uses `JAVA_HOME` under the same rule, and fails with what to change when the
   wrapper cannot run on the JVM it ends up with. Both use jdtls's Gradle/Java table.
-- In launcher mode the extension ignores `min_memory` and `max_memory`; the launcher
-  starts jdtls with `-Xms1G` and the JVM's default maximum heap. To change that, point
-  `jdtls_launcher` at your own script that calls the bundled one with
-  `--jvm-arg=-Xmx4G` (later JVM options win).
+- In launcher mode the extension does not pass `min_memory` and `max_memory` on, so
+  Brewery follows them in the user settings and sets `BREWERY_JDTLS_MIN_MEMORY` /
+  `BREWERY_JDTLS_MAX_MEMORY` in the default `lsp.jdtls.binary.env` (Zed adds it to the
+  extension's command); the launcher turns them into `-Xms` (else 1G) and `-Xmx`, with
+  the extension's rules (a minimum above the maximum is swapped) and invalid sizes
+  dropped. Project settings are not followed; there, set the two variables in
+  `lsp.jdtls.binary.env` or pass `--jvm-arg=-Xmx4G` through a wrapper script.
 - jdtls writes its configuration and workspaces to the user cache
   (`%LOCALAPPDATA%\Brewery\jdtls`, `~/Library/Caches/Brewery/jdtls`,
   `~/.cache/brewery/jdtls`; `BREWERY_JDTLS_CACHE_DIR` overrides), never into the bundle.
