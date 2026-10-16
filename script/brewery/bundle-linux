@@ -154,6 +154,19 @@ cp crates/brewery_theme/icons/NOTICE "$lic/intellij-icons/NOTICE"
 if [[ -n "$licenses_md" ]]; then
     cp "$licenses_md" "$lic/brewery/licenses.md"
 fi
+# The fonts embedded in the app (assets/fonts) ship with their licence texts.
+font_names=()
+for font_dir in assets/fonts/*/; do
+    font=$(basename "$font_dir")
+    shopt -s nullglob
+    texts=("$font_dir"*.txt)
+    shopt -u nullglob
+    [[ ${#texts[@]} -gt 0 ]] || die "font $font has no licence text"
+    mkdir -p "$lic/fonts/$font"
+    cp "${texts[@]}" "$lic/fonts/$font/"
+    font_names+=("$font")
+done
+[[ ${#font_names[@]} -gt 0 ]] || die "no fonts under assets/fonts"
 {
     echo "Brewery $version"
     echo "  License: GPL-3.0-or-later. Brewery is a fork of the Zed editor"
@@ -169,6 +182,9 @@ fi
     echo ""
     echo "IntelliJ Platform icons (brewery_theme)"
     echo "  License: Apache-2.0, NOTICE: licenses/intellij-icons/NOTICE"
+    echo ""
+    echo "Fonts (${font_names[*]})"
+    echo "  License: SIL Open Font License 1.1: licenses/fonts/"
     echo ""
     cat "$bundle/licenses/README.txt"
 } > "$lic/README.txt"
@@ -211,8 +227,12 @@ License: GPL-3.0-or-later
  can be found in /usr/share/common-licenses/GPL-3, and in
  /opt/brewery/licenses/brewery/LICENSE-GPL.
 EOF
-    # The newest GLIBC_x.y symbol version either binary needs is the libc floor.
-    glibc=$(readelf --dyn-syms -W "$tree/libexec/brewery-editor" "$tree/bin/brewery" |
+    # The newest GLIBC_x.y symbol version the binaries or the bundled lib/ (copied from the
+    # build host) need is the libc floor.
+    shopt -s nullglob
+    elf_files=("$tree/libexec/brewery-editor" "$tree/bin/brewery" "$tree"/lib/*.so*)
+    shopt -u nullglob
+    glibc=$(readelf --dyn-syms -W "${elf_files[@]}" |
         grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)
     [[ -n "$glibc" ]] || die "no GLIBC symbol versions in the binaries"
     export BREWERY_VERSION="$version" BREWERY_TREE="$tree" BREWERY_PKG_DIR="$pkg_dir" \

@@ -109,6 +109,19 @@ cp crates/brewery_theme/icons/NOTICE "$lic/intellij-icons/NOTICE"
 if [[ -n "$licenses_md" ]]; then
     cp "$licenses_md" "$lic/brewery/licenses.md"
 fi
+# The fonts embedded in the app (assets/fonts) ship with their licence texts.
+font_names=()
+for font_dir in assets/fonts/*/; do
+    font=$(basename "$font_dir")
+    shopt -s nullglob
+    texts=("$font_dir"*.txt)
+    shopt -u nullglob
+    [[ ${#texts[@]} -gt 0 ]] || die "font $font has no licence text"
+    mkdir -p "$lic/fonts/$font"
+    cp "${texts[@]}" "$lic/fonts/$font/"
+    font_names+=("$font")
+done
+[[ ${#font_names[@]} -gt 0 ]] || die "no fonts under assets/fonts"
 bundle_readme=$(cat "$bundle/licenses/README.txt")
 {
     echo "Brewery $version"
@@ -125,6 +138,9 @@ bundle_readme=$(cat "$bundle/licenses/README.txt")
     echo ""
     echo "IntelliJ Platform icons (brewery_theme)"
     echo "  License: Apache-2.0, NOTICE: licenses/intellij-icons/NOTICE"
+    echo ""
+    echo "Fonts (${font_names[*]})"
+    echo "  License: SIL Open Font License 1.1: licenses/fonts/"
     echo ""
     echo "$bundle_readme"
 } > "$lic/README.txt"

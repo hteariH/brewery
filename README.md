@@ -25,14 +25,15 @@ and Linux are supported; the macOS build is unsigned and unsupported. See the
   package is published: `winget install hteariH.Brewery`). It installs for your user
   only and needs no administrator rights. The installer is not signed yet, so Windows
   SmartScreen may warn the first time.
-- **Debian, Ubuntu:** download the `.deb` and run `sudo apt install ./brewery_<version>_amd64.deb`.
-- **Fedora, RHEL:** download the `.rpm` and run `sudo dnf install ./brewery-<version>-1.x86_64.rpm`.
+- **Ubuntu 24.04+, Debian 13+:** download the `.deb` and run `sudo apt install ./brewery_<version>_amd64.deb`.
+- **Fedora 40+:** download the `.rpm` and run `sudo dnf install ./brewery-<version>-1.x86_64.rpm`.
 - **Arch Linux:** the `brewery-bin` package from the AUR.
 - **macOS (unsupported):** an unsigned zip for Apple Silicon. Unpack it, then run
   `xattr -dr com.apple.quarantine Brewery.app` before the first start.
 
-Brewery installs to `/opt/brewery` on Linux and puts `brewery` on the PATH. There are
-no Flatpak or AppImage builds.
+Brewery installs to `/opt/brewery` on Linux and puts `brewery` on the PATH. The Linux
+packages are built on Ubuntu 24.04 and need glibc 2.39 or newer, so Debian 12 and
+RHEL 9 cannot install them. There are no Flatpak or AppImage builds.
 
 ## Building
 

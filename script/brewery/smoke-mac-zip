@@ -53,6 +53,15 @@ for f in Resources/brewery-daemon/brewery-daemon.jar Resources/extensions/java/e
          Resources/licenses/README.txt Resources/licenses/brewery/LICENSE-GPL Resources/licenses/brewery/licenses.md Resources/licenses/brewery-daemon/LICENSE Resources/licenses/intellij-icons/NOTICE Resources/Brewery.icns Info.plist; do
     [[ -f "$c/$f" ]] || fail "$f is missing"
 done
+# Every embedded font's licence text, as assets/fonts/<font>/*.txt has it.
+fonts=0
+for text in assets/fonts/*/*.txt; do
+    [[ -f "$text" ]] || continue
+    font=$(basename "$(dirname "$text")")
+    [[ -f "$c/Resources/licenses/fonts/$font/$(basename "$text")" ]] || fail "Resources/licenses/fonts/$font/$(basename "$text") is missing"
+    fonts=$((fonts + 1))
+done
+[[ $fonts -gt 0 ]] || fail "no font licence texts under assets/fonts"
 [[ ! -e "$c/MacOS/zed" ]] || fail "Contents/MacOS/zed must not exist"
 ok "layout"
 
