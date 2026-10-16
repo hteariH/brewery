@@ -680,3 +680,37 @@ async fn every_expandable_row_has_a_chevron(cx: &mut TestAppContext) {
         ]
     );
 }
+
+#[gpui::test]
+async fn the_panel_moves_to_the_right_dock_and_remembers_it(cx: &mut TestAppContext) {
+    let (fixture, cx) = workspace_with_panel(cx).await;
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.position_is_valid(DockPosition::Left));
+        assert!(panel.position_is_valid(DockPosition::Right));
+        panel.set_position(DockPosition::Right, window, cx);
+    });
+    cx.run_until_parked();
+
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        let left = workspace.left_dock().read(cx).panel::<DatabasePanel>();
+        assert!(left.is_none(), "the panel should have left the left dock");
+        let right = workspace.right_dock().read(cx).panel::<DatabasePanel>();
+        assert_eq!(
+            right.map(|panel| panel.entity_id()),
+            Some(fixture.panel.entity_id())
+        );
+        assert_eq!(
+            DatabasePanelSettings::get_global(cx).dock,
+            settings::DockPosition::Right
+        );
+    });
+    let fs = fixture.workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).fs().clone()
+    });
+    let saved = fs
+        .load(paths::settings_file())
+        .await
+        .expect("the dock side is saved to the settings file");
+    let saved: Value = settings::parse_json_with_comments(&saved).unwrap();
+    assert_eq!(saved["database_panel"]["dock"], json!("right"));
+}

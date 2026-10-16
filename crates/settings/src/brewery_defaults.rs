@@ -68,12 +68,18 @@ fn test_brewery_theme_selection_default_is_brewery() {
 #[test]
 fn test_intellij_tool_window_placement() {
     let d = defaults();
-    for panel in ["project_panel", "outline_panel", "git_panel"] {
+    for panel in [
+        "project_panel",
+        "outline_panel",
+        "git_panel",
+        "database_panel",
+    ] {
         assert_eq!(d[panel]["dock"], Value::String("left".into()), "{panel}");
     }
-    for panel in ["terminal", "debugger"] {
+    for panel in ["terminal", "debugger", "services_panel"] {
         assert_eq!(d[panel]["dock"], Value::String("bottom".into()), "{panel}");
     }
+    assert_eq!(d["build_panel"]["dock"], Value::String("right".into()));
 }
 
 #[test]

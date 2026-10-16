@@ -288,6 +288,39 @@ async fn toggling_shows_the_fixture_model_in_the_bottom_dock(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+async fn the_panel_moves_to_the_right_dock_and_remembers_it(cx: &mut TestAppContext) {
+    let (fixture, cx) =
+        workspace_with_panel(fixture_model(), json!({ "build.gradle": "" }), cx).await;
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.position_is_valid(DockPosition::Right));
+        panel.set_position(DockPosition::Right, window, cx);
+    });
+    cx.run_until_parked();
+
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        let bottom = workspace.bottom_dock().read(cx).panel::<ServicesPanel>();
+        assert!(
+            bottom.is_none(),
+            "the panel should have left the bottom dock"
+        );
+        let right = workspace.right_dock().read(cx).panel::<ServicesPanel>();
+        assert_eq!(
+            right.map(|panel| panel.entity_id()),
+            Some(fixture.panel.entity_id())
+        );
+    });
+    let fs = fixture.workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).fs().clone()
+    });
+    let saved = fs
+        .load(paths::settings_file())
+        .await
+        .expect("the dock side is saved to the settings file");
+    let saved: serde_json::Value = settings::parse_json_with_comments(&saved).unwrap();
+    assert_eq!(saved["services_panel"]["dock"], json!("right"));
+}
+
+#[gpui::test]
 async fn an_empty_model_says_so_per_section(cx: &mut TestAppContext) {
     let (fixture, cx) =
         workspace_with_panel(SpringModel::default(), json!({ "build.gradle": "" }), cx).await;

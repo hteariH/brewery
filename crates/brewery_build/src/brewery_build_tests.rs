@@ -214,6 +214,33 @@ async fn toggle_action_opens_panel_in_right_dock(cx: &mut TestAppContext) {
     });
 }
 
+#[gpui::test]
+async fn the_panel_moves_to_the_left_dock_and_remembers_it(cx: &mut TestAppContext) {
+    let (workspace, panel, _, cx) = workspace_with_panel(cx).await;
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.position_is_valid(DockPosition::Left));
+        assert!(!panel.position_is_valid(DockPosition::Bottom));
+        panel.set_position(DockPosition::Left, window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(cx, |workspace, cx| {
+        let right = workspace.right_dock().read(cx).panel::<BuildPanel>();
+        assert!(right.is_none(), "the panel should have left the right dock");
+        let left = workspace.left_dock().read(cx).panel::<BuildPanel>();
+        assert_eq!(left.map(|left| left.entity_id()), Some(panel.entity_id()));
+    });
+    let fs = workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).fs().clone()
+    });
+    let saved = fs
+        .load(paths::settings_file())
+        .await
+        .expect("the dock side is saved to the settings file");
+    let saved: serde_json::Value = settings::parse_json_with_comments(&saved).unwrap();
+    assert_eq!(saved["build_panel"]["dock"], json!("left"));
+}
+
 // Regression: `set_active` runs inside `Workspace::toggle_panel_focus`, i.e. while
 // the workspace is being updated, so connecting there must not read the workspace.
 #[gpui::test]

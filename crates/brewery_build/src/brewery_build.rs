@@ -12,6 +12,7 @@ use gpui::{
     actions, px,
 };
 use project::{Project, TaskSourceKind};
+use settings::{RegisterSetting, Settings};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use task::{TaskContext, TaskTemplate};
@@ -31,6 +32,26 @@ actions!(
 );
 
 const BUILD_PANEL_KEY: &str = "BuildToolPanel";
+
+/// `build_panel` in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, RegisterSetting)]
+pub struct BuildPanelSettings {
+    pub dock: settings::DockPosition,
+}
+
+impl Settings for BuildPanelSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            // Falls back like `assets/settings/default.json` for builds that read another
+            // checkout's defaults.
+            dock: content
+                .build_panel
+                .as_ref()
+                .and_then(|panel| panel.dock)
+                .unwrap_or(settings::DockPosition::Right),
+        }
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -132,7 +153,6 @@ pub struct BuildPanel {
     project: Entity<Project>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
-    position: DockPosition,
     /// Shared with the other Brewery panels of the project; requested on first show because the
     /// JVM is only worth starting once someone looks at the panel.
     daemon: Option<Entity<ProjectDaemon>>,
@@ -201,7 +221,6 @@ impl BuildPanel {
             project,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
-            position: DockPosition::Right,
             daemon: None,
             _daemon_events: None,
             fetch_task: None,
@@ -662,8 +681,13 @@ impl Panel for BuildPanel {
         BUILD_PANEL_KEY
     }
 
-    fn position(&self, _: &Window, _: &App) -> DockPosition {
-        self.position
+    /// Read from the settings: the dock moves a panel when the settings change, so a position kept
+    /// only in the panel would never move it.
+    fn position(&self, _: &Window, cx: &App) -> DockPosition {
+        match BuildPanelSettings::get_global(cx).dock {
+            settings::DockPosition::Left => DockPosition::Left,
+            settings::DockPosition::Right | settings::DockPosition::Bottom => DockPosition::Right,
+        }
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
@@ -671,8 +695,10 @@ impl Panel for BuildPanel {
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        self.position = position;
-        cx.notify();
+        let fs = self.project.read(cx).fs().clone();
+        settings::update_settings_file(fs, cx, move |settings, _| {
+            settings.build_panel.get_or_insert_default().dock = Some(position.into());
+        });
     }
 
     fn default_size(&self, _: &Window, _: &App) -> Pixels {

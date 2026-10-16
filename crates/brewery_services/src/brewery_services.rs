@@ -15,6 +15,7 @@ use gpui::{
     actions, px,
 };
 use project::{Project, TaskSourceKind};
+use settings::{RegisterSetting, Settings};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use task::{TaskContext, TaskTemplate};
@@ -33,6 +34,26 @@ actions!(
 );
 
 const SERVICES_PANEL_KEY: &str = "ServicesPanel";
+
+/// `services_panel` in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, RegisterSetting)]
+pub struct ServicesPanelSettings {
+    pub dock: settings::DockPosition,
+}
+
+impl Settings for ServicesPanelSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            // Falls back like `assets/settings/default.json` for builds that read another
+            // checkout's defaults.
+            dock: content
+                .services_panel
+                .as_ref()
+                .and_then(|panel| panel.dock)
+                .unwrap_or(settings::DockPosition::Bottom),
+        }
+    }
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -203,7 +224,6 @@ pub struct ServicesPanel {
     project: Entity<Project>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
-    position: DockPosition,
     /// Shared with the other Brewery panels of the project; requested on first show because the
     /// JVM is only worth starting once someone looks at the panel.
     daemon: Option<Entity<ProjectDaemon>>,
@@ -244,7 +264,6 @@ impl ServicesPanel {
             project,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
-            position: DockPosition::Bottom,
             daemon: None,
             _daemon_events: None,
             fetch_task: None,
@@ -842,8 +861,10 @@ impl Panel for ServicesPanel {
         SERVICES_PANEL_KEY
     }
 
-    fn position(&self, _: &Window, _: &App) -> DockPosition {
-        self.position
+    /// Read from the settings: the dock moves a panel when the settings change, so a position kept
+    /// only in the panel would never move it.
+    fn position(&self, _: &Window, cx: &App) -> DockPosition {
+        ServicesPanelSettings::get_global(cx).dock.into()
     }
 
     fn position_is_valid(&self, _: DockPosition) -> bool {
@@ -851,8 +872,10 @@ impl Panel for ServicesPanel {
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        self.position = position;
-        cx.notify();
+        let fs = self.project.read(cx).fs().clone();
+        settings::update_settings_file(fs, cx, move |settings, _| {
+            settings.services_panel.get_or_insert_default().dock = Some(position.into());
+        });
     }
 
     fn default_size(&self, _: &Window, _: &App) -> Pixels {

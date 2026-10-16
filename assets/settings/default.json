@@ -1092,6 +1092,12 @@
     // Default width of the collaboration panel.
     "default_width": 240,
   },
+  // brewery: where the Database tool window is docked. Can be 'left', 'right' or 'bottom'.
+  "database_panel": { "dock": "left" },
+  // brewery: where the Services tool window is docked. Can be 'left', 'right' or 'bottom'.
+  "services_panel": { "dock": "bottom" },
+  // brewery: where the Build tool window is docked. Can be 'left' or 'right'.
+  "build_panel": { "dock": "right" },
   "git_panel": {
     // Whether to show the git panel button in the status bar.
     "button": true,
