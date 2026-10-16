@@ -320,6 +320,23 @@ fn inside_a_closed_quoted_name_the_replacement_runs_through_the_closing_quote() 
 }
 
 #[test]
+fn inside_a_word_the_rest_of_it_is_replaced_when_the_name_ends_with_it() {
+    // Zed's `replace_suffix`: through the end of the word when the name ends with what follows
+    // the cursor, else up to the cursor.
+    let context = at("SELECT * FROM ow|ners");
+    assert_eq!(context.replace_end_for("owners"), 20);
+    assert_eq!(context.replace_end_for("OWNERS"), 20);
+    assert_eq!(context.replace_end_for("owner_names"), 16);
+    let context = at("SEL|ECT 1");
+    assert_eq!(context.replace_end_for("SELECT"), 6);
+    // At the end of the word, or in a quoted name: as before.
+    let context = at("SELECT * FROM owners|");
+    assert_eq!(context.replace_end_for("owners"), 20);
+    let context = at("SELECT o.\"Fi|rst\" FROM owners o");
+    assert_eq!(context.replace_end_for("First Name"), 16);
+}
+
+#[test]
 fn subquery_aliases_resolve_in_their_own_level_first() {
     assert_eq!(
         resolved("SELECT * FROM a x WHERE id IN (SELECT id FROM b x WHERE x.|)"),

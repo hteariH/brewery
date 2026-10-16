@@ -803,6 +803,15 @@ async fn completing_inside_a_quoted_name_replaces_it_whole(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+async fn completing_inside_a_word_replaces_the_rest_of_it(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_at("SELECT * FROM o|ners", "w", cx);
+    assert_eq!(console.menu(cx)[0], "owners table · public");
+    console.accept(cx);
+    assert_eq!(console.text(cx), "SELECT * FROM owners");
+}
+
+#[gpui::test]
 async fn tables_of_other_schemas_are_inserted_with_their_schema(cx: &mut TestAppContext) {
     let (console, cx) = console(cx).await;
     console.type_at("SELECT * FROM |", "inv", cx);
