@@ -18,6 +18,7 @@ use gpui::{
     WeakEntity, Window, px,
 };
 use project::Project;
+use settings::{RegisterSetting, Settings};
 use std::sync::Arc;
 use ui::{
     ContextMenu, Disclosure, ListItem, ListItemSpacing, Tooltip, prelude::*, right_click_menu,
@@ -28,6 +29,26 @@ use workspace::{OpenLog, Workspace};
 const DATABASE_PANEL_KEY: &str = "DatabasePanel";
 
 pub const WAITING_FOR_DAEMON: &str = "Waiting for the Brewery daemon…";
+
+/// `database_panel` in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, RegisterSetting)]
+pub struct DatabasePanelSettings {
+    pub dock: settings::DockPosition,
+}
+
+impl Settings for DatabasePanelSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            // Falls back like `assets/settings/default.json` for builds that read another
+            // checkout's defaults.
+            dock: content
+                .database_panel
+                .as_ref()
+                .and_then(|panel| panel.dock)
+                .unwrap_or(settings::DockPosition::Left),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Status {
@@ -44,7 +65,6 @@ pub struct DatabasePanel {
     project: Entity<Project>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
-    position: DockPosition,
     daemon: Option<Entity<ProjectDaemon>>,
     _daemon_events: Option<Subscription>,
     status: Status,
@@ -82,7 +102,6 @@ impl DatabasePanel {
             project,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
-            position: DockPosition::Left,
             daemon: None,
             _daemon_events: None,
             status: Status::Waiting,
@@ -916,8 +935,10 @@ impl Panel for DatabasePanel {
         DATABASE_PANEL_KEY
     }
 
-    fn position(&self, _: &Window, _: &App) -> DockPosition {
-        self.position
+    /// Read from the settings: the dock moves a panel when the settings change, so a position kept
+    /// only in the panel would never move it.
+    fn position(&self, _: &Window, cx: &App) -> DockPosition {
+        DatabasePanelSettings::get_global(cx).dock.into()
     }
 
     fn position_is_valid(&self, _: DockPosition) -> bool {
@@ -925,8 +946,10 @@ impl Panel for DatabasePanel {
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        self.position = position;
-        cx.notify();
+        let fs = self.project.read(cx).fs().clone();
+        settings::update_settings_file(fs, cx, move |settings, _| {
+            settings.database_panel.get_or_insert_default().dock = Some(position.into());
+        });
     }
 
     fn default_size(&self, _: &Window, _: &App) -> Pixels {

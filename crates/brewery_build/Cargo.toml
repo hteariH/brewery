@@ -21,6 +21,7 @@ log.workspace = true
 lsp.workspace = true
 menu.workspace = true
 project.workspace = true
+settings.workspace = true
 task.workspace = true
 ui.workspace = true
 util.workspace = true
@@ -28,9 +29,9 @@ workspace.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+paths.workspace = true
 project = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
-settings.workspace = true
 tempfile.workspace = true
 theme = { workspace = true, features = ["test-support"] }
 theme_settings = { workspace = true, features = ["test-support"] }

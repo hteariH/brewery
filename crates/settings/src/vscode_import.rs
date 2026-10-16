@@ -188,6 +188,9 @@ impl VsCodeSettings {
             base_keymap: Some(BaseKeymapContent::VSCode),
             calls: None,
             collaboration_panel: None,
+            database_panel: None, // brewery:
+            services_panel: None, // brewery:
+            build_panel: None,    // brewery:
             command_palette: self
                 .read_u64("workbench.commandPalette.history")
                 .map(|history| CommandPaletteSettingsContent {

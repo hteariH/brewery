@@ -276,6 +276,10 @@ pub struct SettingsContent {
 
     pub project_panel: Option<ProjectPanelSettingsContent>,
 
+    pub database_panel: Option<BreweryPanelSettingsContent>, // brewery:
+    pub services_panel: Option<BreweryPanelSettingsContent>, // brewery:
+    pub build_panel: Option<BreweryPanelSettingsContent>, // brewery:
+
     /// Configuration for Node-related features
     pub node: Option<NodeBinarySettings>,
 
@@ -412,6 +416,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
         node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
         title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,
         instrumentation,
+        database_panel, services_panel, build_panel, // brewery:
     },
     defaults: {},
 });
@@ -955,6 +960,14 @@ pub struct PanelSettingsContent {
     ///
     /// Default: 240
     pub default_width: Option<PixelSetting>,
+}
+
+// brewery: where a Brewery tool window (Database, Services, Build) is docked.
+#[with_fallible_options]
+#[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
+pub struct BreweryPanelSettingsContent {
+    /// Where to dock the panel.
+    pub dock: Option<DockPosition>,
 }
 
 #[with_fallible_options]
