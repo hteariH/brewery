@@ -4,6 +4,7 @@
 //! the extension at the bundled version (`auto_update_extensions`). Without a bundle (dev
 //! builds) nothing changes.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gpui::{App, BorrowAppContext as _};
@@ -104,11 +105,36 @@ fn overlay_with(
     overlay
 }
 
+/// `java.import.gradle.java.home` with the bundled launcher: jdtls expands `${...}` in it
+/// from its system properties, and the launcher sets `brewery.gradle.java.home` to the
+/// user's JAVA_HOME when the project's Gradle wrapper can run on it, else to "" (then
+/// jdtls picks a JDK itself). Without it Gradle runs on the bundled JRE 21, which Gradle
+/// before 8.5 cannot run on.
+pub const GRADLE_JAVA_HOME: &str = "${brewery.gradle.java.home}";
+
+/// `lsp.jdtls.initialization_options` defaults for a jdtls overlay; empty unless it uses
+/// the bundled launcher. Initialization options, not settings: jdtls reads them before
+/// its first Gradle import, while settings arrive later, and a settings update that
+/// does not name a key keeps it.
+pub fn java_initialization_options_for(overlay: &Map<String, Value>) -> Map<String, Value> {
+    if !overlay.contains_key("jdtls_launcher") {
+        return Map::new();
+    }
+    let mut options = Map::new();
+    options.insert(
+        "settings".to_string(),
+        serde_json::json!({"java": {"import": {"gradle": {"java": {"home": GRADLE_JAVA_HOME}}}}}),
+    );
+    options
+}
+
 /// Defaults a bundle contributes on top of `assets/settings/default.json`.
 #[derive(Debug, Default, PartialEq)]
 pub struct BundleDefaults {
     /// Merged into the default `lsp.jdtls.settings`.
     pub jdtls: Map<String, Value>,
+    /// Merged into the default `lsp.jdtls.initialization_options`.
+    pub jdtls_initialization_options: Map<String, Value>,
     /// Bundled extensions that default to `auto_update_extensions: false`, so the
     /// extension stays at the version the bundled helpers were pinned and tested with.
     pub pinned_extensions: Vec<String>,
@@ -154,6 +180,7 @@ pub fn bundle_defaults_for(root: Option<&Path>, installed_dir: &Path) -> BundleD
         (None, _) => Map::new(),
     };
     BundleDefaults {
+        jdtls_initialization_options: java_initialization_options_for(&jdtls),
         jdtls,
         pinned_extensions,
     }
@@ -164,9 +191,10 @@ pub fn bundle_defaults_for(root: Option<&Path>, installed_dir: &Path) -> BundleD
 pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
     let BundleDefaults {
         jdtls,
+        jdtls_initialization_options,
         pinned_extensions,
     } = defaults;
-    if jdtls.is_empty() && pinned_extensions.is_empty() {
+    if jdtls.is_empty() && jdtls_initialization_options.is_empty() && pinned_extensions.is_empty() {
         return;
     }
     if !jdtls.is_empty() {
@@ -175,7 +203,13 @@ pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
             jdtls.keys().cloned().collect::<Vec<_>>().join(", ")
         );
     }
-    let jdtls = Value::Object(jdtls);
+    let jdtls = (!jdtls.is_empty()).then(|| Value::Object(jdtls));
+    let options = (!jdtls_initialization_options.is_empty())
+        .then(|| Value::Object(jdtls_initialization_options));
+    let merge = |target: &mut Option<Value>, value: &Value| match target {
+        Some(target) => target.merge_from(value),
+        None => *target = Some(value.clone()),
+    };
     cx.update_global::<SettingsStore, _>(|store, cx| {
         store.update_default_settings(cx, |defaults| {
             for id in &pinned_extensions {
@@ -185,11 +219,13 @@ pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
                     .entry(id.as_str().into())
                     .or_insert(false);
             }
-            if jdtls.as_object().is_some_and(|map| !map.is_empty()) {
+            if jdtls.is_some() || options.is_some() {
                 let server = defaults.project.lsp.0.entry(JDTLS_SERVER.into()).or_default();
-                match &mut server.settings {
-                    Some(settings) => settings.merge_from(&jdtls),
-                    None => server.settings = Some(jdtls.clone()),
+                if let Some(jdtls) = &jdtls {
+                    merge(&mut server.settings, jdtls);
+                }
+                if let Some(options) = &options {
+                    merge(&mut server.initialization_options, options);
                 }
             }
         });
@@ -205,7 +241,104 @@ pub fn setup_bundled_java(extensions_dir: &Path, cx: &mut App) {
         crate::bundle_root().as_deref(),
         &extensions_dir.join("installed"),
     );
+    let launcher = defaults.jdtls.contains_key("jdtls_launcher");
     apply_bundle_defaults(defaults, cx);
+    if launcher {
+        track_jdtls_memory(cx);
+    }
+}
+
+/// The variables the bundled launcher turns into `-Xms` and `-Xmx`.
+pub const MIN_MEMORY_ENV: &str = "BREWERY_JDTLS_MIN_MEMORY";
+pub const MAX_MEMORY_ENV: &str = "BREWERY_JDTLS_MAX_MEMORY";
+
+/// The launcher's environment for `min_memory` / `max_memory` in `lsp.jdtls.settings`,
+/// which the extension only passes to a jdtls it starts itself. As in the extension's
+/// `build_jdtls_launch_args`, the minimum defaults to 1G and a minimum above the maximum
+/// is swapped with it. A size the JVM would reject is dropped: jdtls would not start.
+pub fn memory_env(settings: Option<&Value>) -> BTreeMap<String, String> {
+    let size = |key: &str| {
+        let value = settings?.get(key)?.as_str()?.trim();
+        if memory_bytes(value).is_none() {
+            log::warn!("brewery: ignoring lsp.jdtls.settings.{key} {value:?}, not a JVM heap size");
+            return None;
+        }
+        Some(value.to_string())
+    };
+    let (min, max) = (size("min_memory"), size("max_memory"));
+    let mut env = BTreeMap::new();
+    if min.is_none() && max.is_none() {
+        return env;
+    }
+    let mut min = min.unwrap_or_else(|| "1G".to_string());
+    let mut max = max;
+    if let Some(max) = max.as_mut()
+        && memory_bytes(&min) > memory_bytes(max)
+    {
+        std::mem::swap(&mut min, max);
+    }
+    env.insert(MIN_MEMORY_ENV.to_string(), min);
+    if let Some(max) = max {
+        env.insert(MAX_MEMORY_ENV.to_string(), max);
+    }
+    env
+}
+
+/// The bytes in a JVM size like `512m` or `4G`.
+fn memory_bytes(value: &str) -> Option<u64> {
+    let (digits, unit) = match value.char_indices().last()? {
+        (index, unit) if unit.is_ascii_alphabetic() => (&value[..index], unit.to_ascii_lowercase()),
+        _ => (value, 'b'),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let shift = match unit {
+        'b' => 0,
+        'k' => 10,
+        'm' => 20,
+        'g' => 30,
+        't' => 40,
+        _ => return None,
+    };
+    digits.parse::<u64>().ok()?.checked_mul(1 << shift)
+}
+
+/// Keeps the default `lsp.jdtls.binary.env` in step with [`memory_env`] of the user's
+/// `lsp.jdtls.settings` (Zed adds `binary.env` to the extension's command), so the
+/// bundled launcher sees `min_memory` / `max_memory`. Project settings are not followed.
+pub fn track_jdtls_memory(cx: &mut App) {
+    let mut applied = BTreeMap::new();
+    sync_jdtls_memory(cx, &mut applied);
+    cx.observe_global::<SettingsStore>(move |cx| sync_jdtls_memory(cx, &mut applied))
+        .detach();
+}
+
+fn sync_jdtls_memory(cx: &mut App, applied: &mut BTreeMap<String, String>) {
+    let settings = cx
+        .global::<SettingsStore>()
+        .merged_settings()
+        .project
+        .lsp
+        .0
+        .get(JDTLS_SERVER)
+        .and_then(|server| server.settings.clone());
+    let env = memory_env(settings.as_ref());
+    if env == *applied {
+        return;
+    }
+    let previous = std::mem::replace(applied, env.clone());
+    cx.update_global::<SettingsStore, _>(|store, cx| {
+        store.update_default_settings(cx, |defaults| {
+            let server = defaults.project.lsp.0.entry(JDTLS_SERVER.into()).or_default();
+            let binary = server.binary.get_or_insert_default();
+            let vars = binary.env.get_or_insert_default();
+            for key in previous.keys() {
+                vars.remove(key);
+            }
+            vars.extend(env);
+        });
+    });
 }
 
 /// Copies `<bundled>` to `<installed_dir>/<id>` unless that already exists. Returns
@@ -413,6 +546,24 @@ mod tests {
     }
 
     #[test]
+    fn launcher_gives_gradle_the_users_jdk_from_the_start() {
+        let temp = TempDir::new("gradle-java-home");
+        populate(&temp.0);
+        let overlay = java_settings_overlay_for_root(Some(&temp.0));
+        let options = java_initialization_options_for(&overlay);
+        assert_eq!(
+            Value::Object(options),
+            serde_json::json!({"settings": {"java": {"import": {"gradle": {"java": {
+                "home": "${brewery.gradle.java.home}"
+            }}}}}})
+        );
+        // Without the launcher nothing defines the property.
+        let mut no_launcher = overlay;
+        no_launcher.remove("jdtls_launcher");
+        assert!(java_initialization_options_for(&no_launcher).is_empty());
+    }
+
+    #[test]
     fn helpers_at_the_bundle_root_are_not_used() {
         // The update helper only swaps jre/, brewery-daemon/, jdtls/ and extensions/.
         let temp = TempDir::new("old-layout");
@@ -503,11 +654,17 @@ mod tests {
         let defaults = bundle_defaults_for(Some(&root), &installed);
         assert_eq!(defaults.jdtls, java_settings_overlay_for_root(Some(&root)));
         assert!(!defaults.jdtls.is_empty());
+        assert_eq!(
+            defaults.jdtls_initialization_options,
+            java_initialization_options_for(&defaults.jdtls)
+        );
+        assert!(!defaults.jdtls_initialization_options.is_empty());
 
         // The user updated the extension: its own proxy and downloads, not ours.
         write_extension_toml(&installed.join("java"), "6.9.0");
         let defaults = bundle_defaults_for(Some(&root), &installed);
         assert!(defaults.jdtls.is_empty());
+        assert!(defaults.jdtls_initialization_options.is_empty());
         assert_eq!(defaults.pinned_extensions, vec!["java".to_string()]);
     }
 
@@ -541,10 +698,135 @@ mod tests {
     }
 
     fn full_defaults(root: &Path) -> BundleDefaults {
+        let jdtls = java_settings_overlay_for_root(Some(root));
         BundleDefaults {
-            jdtls: java_settings_overlay_for_root(Some(root)),
+            jdtls_initialization_options: java_initialization_options_for(&jdtls),
+            jdtls,
             pinned_extensions: vec!["java".to_string()],
         }
+    }
+
+    fn jdtls_initialization_options(cx: &App) -> Option<Value> {
+        cx.global::<SettingsStore>().merged_settings().project.lsp.0[JDTLS_SERVER]
+            .initialization_options
+            .clone()
+    }
+
+    #[gpui::test]
+    fn initialization_options_merge_with_the_users(cx: &mut TestAppContext) {
+        let temp = TempDir::new("init-options");
+        populate(&temp.0);
+        cx.update(|cx| {
+            let store = SettingsStore::new(cx, &settings::default_settings());
+            cx.set_global(store);
+            apply_bundle_defaults(full_defaults(&temp.0), cx);
+            let home = "/settings/java/import/gradle/java/home";
+            let options = jdtls_initialization_options(cx).unwrap();
+            assert_eq!(options.pointer(home), Some(&Value::String(GRADLE_JAVA_HOME.into())));
+
+            set_user_settings(
+                cx,
+                r#"{"lsp": {"jdtls": {"initialization_options": {
+                    "settings": {"java": {"format": {"enabled": false}}}
+                }}}}"#,
+            );
+            let options = jdtls_initialization_options(cx).unwrap();
+            assert_eq!(options.pointer(home), Some(&Value::String(GRADLE_JAVA_HOME.into())));
+            assert_eq!(options.pointer("/settings/java/format/enabled"), Some(&Value::Bool(false)));
+
+            set_user_settings(
+                cx,
+                r#"{"lsp": {"jdtls": {"initialization_options": {
+                    "settings": {"java": {"import": {"gradle": {"java": {"home": "/my/jdk"}}}}}
+                }}}}"#,
+            );
+            let options = jdtls_initialization_options(cx).unwrap();
+            assert_eq!(options.pointer(home), Some(&Value::String("/my/jdk".into())));
+        });
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn memory_settings_become_the_launcher_env() {
+        let settings = |json: Value| memory_env(Some(&json));
+        assert!(memory_env(None).is_empty());
+        assert!(settings(serde_json::json!({"lombok_jar": "x"})).is_empty());
+        assert_eq!(
+            settings(serde_json::json!({"min_memory": "512m", "max_memory": "4G"})),
+            env(&[(MIN_MEMORY_ENV, "512m"), (MAX_MEMORY_ENV, "4G")])
+        );
+        // Like the extension: min defaults to 1G, and a min above max is swapped, which the
+        // JVM would otherwise refuse to start with.
+        assert_eq!(
+            settings(serde_json::json!({"max_memory": "4G"})),
+            env(&[(MIN_MEMORY_ENV, "1G"), (MAX_MEMORY_ENV, "4G")])
+        );
+        assert_eq!(
+            settings(serde_json::json!({"max_memory": "512m"})),
+            env(&[(MIN_MEMORY_ENV, "512m"), (MAX_MEMORY_ENV, "1G")])
+        );
+        assert_eq!(
+            settings(serde_json::json!({"min_memory": "2g"})),
+            env(&[(MIN_MEMORY_ENV, "2g")])
+        );
+        // A size the JVM would reject is dropped rather than keeping jdtls from starting.
+        assert_eq!(
+            settings(serde_json::json!({"min_memory": "lots", "max_memory": "2G & x"})),
+            BTreeMap::new()
+        );
+    }
+
+    fn jdtls_binary_env(cx: &App) -> Option<BTreeMap<String, String>> {
+        cx.global::<SettingsStore>()
+            .merged_settings()
+            .project
+            .lsp
+            .0
+            .get(JDTLS_SERVER)
+            .and_then(|server| server.binary.as_ref())
+            .and_then(|binary| binary.env.clone())
+    }
+
+    #[gpui::test]
+    fn memory_settings_follow_the_user_settings(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::new(cx, &settings::default_settings());
+            cx.set_global(store);
+            track_jdtls_memory(cx);
+        });
+        cx.update(|cx| {
+            assert_eq!(jdtls_binary_env(cx), None);
+            set_user_settings(
+                cx,
+                r#"{"lsp": {"jdtls": {
+                    "settings": {"max_memory": "4G"},
+                    "binary": {"env": {"OTHER": "1"}}
+                }}}"#,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                jdtls_binary_env(cx),
+                Some(env(&[(MAX_MEMORY_ENV, "4G"), (MIN_MEMORY_ENV, "1G"), ("OTHER", "1")]))
+            );
+            set_user_settings(cx, r#"{"lsp": {"jdtls": {"settings": {"min_memory": "256m"}}}}"#);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(jdtls_binary_env(cx), Some(env(&[(MIN_MEMORY_ENV, "256m")])));
+            set_user_settings(cx, "{}");
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(jdtls_binary_env(cx).unwrap_or_default().is_empty());
+        });
     }
 
     #[gpui::test]
@@ -603,8 +885,10 @@ mod tests {
             let store = SettingsStore::new(cx, &settings::default_settings());
             cx.set_global(store);
             let before = jdtls_settings(cx);
+            let options_before = jdtls_initialization_options(cx);
             apply_bundle_defaults(BundleDefaults::default(), cx);
             assert_eq!(jdtls_settings(cx), before);
+            assert_eq!(jdtls_initialization_options(cx), options_before);
             assert_eq!(before["jdk_auto_download"], Value::Bool(true));
             assert_eq!(auto_update_java(cx), None);
         });

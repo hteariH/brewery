@@ -355,13 +355,14 @@ jobs:
             sudo unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- env "HOME=$3" "PATH=$4" python script/brewery/smoke_bundle.py "$5" --require-offline' \
               smoke "$(id -u)" "$(id -g)" "$HOME" "$PATH" "$BUNDLE"
           fi
-      # Online: the Gradle fixture's wrapper downloads its distribution.
-      - name: Smoke (jdtls Gradle import, across a jdtls update)
+      # Online: the Gradle fixtures' wrappers download their distributions. gradle-old runs
+      # Gradle 8.4 on the runner's preinstalled JDK 17 (JAVA_HOME_17_X64 / JAVA_HOME_17_arm64).
+      - name: Smoke (jdtls Gradle import, across a jdtls update; Gradle 8.4 on JAVA_HOME)
         if: runner.os == 'Linux'
-        run: python script/brewery/smoke_bundle.py "$BUNDLE" --checks gradle
-      - name: Smoke (daemon and jdtls, Gradle import)
+        run: python script/brewery/smoke_bundle.py "$BUNDLE" --checks gradle,gradle-old
+      - name: Smoke (daemon and jdtls, Gradle import; Gradle 8.4 on JAVA_HOME)
         if: runner.os != 'Linux'
-        run: python script/brewery/smoke_bundle.py "$BUNDLE" --checks basic,gradle
+        run: python script/brewery/smoke_bundle.py "$BUNDLE" --checks basic,gradle,gradle-old
       # A tarball keeps the executable bits that upload-artifact's zip would drop.
       - name: Pack
         if: runner.os != 'Windows'

@@ -57,16 +57,32 @@ FAKE_SERVER = textwrap.dedent(
                   "params": {"items": [{"section": "java"}]}})
             reply = read()
             assert reply.get("id") == "s1" and reply.get("result") == [None], reply
-            bundles = msg["params"]["initializationOptions"].get("bundles", [])
+            options = msg["params"]["initializationOptions"]
+            version = str(len(options.get("bundles", [])))
+            if MODE == "settings":
+                version = json.dumps(options["settings"], sort_keys=True)
             send({"jsonrpc": "2.0", "id": msg["id"],
                   "result": {"capabilities": {"documentSymbolProvider": True},
-                             "serverInfo": {"name": "fake", "version": str(len(bundles))}}})
+                             "serverInfo": {"name": "fake", "version": version}}})
         elif method == "initialized":
             if MODE == "build-error":
                 # How jdtls reports a failed Gradle import.
                 send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
                       "params": {"uri": root + "/build.gradle.kts", "diagnostics": [
                           {"severity": 1, "message": "Could not run phased build action"}]}})
+            if MODE == "gradle-jdk":
+                # How jdtls reports a Gradle version that cannot run on its Java.
+                send({"jsonrpc": "2.0", "method": "language/eventNotification",
+                      "params": {"eventType": 300, "data": {
+                          "projectUri": root + "/",
+                          "message": "Can't use Java 21.0.12.1 and Gradle 8.4 to import Gradle project p.",
+                          "highestJavaVersion": "20", "recommendedGradleVersion": "8.9"}}})
+            if MODE == "non-project":
+                # What a file outside every imported project gets once it is opened.
+                send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                      "params": {"uri": root + "/src/Owner.java", "diagnostics": [
+                          {"severity": 2, "code": "16",
+                           "message": "Owner.java is a non-project file, only syntax errors are reported"}]}})
             # Hints on build files are fine.
             send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
                   "params": {"uri": root + "/settings.gradle.kts", "diagnostics": [
@@ -199,6 +215,25 @@ class LspSmokeTest(unittest.TestCase):
         code, log = self.smoke("build-error", "--wait-ready", "--clean-build-files")
         self.assertNotEqual(code, 0)
         self.assertIn("build.gradle.kts: Could not run phased build action", log)
+
+    def test_clean_build_files_fails_when_gradle_cannot_run_on_the_jdk(self):
+        code, log = self.smoke("gradle-jdk", "--wait-ready", "--clean-build-files")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Can't use Java 21.0.12.1 and Gradle 8.4", log)
+
+    def test_clean_build_files_fails_on_a_non_project_file(self):
+        code, log = self.smoke("non-project", "--wait-ready", "--clean-build-files")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Owner.java is a non-project file", log)
+
+    def test_init_settings_are_sent(self):
+        settings = '{"java": {"import": {"gradle": {"java": {"home": "x"}}}}}'
+        code, log = self.smoke("settings", "--init-settings", settings)
+        self.assertEqual(code, 0, log)
+        self.assertIn(settings, log)
+        code, log = self.smoke("settings")
+        self.assertEqual(code, 0, log)
+        self.assertIn('{"java": {}}', log)
 
     def test_change_build_file_updates_the_project(self):
         (self.project / "build.gradle.kts").write_text("plugins { java }\n", encoding="utf-8")

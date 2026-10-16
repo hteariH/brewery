@@ -9,6 +9,8 @@ rem and speaks LSP over stdin/stdout, so only jdtls may write to stdout.
 rem The JVM arguments match the extension's own build_jdtls_launch_args.
 rem
 rem   java       <bundle>\jre\bin\java.exe, else %JAVA_HOME%\bin\java.exe, else PATH
+rem   Gradle     %JAVA_HOME% (see brewery.gradle.java.home below)
+rem   heap       -Xms%BREWERY_JDTLS_MIN_MEMORY% (else 1G) -Xmx%BREWERY_JDTLS_MAX_MEMORY%
 rem   config     shared, read-only: <bundle>\jdtls\config_win
 rem              writable: <cache>\config\<sha1 of this jdtls directory>
 rem   workspace  -data when given, else <cache>\workspace\jdtls-<sha1 of the cwd>;
@@ -27,12 +29,87 @@ set "JDTLS_HOME=%~dp0"
 set "JDTLS_HOME=%JDTLS_HOME:~0,-1%"
 for %%I in ("%JDTLS_HOME%\..") do set "BUNDLE_ROOT=%%~fI"
 
+set "JAVA_FROM_HOME="
 set "JAVA=%BUNDLE_ROOT%\jre\bin\java.exe"
 if exist "%JAVA%" goto java_found
 set "JAVA=java"
 if not defined JAVA_HOME goto java_found
-if exist "%JAVA_HOME%\bin\java.exe" set "JAVA=%JAVA_HOME%\bin\java.exe"
+if not exist "%JAVA_HOME%\bin\java.exe" goto java_found
+set "JAVA=%JAVA_HOME%\bin\java.exe"
+set "JAVA_FROM_HOME=1"
 :java_found
+
+rem Gradle (jdtls's import and builds) runs on the user's JDK, as gradlew does:
+rem JAVA_HOME reaches jdtls as brewery.gradle.java.home, which Brewery's
+rem lsp.jdtls.initialization_options use for java.import.gradle.java.home. It is
+rem empty without a usable JAVA_HOME, when jdtls runs on it (then it is jdtls's
+rem default JVM anyway) or when the project's Gradle wrapper cannot run on it;
+rem jdtls then picks a JDK that wrapper can run on.
+set "GRADLE_JAVA_HOME="
+if defined JAVA_FROM_HOME goto gradle_java_home_done
+if not defined JAVA_HOME goto gradle_java_home_done
+set "GRADLE_JAVA_HOME=%JAVA_HOME:"=%"
+rem A trailing backslash would escape the quote that closes the JVM argument.
+if "%GRADLE_JAVA_HOME:~-1%"=="\" set "GRADLE_JAVA_HOME=%GRADLE_JAVA_HOME:~0,-1%"
+if not exist "%GRADLE_JAVA_HOME%\bin\java.exe" goto no_gradle_java_home
+rem The JDK's feature version from its release file (1.8.0_x is 8), the wrapper's
+rem Gradle version as major*100+minor; either unknown (0): JAVA_HOME as it is.
+set "JAVA_VERSION_VALUE="
+set "JAVA_FEATURE=0"
+set "GRADLE_NUMBER=0"
+if not exist "%GRADLE_JAVA_HOME%\release" goto java_feature_done
+for /f "usebackq tokens=1,* delims==" %%A in ("%GRADLE_JAVA_HOME%\release") do if "%%A"=="JAVA_VERSION" set "JAVA_VERSION_VALUE=%%~B"
+if not defined JAVA_VERSION_VALUE goto java_feature_done
+for /f "tokens=1,2 delims=._+-" %%A in ("%JAVA_VERSION_VALUE%") do set /a "JAVA_FEATURE=%%A" 2>nul & if "%%A"=="1" set /a "JAVA_FEATURE=%%B" 2>nul
+:java_feature_done
+set "WRAPPER_PROPERTIES=%CD%\gradle\wrapper\gradle-wrapper.properties"
+set "DIST_URL="
+if not exist "%WRAPPER_PROPERTIES%" goto gradle_number_done
+for /f "usebackq tokens=1,* delims==" %%A in ("%WRAPPER_PROPERTIES%") do if "%%A"=="distributionUrl" set "DIST_URL=%%B"
+if not defined DIST_URL goto gradle_number_done
+rem .../gradle-8.10.2-bin.zip: the file name, then the version after "gradle-".
+for %%F in ("%DIST_URL:/=\%") do set "DIST_NAME=%%~nF"
+for /f "tokens=2 delims=-" %%V in ("%DIST_NAME%") do set "GRADLE_VERSION=%%V"
+for /f "tokens=1,2 delims=." %%A in ("%GRADLE_VERSION%") do set /a "GRADLE_NUMBER=%%A*100+%%B" 2>nul
+:gradle_number_done
+if %JAVA_FEATURE% EQU 0 goto gradle_java_home_done
+if %GRADLE_NUMBER% EQU 0 goto gradle_java_home_done
+rem The oldest Gradle that runs on each Java (jdtls's GradleUtils.getHighestSupportedJava;
+rem https://docs.gradle.org/current/userguide/compatibility.html); Gradle 9 needs Java 17.
+set "MIN_GRADLE=0"
+if %JAVA_FEATURE% GEQ 9 set "MIN_GRADLE=403"
+if %JAVA_FEATURE% GEQ 10 set "MIN_GRADLE=407"
+if %JAVA_FEATURE% GEQ 11 set "MIN_GRADLE=500"
+if %JAVA_FEATURE% GEQ 12 set "MIN_GRADLE=504"
+if %JAVA_FEATURE% GEQ 13 set "MIN_GRADLE=600"
+if %JAVA_FEATURE% GEQ 14 set "MIN_GRADLE=603"
+if %JAVA_FEATURE% GEQ 15 set "MIN_GRADLE=607"
+if %JAVA_FEATURE% GEQ 16 set "MIN_GRADLE=700"
+if %JAVA_FEATURE% GEQ 17 set "MIN_GRADLE=703"
+if %JAVA_FEATURE% GEQ 18 set "MIN_GRADLE=705"
+if %JAVA_FEATURE% GEQ 19 set "MIN_GRADLE=706"
+if %JAVA_FEATURE% GEQ 20 set "MIN_GRADLE=803"
+if %JAVA_FEATURE% GEQ 21 set "MIN_GRADLE=805"
+if %JAVA_FEATURE% GEQ 22 set "MIN_GRADLE=808"
+if %JAVA_FEATURE% GEQ 23 set "MIN_GRADLE=810"
+if %JAVA_FEATURE% GEQ 24 set "MIN_GRADLE=814"
+if %JAVA_FEATURE% GEQ 25 set "MIN_GRADLE=901"
+if %JAVA_FEATURE% GEQ 26 set "MIN_GRADLE=904"
+if %JAVA_FEATURE% GEQ 27 goto no_gradle_java_home
+if %GRADLE_NUMBER% LSS %MIN_GRADLE% goto no_gradle_java_home
+if %JAVA_FEATURE% LSS 17 if %GRADLE_NUMBER% GEQ 900 goto no_gradle_java_home
+goto gradle_java_home_done
+:no_gradle_java_home
+set "GRADLE_JAVA_HOME="
+:gradle_java_home_done
+
+rem The heap: the extension passes lsp.jdtls.settings.min_memory / max_memory only to
+rem a jdtls it starts itself, so Brewery hands them over in lsp.jdtls.binary.env.
+rem --jvm-arg options come later and win.
+set "MIN_MEMORY=1G"
+if defined BREWERY_JDTLS_MIN_MEMORY set "MIN_MEMORY=%BREWERY_JDTLS_MIN_MEMORY%"
+set JVM_MEMORY="-Xms%MIN_MEMORY%"
+if defined BREWERY_JDTLS_MAX_MEMORY set JVM_MEMORY=%JVM_MEMORY% "-Xmx%BREWERY_JDTLS_MAX_MEMORY%"
 
 set "LAUNCHER="
 if exist "%JDTLS_HOME%\plugins\org.eclipse.equinox.launcher.jar" set "LAUNCHER=%JDTLS_HOME%\plugins\org.eclipse.equinox.launcher.jar"
@@ -135,5 +212,5 @@ if not exist "%DATA%\.metadata" mkdir "%DATA%\.metadata" >nul 2>&1
 <nul set /p "=%STAMP%" >"%STAMP_FILE%" 2>nul
 :workspace_ready
 
-"%JAVA%" -Declipse.application=org.eclipse.jdt.ls.core.id1 -Dosgi.bundles.defaultStartLevel=4 -Declipse.product=org.eclipse.jdt.ls.core.product -Dosgi.checkConfiguration=true "-Dosgi.sharedConfiguration.area=%SHARED_CONFIG%" -Dosgi.sharedConfiguration.area.readOnly=true -Dosgi.configuration.cascaded=true "-Dosgi.configuration.area=%CONFIG_AREA%" -Djava.import.generatesMetadataFilesAtProjectRoot=false -Djava.net.preferIPv4Stack=true -Xms1G --add-modules=ALL-SYSTEM --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED %JVM_ARGS% -jar "%LAUNCHER%" -data "%DATA%" %JDTLS_ARGS%
+"%JAVA%" -Declipse.application=org.eclipse.jdt.ls.core.id1 -Dosgi.bundles.defaultStartLevel=4 -Declipse.product=org.eclipse.jdt.ls.core.product -Dosgi.checkConfiguration=true "-Dosgi.sharedConfiguration.area=%SHARED_CONFIG%" -Dosgi.sharedConfiguration.area.readOnly=true -Dosgi.configuration.cascaded=true "-Dosgi.configuration.area=%CONFIG_AREA%" -Djava.import.generatesMetadataFilesAtProjectRoot=false -Djava.net.preferIPv4Stack=true "-Dbrewery.gradle.java.home=%GRADLE_JAVA_HOME%" %JVM_MEMORY% --add-modules=ALL-SYSTEM --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED %JVM_ARGS% -jar "%LAUNCHER%" -data "%DATA%" %JDTLS_ARGS%
 exit /b %ERRORLEVEL%

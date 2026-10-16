@@ -9,6 +9,8 @@
 # The JVM arguments match the extension's own build_jdtls_launch_args.
 #
 #   java       <bundle>/jre/bin/java, else $JAVA_HOME/bin/java, else PATH
+#   Gradle     $JAVA_HOME (see brewery.gradle.java.home below)
+#   heap       -Xms$BREWERY_JDTLS_MIN_MEMORY (else 1G) -Xmx$BREWERY_JDTLS_MAX_MEMORY
 #   config     shared, read-only: <bundle>/jdtls/config_<os>[_arm]
 #              writable: <cache>/config/<sha1 of this jdtls directory>
 #   workspace  -data when given, else <cache>/workspace/jdtls-<sha1 of the cwd>;
@@ -45,12 +47,73 @@ sha1() {
 jdtls_home=$(cd "$(dirname -- "$0")" && pwd -P)
 bundle_root=$(dirname -- "$jdtls_home")
 
+java_from_home=no
 if [ -x "$bundle_root/jre/bin/java" ]; then
     java=$bundle_root/jre/bin/java
 elif [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
     java=$JAVA_HOME/bin/java
+    java_from_home=yes
 else
     java=java
+fi
+
+# Gradle (jdtls's import and builds) runs on the user's JDK, as gradlew does:
+# JAVA_HOME reaches jdtls as brewery.gradle.java.home, which Brewery's
+# lsp.jdtls.initialization_options use for java.import.gradle.java.home. It is
+# empty without a usable JAVA_HOME, when jdtls runs on it (then it is jdtls's
+# default JVM anyway) or when the project's Gradle wrapper cannot run on it;
+# jdtls then picks a JDK that wrapper can run on.
+
+# The JDK's feature version from its release file (1.8.0_x is 8); 0 if unknown.
+java_feature() {
+    version=$(sed -n 's/^JAVA_VERSION="\{0,1\}\([^"]*\)"\{0,1\}.*$/\1/p' "$1/release" 2>/dev/null | head -n 1)
+    case $version in
+        1.*) version=${version#1.} ;;
+    esac
+    version=${version%%[!0-9]*}
+    echo "${version:-0}"
+}
+
+# The wrapper's Gradle version (.../gradle-8.10.2-bin.zip) as major*100+minor; 0 if unknown.
+gradle_number() {
+    url=$(sed -n 's/^distributionUrl=//p' gradle/wrapper/gradle-wrapper.properties 2>/dev/null | head -n 1)
+    name=${url##*/}
+    version=${name#gradle-}
+    [ "$version" != "$name" ] || { echo 0; return; }
+    major=${version%%.*}
+    case $version in
+        *.*) rest=${version#*.} && minor=${rest%%[!0-9]*} ;;
+        *) minor= ;;
+    esac
+    case $major$minor in
+        '' | *[!0-9]*) echo 0 ;;
+        *) [ -n "$minor" ] && echo $((major * 100 + minor)) || echo 0 ;;
+    esac
+}
+
+# The oldest Gradle that runs on Java $1 (jdtls's GradleUtils.getHighestSupportedJava;
+# https://docs.gradle.org/current/userguide/compatibility.html); "" when none is known.
+min_gradle() {
+    min=
+    for pair in 0:0 9:403 10:407 11:500 12:504 13:600 14:603 15:607 16:700 17:703 18:705 \
+        19:706 20:803 21:805 22:808 23:810 24:814 25:901 26:904; do
+        [ "$1" -ge "${pair%%:*}" ] && min=${pair#*:}
+    done
+    [ "$1" -ge 27 ] && min=
+    echo "$min"
+}
+
+gradle_java_home=
+if [ "$java_from_home" = no ] && [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+    gradle_java_home=${JAVA_HOME%/}
+    feature=$(java_feature "$gradle_java_home")
+    gradle=$(gradle_number)
+    if [ "$feature" -gt 0 ] && [ "$gradle" -gt 0 ]; then
+        min=$(min_gradle "$feature")
+        if [ -z "$min" ] || [ "$gradle" -lt "$min" ] || { [ "$feature" -lt 17 ] && [ "$gradle" -ge 900 ]; }; then
+            gradle_java_home=
+        fi
+    fi
 fi
 
 launcher=
@@ -74,6 +137,14 @@ case $(uname -m) in
     *) shared=$jdtls_home/config_$os ;;
 esac
 [ -f "$shared/config.ini" ] || die "$shared/config.ini not found"
+
+# The heap: the extension passes lsp.jdtls.settings.min_memory / max_memory only to
+# a jdtls it starts itself, so Brewery hands them over in lsp.jdtls.binary.env.
+# --jvm-arg options come later and win.
+jvm_memory=$(quote "-Xms${BREWERY_JDTLS_MIN_MEMORY:-1G}")
+if [ -n "${BREWERY_JDTLS_MAX_MEMORY:-}" ]; then
+    jvm_memory="$jvm_memory $(quote "-Xmx$BREWERY_JDTLS_MAX_MEMORY")"
+fi
 
 jvm_args=
 jdtls_args=
@@ -155,7 +226,8 @@ eval "exec \"\$java\" \
     \"-Dosgi.configuration.area=\$config_area\" \
     -Djava.import.generatesMetadataFilesAtProjectRoot=false \
     -Djava.net.preferIPv4Stack=true \
-    -Xms1G \
+    \"-Dbrewery.gradle.java.home=\$gradle_java_home\" \
+    $jvm_memory \
     --add-modules=ALL-SYSTEM \
     --add-opens java.base/java.util=ALL-UNNAMED \
     --add-opens java.base/java.lang=ALL-UNNAMED \

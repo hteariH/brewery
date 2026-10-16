@@ -9,6 +9,7 @@ starts it) against a fixture project. Python 3.11+ standard library only.
         [--proxy <bundle>/jdtls/tools/java-lsp-proxy[.exe]] [--lombok <bundle>/jdtls/tools/lombok.jar]
         [--java-debug <bundle>/jdtls/tools/java-debug.jar] [--wait-ready] [--open src/Main.java]
         [--hover src/Main.java:3:5:Text] [--change-build-file build.gradle] [--clean-build-files]
+        [--init-settings '{"java": {...}}']
         [--unchanged <bundle>] [--cache <dir>] [--copy] [--timeout 300]
     python script/brewery/lsp_smoke.py --project <dir> -- <server command...>
 
@@ -19,8 +20,9 @@ with --open, `textDocument/documentSymbol` lists symbols; with --hover, the hove
 at a position has the expected text; with --change-build-file, the file is edited
 (a newline appended), jdtls is told, its offer to synchronize is accepted and the
 project update must succeed; with --clean-build-files, no build file
-(build.gradle[.kts], settings.gradle[.kts], pom.xml) has error diagnostics, so the
-project imported; with --unchanged, the directory (the bundle) is byte-for-byte
+(build.gradle[.kts], settings.gradle[.kts], pom.xml) has error diagnostics, no opened
+file is a non-project file and jdtls reported no Gradle/Java mismatch, so the project
+imported; with --unchanged, the directory (the bundle) is byte-for-byte
 untouched afterwards. Exit 0 on success.
 """
 
@@ -86,6 +88,9 @@ def reader(stream, messages: queue.Queue) -> None:
         messages.put(("error", err))
 
 
+GRADLE_IMPORT_EVENTS = (300, 400)
+
+
 class Client:
     def __init__(self, proc: subprocess.Popen, root_uri: str, folders: list):
         self.proc = proc
@@ -98,6 +103,8 @@ class Client:
         self.diagnostics: dict = {}
         # The server's last window/logMessage lines, shown when a check fails.
         self.server_log: collections.deque = collections.deque(maxlen=40)
+        # jdtls's import problems without a diagnostic, e.g. a Gradle that cannot run on its Java.
+        self.import_problems: list = []
         threading.Thread(target=reader, args=(proc.stdout, self.messages), daemon=True).start()
 
     def send(self, msg: dict) -> None:
@@ -154,6 +161,12 @@ class Client:
                 self.diagnostics[params.get("uri", "")] = params.get("diagnostics", [])
             if msg.get("method") == "window/logMessage":
                 self.server_log.append(str(msg.get("params", {}).get("message", ""))[:500])
+            if msg.get("method") == "language/eventNotification":
+                event = msg.get("params", {})
+                # jdtls's EventType: 300 IncompatibleGradleJdkIssue, 400 UpgradeGradleWrapper.
+                if event.get("eventType") in GRADLE_IMPORT_EVENTS:
+                    data = event.get("data") or {}
+                    self.import_problems.append(str(data.get("message", event))[:400])
             if msg.get("method") == "language/status":
                 status = msg.get("params", {})
                 self.statuses.append(status.get("type"))
@@ -297,7 +310,7 @@ def check(args, proc: subprocess.Popen, project: Path, started: float) -> None:
             "classFileContentsSupport": True,
             "resolveAdditionalTextEditsSupport": True,
         },
-        "settings": {"java": {}},
+        "settings": json.loads(args.init_settings) if args.init_settings else {"java": {}},
     }
     if args.java_debug:
         init_options["bundles"] = [str(Path(args.java_debug).resolve())]
@@ -391,6 +404,8 @@ def check(args, proc: subprocess.Popen, project: Path, started: float) -> None:
 
 
 BUILD_FILES = ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "pom.xml")
+# jdtls's diagnostic code for "X.java is a non-project file, only syntax errors are reported".
+NON_PROJECT_FILE = "16"
 
 
 def check_hover(client: Client, project: Path, spec: str, deadline: float) -> None:
@@ -471,12 +486,14 @@ def check_build_files(client: Client, deadline: float, settle: float = 5.0) -> N
     errors = [
         f"{uri.rsplit('/', 1)[-1]}: {d.get('message', '').strip()[:400]}"
         for uri, diagnostics in client.diagnostics.items()
-        if uri.rsplit("/", 1)[-1] in BUILD_FILES
         for d in diagnostics
-        if d.get("severity", 1) == 1
+        if (uri.rsplit("/", 1)[-1] in BUILD_FILES and d.get("severity", 1) == 1)
+        # An opened file that no imported project claims: the import failed without a word.
+        or str(d.get("code")) == NON_PROJECT_FILE
     ]
+    errors += client.import_problems
     if errors:
-        raise SmokeError("build file errors:\n  " + "\n  ".join(errors))
+        raise SmokeError("import problems:\n  " + "\n  ".join(errors))
     log("no errors on build files")
 
 
@@ -494,6 +511,11 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--lombok", help="pass --jvm-arg=-javaagent:<jar>, like the extension")
     parser.add_argument("--data", help="pass -data <dir>, like the extension's data_directory")
     parser.add_argument("--java-debug", help="java-debug plugin jar to load as a jdtls bundle")
+    parser.add_argument(
+        "--init-settings",
+        help="JSON for initializationOptions.settings (default {\"java\": {}}), "
+        "like Brewery's lsp.jdtls.initialization_options",
+    )
     parser.add_argument("--wait-ready", action="store_true", help="wait for ServiceReady")
     parser.add_argument("--open", help="project-relative Java file to ask documentSymbol for")
     parser.add_argument("--hover", help="FILE:LINE:COLUMN:TEXT; the hover there must contain TEXT")
