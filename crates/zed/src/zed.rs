@@ -4875,8 +4875,6 @@ mod tests {
             .unwrap();
         let cx = &mut VisualTestContext::from_window(*window, cx);
 
-        let mouse_position = point(px(250.), px(250.));
-
         let event_modifiers = {
             #[cfg(target_os = "macos")]
             {
@@ -4895,7 +4893,7 @@ mod tests {
             }
         };
 
-        workspace
+        let editor = workspace
             .update_in(cx, |workspace, window, cx| {
                 workspace.open_abs_path(
                     PathBuf::from(path!("/root/file.txt")),
@@ -4912,6 +4910,13 @@ mod tests {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
         });
+
+        // brewery: the left dock (project panel, IntelliJ placement) and the tool-window
+        // stripe cover Zed's fixed (250, 250), so scroll over the editor's own bounds.
+        let mouse_position = editor
+            .read_with(cx, |editor, _| editor.last_bounds().copied())
+            .expect("editor was drawn")
+            .center();
 
         // mouse_wheel_zoom is disabled by default — zoom should not work.
         let initial_font_size =
@@ -6007,7 +6012,8 @@ mod tests {
                 "branch_picker",
                 "bedrock",
                 "branches",
-                "brewery", // brewery: Search Everywhere actions
+                "brewery",       // brewery: Search Everywhere actions
+                "brewery_merge", // brewery: merge view conflict navigation
                 "buffer_search",
                 "call_hierarchy",
                 "channel_modal",
