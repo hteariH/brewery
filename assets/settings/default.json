@@ -1098,6 +1098,8 @@
   "services_panel": { "dock": "bottom" },
   // brewery: where the Build tool window is docked. Can be 'left' or 'right'.
   "build_panel": { "dock": "right" },
+  // brewery: where the Git Log tool window is docked. Can be 'left', 'right' or 'bottom'.
+  "git_log_panel": { "dock": "bottom" },
   "git_panel": {
     // Whether to show the git panel button in the status bar.
     "button": true,

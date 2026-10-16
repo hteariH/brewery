@@ -309,6 +309,50 @@ async fn without_a_repository_shows_the_empty_state(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn the_panel_moves_to_another_dock_and_remembers_it(cx: &mut TestAppContext) {
+    use fs::Fs as _;
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "file.txt": "text" }))
+        .await;
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+    let (fixture, cx) = workspace_with_panel(project, cx).await;
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        let bottom = workspace.bottom_dock().read(cx).panel::<LogPanel>();
+        assert!(bottom.is_some(), "the Log starts at the bottom");
+    });
+
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.position_is_valid(DockPosition::Right));
+        panel.set_position(DockPosition::Right, window, cx);
+    });
+    cx.run_until_parked();
+
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        let bottom = workspace.bottom_dock().read(cx).panel::<LogPanel>();
+        assert!(
+            bottom.is_none(),
+            "the panel should have left the bottom dock"
+        );
+        let right = workspace.right_dock().read(cx).panel::<LogPanel>();
+        assert_eq!(
+            right.map(|panel| panel.entity_id()),
+            Some(fixture.panel.entity_id())
+        );
+        assert_eq!(
+            GitLogPanelSettings::get_global(cx).dock,
+            settings::DockPosition::Right
+        );
+    });
+    let saved = fs
+        .load(paths::settings_file())
+        .await
+        .expect("the dock side is saved to the settings file");
+    let saved: serde_json::Value = settings::parse_json_with_comments(&saved).unwrap();
+    assert_eq!(saved["git_log_panel"]["dock"], json!("right"));
+}
+
+#[gpui::test]
 async fn follows_the_active_repository(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());

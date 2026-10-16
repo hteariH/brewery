@@ -76,7 +76,7 @@ fn test_intellij_tool_window_placement() {
     ] {
         assert_eq!(d[panel]["dock"], Value::String("left".into()), "{panel}");
     }
-    for panel in ["terminal", "debugger", "services_panel"] {
+    for panel in ["terminal", "debugger", "services_panel", "git_log_panel"] {
         assert_eq!(d[panel]["dock"], Value::String("bottom".into()), "{panel}");
     }
     assert_eq!(d["build_panel"]["dock"], Value::String("right".into()));

@@ -278,7 +278,8 @@ pub struct SettingsContent {
 
     pub database_panel: Option<BreweryPanelSettingsContent>, // brewery:
     pub services_panel: Option<BreweryPanelSettingsContent>, // brewery:
-    pub build_panel: Option<BreweryPanelSettingsContent>, // brewery:
+    pub build_panel: Option<BreweryPanelSettingsContent>,    // brewery:
+    pub git_log_panel: Option<BreweryPanelSettingsContent>,  // brewery:
 
     /// Configuration for Node-related features
     pub node: Option<NodeBinarySettings>,
@@ -416,7 +417,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
         node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
         title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,
         instrumentation,
-        database_panel, services_panel, build_panel, // brewery:
+        database_panel, services_panel, build_panel, git_log_panel, // brewery:
     },
     defaults: {},
 });
@@ -962,7 +963,7 @@ pub struct PanelSettingsContent {
     pub default_width: Option<PixelSetting>,
 }
 
-// brewery: where a Brewery tool window (Database, Services, Build) is docked.
+// brewery: where a Brewery tool window (Database, Services, Build, Git Log) is docked.
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct BreweryPanelSettingsContent {
