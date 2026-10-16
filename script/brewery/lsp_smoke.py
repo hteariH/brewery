@@ -8,14 +8,20 @@ starts it) against a fixture project. Python 3.11+ standard library only.
     python script/brewery/lsp_smoke.py --project <dir> --launcher <bundle>/jdtls/brewery-jdtls[.cmd]
         [--proxy <bundle>/jdtls/tools/java-lsp-proxy[.exe]] [--lombok <bundle>/jdtls/tools/lombok.jar]
         [--java-debug <bundle>/jdtls/tools/java-debug.jar] [--wait-ready] [--open src/Main.java]
+        [--hover src/Main.java:3:5:Text] [--change-build-file build.gradle] [--clean-build-files]
         [--unchanged <bundle>] [--cache <dir>] [--copy] [--timeout 300]
     python script/brewery/lsp_smoke.py --project <dir> -- <server command...>
 
 Checks, in order: the server writes only LSP to stdout; `initialize` returns
 capabilities; with --wait-ready, jdtls reports ServiceReady; with --java-debug,
 the java-debug bundle loads and `vscode.java.startDebugSession` returns a port;
-with --open, `textDocument/documentSymbol` lists symbols; with --unchanged, the
-directory (the bundle) is byte-for-byte untouched afterwards. Exit 0 on success.
+with --open, `textDocument/documentSymbol` lists symbols; with --hover, the hover
+at a position has the expected text; with --change-build-file, the file is edited
+(a newline appended), jdtls is told, its offer to synchronize is accepted and the
+project update must succeed; with --clean-build-files, no build file
+(build.gradle[.kts], settings.gradle[.kts], pom.xml) has error diagnostics, so the
+project imported; with --unchanged, the directory (the bundle) is byte-for-byte
+untouched afterwards. Exit 0 on success.
 """
 
 from __future__ import annotations
@@ -39,7 +45,10 @@ class SmokeError(Exception):
 
 
 def log(msg: str) -> None:
-    print(f"lsp-smoke: {msg}", flush=True)
+    # Server messages can hold characters the console's code page lacks (Windows).
+    line = f"lsp-smoke: {msg}"
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(line.encode(encoding, "replace").decode(encoding), flush=True)
 
 
 # --- framing ----------------------------------------------------------------
@@ -85,6 +94,8 @@ class Client:
         self.messages: queue.Queue = queue.Queue()
         self.next_id = 1
         self.statuses: list = []
+        # The latest textDocument/publishDiagnostics per document URI.
+        self.diagnostics: dict = {}
         # The server's last window/logMessage lines, shown when a check fails.
         self.server_log: collections.deque = collections.deque(maxlen=40)
         threading.Thread(target=reader, args=(proc.stdout, self.messages), daemon=True).start()
@@ -138,6 +149,9 @@ class Client:
             if "method" in msg and "id" in msg:
                 self.answer(msg)
                 continue
+            if msg.get("method") == "textDocument/publishDiagnostics":
+                params = msg.get("params", {})
+                self.diagnostics[params.get("uri", "")] = params.get("diagnostics", [])
             if msg.get("method") == "window/logMessage":
                 self.server_log.append(str(msg.get("params", {}).get("message", ""))[:500])
             if msg.get("method") == "language/status":
@@ -354,6 +368,12 @@ def check(args, proc: subprocess.Popen, project: Path, started: float) -> None:
                 raise SmokeError(f"no document symbols for {args.open}")
             time.sleep(0.5)
         log(f"documentSymbol {args.open}: {', '.join(names)}")
+    if args.hover:
+        check_hover(client, project, args.hover, deadline)
+    if args.change_build_file:
+        change_build_file(client, project, args.change_build_file, deadline)
+    if args.clean_build_files:
+        check_build_files(client, deadline)
 
     client.request("shutdown", None, deadline)
     client.notify("exit", None)
@@ -368,6 +388,96 @@ def check(args, proc: subprocess.Popen, project: Path, started: float) -> None:
         # jdtls only forces its exit a minute after `exit`; editors kill it too.
         log("server still running 10s after `exit` (jdtls forces its exit after 1 min); stopping it")
     log(f"done in {time.monotonic() - started:.1f}s")
+
+
+BUILD_FILES = ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "pom.xml")
+
+
+def check_hover(client: Client, project: Path, spec: str, deadline: float) -> None:
+    """spec is FILE:LINE:COLUMN:TEXT (1-based line and column); the hover must contain TEXT."""
+    try:
+        name, line, column, expected = spec.split(":", 3)
+        line, column = int(line), int(column)
+    except ValueError as err:
+        raise SmokeError(f"--hover wants FILE:LINE:COLUMN:TEXT, not {spec!r}") from err
+    path = (project / name).resolve()
+    uri = path.as_uri()
+    client.notify(
+        "textDocument/didOpen",
+        {"textDocument": {"uri": uri, "languageId": "java", "version": 1,
+                          "text": path.read_text(encoding="utf-8")}},
+    )
+    # Like documentSymbol, hover is empty until the project is imported.
+    hover_until = min(deadline, time.monotonic() + 120)
+    text = ""
+    while True:
+        hover = client.request(
+            "textDocument/hover",
+            {"textDocument": {"uri": uri}, "position": {"line": line - 1, "character": column - 1}},
+            deadline,
+        )
+        text = json.dumps((hover or {}).get("contents", ""))
+        if expected in text:
+            break
+        if time.monotonic() + 1 > hover_until:
+            raise SmokeError(f"hover at {name}:{line}:{column} has no {expected!r}: {text[:300]}")
+        time.sleep(0.5)
+    log(f"hover {name}:{line}:{column}: {text[:120]}")
+
+
+def change_build_file(client: Client, project: Path, name: str, deadline: float) -> None:
+    """Edit a build file the way a user saves it and accept jdtls's offer to synchronize."""
+    path = (project / name).resolve()
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write("\n")
+    client.notify(
+        "workspace/didChangeWatchedFiles", {"changes": [{"uri": path.as_uri(), "type": 2}]}
+    )
+    # "A build file was modified. Do you want to synchronize ...?" -- answer Yes.
+    client.wait(
+        lambda m: m.get("method") == "language/actionableNotification"
+        and any(c.get("command") == "java.projectConfiguration.status"
+                for c in m.get("params", {}).get("commands", [])),
+        min(deadline, time.monotonic() + 60),
+        f"the offer to synchronize after changing {name}",
+    )
+    # The Yes button is a client command; it sends jdtls this notification.
+    client.notify("java/projectConfigurationUpdate", {"uri": path.as_uri()})
+    # A good update ends with a ProjectStatus; a failed one only logs an error.
+    done = client.wait(
+        lambda m: (m.get("method") == "language/status"
+                   and m.get("params", {}).get("type") == "ProjectStatus")
+        or (m.get("method") == "window/logMessage" and m.get("params", {}).get("type") == 1
+            and "Updating project configurations" in m.get("params", {}).get("message", "")),
+        min(deadline, time.monotonic() + 300),
+        f"the project update after changing {name}",
+    )
+    if done.get("type") == 1:
+        lines = [line.strip() for line in done.get("message", "").splitlines()]
+        causes = [line for line in lines if line.startswith("Caused by")]
+        summary = "\n  ".join(lines[1:2] + causes[-1:])
+        raise SmokeError(f"updating the project after changing {name} failed:\n  {summary}")
+    log(f"changed {name}: project updated ({done.get('message')})")
+
+
+def check_build_files(client: Client, deadline: float, settle: float = 5.0) -> None:
+    """Fail on error diagnostics on build files, e.g. a failed Gradle import."""
+    # Import problems arrive as publishDiagnostics on the build file; give late ones a moment.
+    try:
+        client.wait(lambda m: False, min(deadline, time.monotonic() + settle), "late diagnostics")
+    except SmokeError as err:
+        if not str(err).startswith("timed out"):
+            raise
+    errors = [
+        f"{uri.rsplit('/', 1)[-1]}: {d.get('message', '').strip()[:400]}"
+        for uri, diagnostics in client.diagnostics.items()
+        if uri.rsplit("/", 1)[-1] in BUILD_FILES
+        for d in diagnostics
+        if d.get("severity", 1) == 1
+    ]
+    if errors:
+        raise SmokeError("build file errors:\n  " + "\n  ".join(errors))
+    log("no errors on build files")
 
 
 def main(argv: list | None = None) -> int:
@@ -386,6 +496,15 @@ def main(argv: list | None = None) -> int:
     parser.add_argument("--java-debug", help="java-debug plugin jar to load as a jdtls bundle")
     parser.add_argument("--wait-ready", action="store_true", help="wait for ServiceReady")
     parser.add_argument("--open", help="project-relative Java file to ask documentSymbol for")
+    parser.add_argument("--hover", help="FILE:LINE:COLUMN:TEXT; the hover there must contain TEXT")
+    parser.add_argument(
+        "--change-build-file",
+        help="project-relative build file to edit (and report as changed) once jdtls is ready",
+    )
+    parser.add_argument(
+        "--clean-build-files", action="store_true",
+        help="fail on error diagnostics on build files (a failed Gradle or Maven import)",
+    )
     parser.add_argument("--unchanged", help="directory that must not be modified (the bundle)")
     parser.add_argument("--cache", help="BREWERY_JDTLS_CACHE_DIR (default: a temp dir)")
     parser.add_argument("--timeout", type=float, default=300, help="seconds for the whole run")

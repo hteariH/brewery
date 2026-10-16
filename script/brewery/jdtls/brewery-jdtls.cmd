@@ -11,7 +11,8 @@ rem
 rem   java       <bundle>\jre\bin\java.exe, else %JAVA_HOME%\bin\java.exe, else PATH
 rem   config     shared, read-only: <bundle>\jdtls\config_win
 rem              writable: <cache>\config\<sha1 of this jdtls directory>
-rem   workspace  -data when given, else <cache>\workspace\jdtls-<sha1 of the cwd>
+rem   workspace  -data when given, else <cache>\workspace\jdtls-<sha1 of the cwd>;
+rem              rebuilt when this jdtls changes (see the stamp below)
 rem   cache      %BREWERY_JDTLS_CACHE_DIR%, else %LOCALAPPDATA%\Brewery\jdtls
 rem
 rem cmd.exe splits unquoted arguments at "=", so --jvm-arg=X arrives either as
@@ -107,6 +108,32 @@ set "DATA_KEY=%DATA_KEY: =_%"
 :keys_found
 set "CONFIG_AREA=%CACHE%\config\%CONFIG_KEY%"
 if not defined DATA set "DATA=%CACHE%\workspace\jdtls-%DATA_KEY%"
+
+rem A workspace remembers paths into the configuration area: Gradle projects keep
+rem "--init-script <config>\org.eclipse.osgi\<bundle id>\0\.cp\gradle\init\init.gradle"
+rem in their Buildship settings. When this jdtls is replaced (a Brewery update),
+rem Equinox reinstalls its bundles under new ids and those paths stop existing, so
+rem Gradle imports fail until the workspace is rebuilt. The stamp names this jdtls;
+rem a workspace from another one (or from before the stamp) is moved away and
+rem deleted, and jdtls imports the project again. If it is in use (locked), it is
+rem kept and the stamp is not written, so the next start tries again.
+set "STAMP=%CONFIG_AREA%"
+for %%F in ("%SHARED_CONFIG%\config.ini") do set "STAMP=%STAMP%|%%~zF|%%~tF"
+for %%F in ("%JDTLS_HOME%\plugins\org.eclipse.jdt.ls.core_*.jar") do set "STAMP=%STAMP%|%%~nxF|%%~zF|%%~tF"
+set "STAMP_FILE=%DATA%\.metadata\brewery-jdtls.stamp"
+set "OLD_STAMP="
+if exist "%STAMP_FILE%" set /p OLD_STAMP=<"%STAMP_FILE%"
+if "%OLD_STAMP%"=="%STAMP%" goto workspace_ready
+if not exist "%DATA%\.metadata" goto write_stamp
+for %%D in ("%DATA%") do set "STALE_NAME=%%~nxD.stale-%RANDOM%%RANDOM%"
+if "%STALE_NAME:~0,7%"==".stale-" goto workspace_ready
+for %%D in ("%DATA%") do set "STALE=%%~dpD%STALE_NAME%"
+ren "%DATA%" "%STALE_NAME%" >nul 2>&1 || goto workspace_ready
+rd /s /q "%STALE%" >nul 2>&1
+:write_stamp
+if not exist "%DATA%\.metadata" mkdir "%DATA%\.metadata" >nul 2>&1
+<nul set /p "=%STAMP%" >"%STAMP_FILE%" 2>nul
+:workspace_ready
 
 "%JAVA%" -Declipse.application=org.eclipse.jdt.ls.core.id1 -Dosgi.bundles.defaultStartLevel=4 -Declipse.product=org.eclipse.jdt.ls.core.product -Dosgi.checkConfiguration=true "-Dosgi.sharedConfiguration.area=%SHARED_CONFIG%" -Dosgi.sharedConfiguration.area.readOnly=true -Dosgi.configuration.cascaded=true "-Dosgi.configuration.area=%CONFIG_AREA%" -Djava.import.generatesMetadataFilesAtProjectRoot=false -Djava.net.preferIPv4Stack=true -Xms1G --add-modules=ALL-SYSTEM --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED %JVM_ARGS% -jar "%LAUNCHER%" -data "%DATA%" %JDTLS_ARGS%
 exit /b %ERRORLEVEL%

@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -109,6 +110,7 @@ class LauncherTest(unittest.TestCase):
         jdtls = root / "jdtls"
         (jdtls / "plugins").mkdir(parents=True)
         shutil.copyfile(self.jar, jdtls / "plugins" / "org.eclipse.equinox.launcher_1.8.0.v1.jar")
+        (jdtls / "plugins" / "org.eclipse.jdt.ls.core_1.61.0.v1.jar").write_bytes(b"jdtls")
         for config in fbd.JDTLS_CONFIGS[target]:
             (jdtls / config).mkdir()
             (jdtls / config / "config.ini").write_text("osgi.bundles=\n", encoding="utf-8")
@@ -296,6 +298,44 @@ class LauncherTest(unittest.TestCase):
         _, props, args = self.parse(self.run_launcher(launcher, env=env).stdout)
         self.assertEqual(norm(Path(props["osgi.configuration.area"]).parent.parent), norm(expected))
         self.assertEqual(norm(Path(args[1]).parent.parent), norm(expected))
+
+    def data_dir(self, launcher: Path, *args) -> Path:
+        return Path(self.parse(self.run_launcher(launcher, *args).stdout)[2][1])
+
+    def update_jdtls(self, root: Path) -> None:
+        """What a Brewery update does to jdtls: the same files with newer times."""
+        later = time.time() + 86400
+        for path in (root / "jdtls").rglob("*"):
+            if path.is_file():
+                os.utime(path, (later, later))
+
+    def test_workspace_is_kept_while_jdtls_is_unchanged(self):
+        launcher = self.make_bundle(self.tmp / "bundle")
+        data = self.data_dir(launcher)
+        self.assertTrue((data / ".metadata" / "brewery-jdtls.stamp").is_file())
+        (data / ".metadata" / "marker").write_text("x", encoding="utf-8")
+        self.assertEqual(self.data_dir(launcher), data)
+        self.assertTrue((data / ".metadata" / "marker").is_file())
+
+    def test_workspace_is_reset_when_jdtls_changes(self):
+        # Gradle projects in the workspace point into the old jdtls's bundle storage.
+        launcher = self.make_bundle(self.tmp / "bundle")
+        data = self.data_dir(launcher)
+        (data / ".metadata" / "marker").write_text("x", encoding="utf-8")
+        self.update_jdtls(self.tmp / "bundle")
+        self.assertEqual(self.data_dir(launcher), data)
+        self.assertFalse((data / ".metadata" / "marker").exists())
+        self.assertTrue((data / ".metadata" / "brewery-jdtls.stamp").is_file())
+        self.assertEqual([p.name for p in data.parent.iterdir()], [data.name])
+
+    def test_workspace_from_before_the_stamp_is_reset(self):
+        launcher = self.make_bundle(self.tmp / "bundle")
+        data = self.tmp / "data dir" / "jdtls-abc"
+        (data / ".metadata").mkdir(parents=True)
+        (data / ".metadata" / "marker").write_text("x", encoding="utf-8")
+        self.assertEqual(self.data_dir(launcher, "-data", data), data)
+        self.assertFalse((data / ".metadata" / "marker").exists())
+        self.assertTrue((data / ".metadata" / "brewery-jdtls.stamp").is_file())
 
     def test_missing_equinox_launcher_fails_on_stderr(self):
         launcher = self.make_bundle(self.tmp / "bundle")

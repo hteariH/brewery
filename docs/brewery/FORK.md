@@ -120,8 +120,11 @@ Downloads are cached in `~/.cache/brewery-bundle` (`--cache`) and checked agains
 SHA-256 before anything is unpacked; a mismatch fails the build and leaves the previous
 bundle in place. `smoke_bundle.py` starts the daemon on the bundled JRE and jdtls the
 way the Java extension does (proxy, launcher, Lombok agent, java-debug) against a copy
-of the maven-multi fixture. CI's `bundle` job does the same for Windows, Linux (inside a
-network namespace, `--require-offline`) and macOS (allowed to fail), and uploads
+of the maven-multi fixture. `--checks basic,gradle` adds a Gradle import (online: the
+fixture's wrapper downloads Gradle) that starts jdtls again after "updating" a copy of
+it, to catch workspaces that keep the old jdtls's Gradle init script path. CI's `bundle`
+job does the same for Windows, Linux (inside a network namespace, `--require-offline`;
+the Gradle check runs in a separate online step) and macOS (allowed to fail), and uploads
 `bundle-<os>-<arch>` artifacts. It runs on tags, manual runs and changes to
 `script/brewery/` or `brewery-daemon/`.
 
@@ -160,6 +163,13 @@ names (Dev Drive/ReFS, `fsutil 8dot3name`) and a spaced install path, Brewery se
 - jdtls writes its configuration and workspaces to the user cache
   (`%LOCALAPPDATA%\Brewery\jdtls`, `~/Library/Caches/Brewery/jdtls`,
   `~/.cache/brewery/jdtls`; `BREWERY_JDTLS_CACHE_DIR` overrides), never into the bundle.
+  A workspace (`workspace/jdtls-<hash>` or the extension's `-data`) is deleted and
+  rebuilt on the first start after jdtls changes (a Brewery update): Gradle projects
+  remember the path of jdtls's init script inside the configuration area
+  (`config/<hash>/org.eclipse.osgi/<bundle id>/...`), and the update moves it, which made
+  every Gradle synchronization fail with "The specified initialization script ... does
+  not exist". The launcher keeps a stamp of the jdtls it last ran in
+  `<workspace>/.metadata/brewery-jdtls.stamp`.
 - The Gradle language server is not bundled: editing Gradle build files downloads it
   on first use. With `jdk_auto_download = false` it cannot fall back to an
   auto-downloaded JDK, so on a machine without a JDK set
