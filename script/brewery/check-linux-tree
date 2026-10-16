@@ -56,6 +56,18 @@ for licence in README.txt brewery/LICENSE-GPL brewery/LICENSE-APACHE brewery-dae
     jdtls/LICENSE lombok/LICENSE java-debug/LICENSE java-extension/LICENSE java-lsp-proxy/LICENSE; do
     need_file "licenses/$licence"
 done
+# Every embedded font's licence text (OFL, IBM Plex), as assets/fonts/<font>/*.txt has it.
+fonts_src="$(cd "$(dirname "$0")/../.." && pwd)/assets/fonts"
+shopt -s nullglob
+font_dirs=("$fonts_src"/*/)
+if [[ ${#font_dirs[@]} -eq 0 ]]; then fail "no fonts under $fonts_src"; fi
+for font_dir in "${font_dirs[@]}"; do
+    font=$(basename "$font_dir")
+    texts=("$font_dir"*.txt)
+    if [[ ${#texts[@]} -eq 0 ]]; then fail "font $font has no licence text in assets/fonts"; fi
+    for text in "${texts[@]}"; do need_file "licenses/fonts/$font/$(basename "$text")"; done
+done
+shopt -u nullglob
 
 # The desktop file is named after ReleaseChannel::app_id(), or the window won't match it.
 shopt -s nullglob
