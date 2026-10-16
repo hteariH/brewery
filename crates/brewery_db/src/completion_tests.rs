@@ -241,6 +241,26 @@ fn tables_outside_the_default_schema_are_inserted_qualified() {
         ["invoices"]
     );
     assert_eq!(inserted("SELECT * FROM inv|", "sqlite", None), ["invoices"]);
+    // MySQL and MariaDB without a database in the URL have no default one: every table is
+    // inserted with its database, else the query fails with "No database selected".
+    for driver_id in ["mysql", "mariadb"] {
+        assert_eq!(
+            inserted("SELECT * FROM |", driver_id, None),
+            [
+                "public.owners",
+                "public.owner_names",
+                "public.pets",
+                "billing.invoices",
+                "public",
+                "billing"
+            ],
+            "{driver_id}"
+        );
+        assert_eq!(
+            inserted("SELECT * FROM billing.|", driver_id, None),
+            ["invoices"]
+        );
+    }
 }
 
 #[test]

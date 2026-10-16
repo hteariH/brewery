@@ -29,7 +29,8 @@ pub struct SqlCompletion {
 pub struct Dialect {
     pub driver_id: String,
     /// The schema unqualified names resolve to; tables of other schemas are inserted as
-    /// `schema.table`. `None` never qualifies (SQLite, or nothing known).
+    /// `schema.table`. `None` never qualifies (SQLite, or nothing known), except for MySQL and
+    /// MariaDB, where it means no database is selected and every table is qualified.
     pub default_schema: Option<String>,
 }
 
@@ -79,12 +80,16 @@ impl Dialect {
         }
     }
 
+    /// Whether a table of `schema` can be written unqualified. MySQL and MariaDB connected
+    /// without a database have none selected, so every table needs its database.
     fn is_default(&self, schema: &str) -> bool {
-        schema.is_empty()
-            || self
-                .default_schema
-                .as_deref()
-                .is_none_or(|default| default.eq_ignore_ascii_case(schema))
+        if schema.is_empty() {
+            return true;
+        }
+        match self.default_schema.as_deref() {
+            Some(default) => default.eq_ignore_ascii_case(schema),
+            None => !matches!(self.driver_id.as_str(), "mysql" | "mariadb"),
+        }
     }
 }
 
