@@ -502,11 +502,11 @@ fn main() {
         zed::watch_settings_files(fs.clone(), cx);
         handle_keymap_file_changes(user_keymap_file_rx, user_keymap_watcher, cx);
 
-        let user_agent = format!(
-            "Zed/{} ({}; {})",
-            AppVersion::global(cx),
+        // brewery: identify as Brewery with Brewery's version
+        let user_agent = brewery_core::user_agent(
+            brewery_core::BREWERY_VERSION,
             std::env::consts::OS,
-            std::env::consts::ARCH
+            std::env::consts::ARCH,
         );
         let proxy_url = ProxySettings::get_global(cx).proxy_url();
         let http = {

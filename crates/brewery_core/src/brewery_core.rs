@@ -27,6 +27,13 @@ pub fn brewery_version() -> semver::Version {
     semver::Version::parse(BREWERY_VERSION).unwrap_or_else(|_| semver::Version::new(0, 0, 0))
 }
 
+/// The global HTTP client's User-Agent, e.g. "Brewery/0.1.1 (windows; x86_64)".
+/// No Zed-hosted service Brewery still talks to reads it: the extension gallery
+/// (`crates/collab/src/api/extensions.rs`) takes versions as query parameters.
+pub fn user_agent(brewery_version: &str, os: &str, arch: &str) -> String {
+    format!("Brewery/{brewery_version} ({os}; {arch})")
+}
+
 /// Headline of the About window, e.g. "Brewery 0.1.0".
 pub fn about_title(product_name: &str, brewery_version: &str) -> String {
     format!("{product_name} {brewery_version}")
@@ -139,6 +146,14 @@ mod tests {
         // updater's semver comparison and the package versions would ignore.
         assert!(parsed.build.is_empty(), "no +build metadata: {parsed}");
         assert_ne!(parsed, semver::Version::new(0, 0, 0));
+    }
+
+    #[test]
+    fn user_agent_names_brewery() {
+        assert_eq!(
+            user_agent("0.1.1", "windows", "x86_64"),
+            "Brewery/0.1.1 (windows; x86_64)"
+        );
     }
 
     #[test]
