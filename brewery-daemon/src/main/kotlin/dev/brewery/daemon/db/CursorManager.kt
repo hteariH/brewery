@@ -23,6 +23,8 @@ private class Cursor(
     /** One row read ahead (to know whether the result set is exhausted) and not yet delivered. */
     var pending: List<String?>? = null
     var done = false
+    /** Clock time of the last execute or fetch, for the inactivity TTL of unfinished cursors. */
+    @Volatile var lastActivity = 0L
 }
 
 /**
@@ -56,6 +58,10 @@ private class Cursor(
  * introspection first cancels and closes the unfinished cursors of the session (fetch -> -32013, "result
  * expired"). Finished cursors are not affected.
  *
+ * Every other unfinished cursor (SQLite, MariaDB, a buffered result) is closed after [streamTtlMs] without a fetch
+ * as well (fetch -> -32013): an abandoned result tab must not hold a SQLite SHARED lock or a MariaDB metadata lock
+ * until the console is closed.
+ *
  * [index] maps cursor id to this manager so that `fetch`/`close` can find the right session from an id alone.
  */
 class CursorManager(
@@ -80,7 +86,7 @@ class CursorManager(
 
     init {
         session.onClose { closeAll() }
-        session.onSweep(::streamingExpired) { expireStreaming(it) }
+        session.onSweep(::anyExpired) { expireIdle(it) }
     }
 
     val openCount: Int get() = synchronized(cursors) { cursors.size }
@@ -213,6 +219,7 @@ class CursorManager(
             val meta = rs.metaData
             val columns = (1..meta.columnCount).map { ColumnInfo(meta.getColumnLabel(it) ?: "", meta.getColumnTypeName(it) ?: "") }
             val cursor = Cursor(UUID.randomUUID().toString(), statement, rs, ValueRenderer.kinds(meta))
+            cursor.lastActivity = clock()
             synchronized(cursors) {
                 // Count this cursor before evicting, so that evicting the last older owner cannot end the transaction.
                 if (ownsTx) {
@@ -276,6 +283,7 @@ class CursorManager(
             forget(cursor)
             throw e
         } finally {
+            cursor.lastActivity = clock()
             if (cursor.ownsTx) lastStreamActivity = clock()
             session.runningStatement = null
         }
@@ -297,11 +305,34 @@ class CursorManager(
     /** True when the implicit streaming transaction has seen no activity for the TTL. Safe from any thread. */
     fun streamingExpired(): Boolean = synchronized(cursors) { txOwners > 0 } && clock() - lastStreamActivity >= streamTtlMs
 
-    /** Ends an expired implicit streaming transaction: commits, drops the owning cursors, restores autocommit. */
-    private fun expireStreaming(c: Connection) {
-        if (!streamingExpired()) return
-        runCatching { c.commit() }
-        endTransaction(c)
+    /** True when the streaming transaction or any other unfinished cursor has been idle for the TTL. Safe from any thread. */
+    fun anyExpired(): Boolean = streamingExpired() || synchronized(cursors) { idleUnfinished().isNotEmpty() }
+
+    /** Unfinished cursors outside the streaming transaction idle for the TTL; call with the [cursors] lock held. */
+    private fun idleUnfinished(): List<Cursor> {
+        val now = clock()
+        return cursors.values.filter { !it.done && !it.ownsTx && now - it.lastActivity >= streamTtlMs }
+    }
+
+    /**
+     * Ends what has been idle for the TTL. An expired implicit streaming transaction is committed and its cursors
+     * dropped. Any other unfinished cursor is closed too: it can hold a SQLite SHARED lock or a MariaDB metadata
+     * lock, or a buffered result in the heap (fetch -> -32013, "result expired").
+     */
+    private fun expireIdle(c: Connection) {
+        if (streamingExpired()) {
+            runCatching { c.commit() }
+            endTransaction(c)
+        }
+        val victims = synchronized(cursors) { idleUnfinished().onEach { cursors.remove(it.id) } }
+        // A MariaDB streaming result is drained by close() unless cancelled; SQLite's cancel is connection-wide.
+        val cancel = victims.isNotEmpty() && runCatching { expireUnfinishedBeforeCommands(c) }.getOrDefault(false)
+        for (cursor in victims) {
+            index.remove(cursor.id, this)
+            if (cancel) runCatching { cursor.statement.cancel() }
+            runCatching { cursor.resultSet.close() }
+            runCatching { cursor.statement.close() }
+        }
     }
 
     private fun finishImplicit(c: Connection) {

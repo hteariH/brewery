@@ -10,6 +10,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer
 import java.nio.file.Files
 import java.sql.DriverManager
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -121,6 +122,31 @@ class MariaDbSchemaTest {
         service.schema(id, true)
         assertEquals(10, service.fetch(cursor, 10, 10).rows.size)
         service.closeCursor(cursor)
+    }
+
+    @Test
+    fun `an abandoned streaming result ends after the TTL and releases its metadata lock`() {
+        var now = 0L
+        val timed = DbService(Files.createTempDirectory("brewery-maria-ttl"), InMemorySecretStore(), clock = { now }, streamingTtlMs = 60_000)
+        try {
+            val tid = timed.save(ConnectionInfo("", "maria", "mariadb", maria.jdbcUrl, maria.username, false, emptyMap()), maria.password).id
+            timed.execute(tid, "CREATE TABLE IF NOT EXISTS shop.ttl_t (a INT)")
+            timed.execute(tid, "INSERT INTO shop.ttl_t SELECT seq FROM seq_1_to_5000")
+            val cursor = timed.execute(tid, "SELECT a FROM shop.ttl_t").cursorId!!
+            assertEquals(10, timed.fetch(cursor, 0, 10).rows.size)
+            now = 60_000
+            timed.sessions.sweep()
+            assertEquals(-32013, assertFailsWith<DbException> { timed.fetch(cursor, 10, 10) }.code)
+            // The metadata lock is gone: DDL from another connection does not wait.
+            DriverManager.getConnection(maria.jdbcUrl, maria.username, maria.password).use { c ->
+                c.createStatement().use { st ->
+                    st.execute("SET SESSION lock_wait_timeout = 5")
+                    st.execute("ALTER TABLE shop.ttl_t ADD COLUMN b INT")
+                }
+            }
+        } finally {
+            timed.close()
+        }
     }
 
     @Test
