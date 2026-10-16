@@ -1004,3 +1004,39 @@ fn conflict_stages_of_a_symlink_are_not_read() {
     assert_eq!(stages.ours, not_a_file);
     assert_eq!(stages.theirs, not_a_file);
 }
+
+#[test]
+fn a_hanging_hook_times_out_instead_of_blocking() {
+    let repo = TestRepo::new();
+    repo.diverged_without_conflict();
+    let hooks = repo.git_dir().join("hooks");
+    std::fs::create_dir_all(&hooks).expect("hooks dir");
+    let hook = hooks.join("post-merge");
+    std::fs::write(&hook, "#!/bin/sh\nsleep 30\n").expect("write hook");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let mut runner = repo.runner();
+    runner.is_trusted = true;
+
+    let started = std::time::Instant::now();
+    let (fire, fired) = futures::channel::oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        fire.send(()).ok();
+    });
+    let deadline = async {
+        fired.await.ok();
+    };
+    let error = block(until_deadline(
+        runner.merge("feature"),
+        deadline,
+        "git merge",
+    ))
+    .err()
+    .expect("the merge times out");
+    assert_eq!(error.to_string(), "git merge timed out");
+    assert!(started.elapsed() < Duration::from_secs(20));
+}

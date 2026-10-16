@@ -129,6 +129,24 @@ impl ConflictSides {
     }
 }
 
+/// How long a merge, rebase or cherry-pick step may run, hooks included (`pre-rebase`,
+/// `post-merge`, ... in trusted repositories). A hung hook would otherwise block the
+/// repository's job queue (status, staging, commits) until the app restarts.
+pub(crate) const OPERATION_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Runs `work` until `deadline` completes, then fails with "<what> timed out". Dropping
+/// `work` kills the process it is waiting for.
+pub(crate) async fn until_deadline<R>(
+    work: impl Future<Output = Result<R>>,
+    deadline: impl Future<Output = ()>,
+    what: &str,
+) -> Result<R> {
+    match future::select(pin!(work), pin!(deadline)).await {
+        Either::Left((result, _)) => result,
+        Either::Right(_) => bail!("{what} timed out"),
+    }
+}
+
 /// `git` operations on a project repository. Remote (collab) repositories are not supported.
 pub struct GitCli;
 
@@ -172,7 +190,14 @@ impl GitCli {
             "brewery git merge",
             Some("git merge".into()),
             cx,
-            async move |runner, _| runner.merge(&branch).await,
+            async move |runner, executor| {
+                until_deadline(
+                    runner.merge(&branch),
+                    executor.timer(OPERATION_TIMEOUT),
+                    "git merge",
+                )
+                .await
+            },
         )
     }
 
@@ -188,7 +213,14 @@ impl GitCli {
             "brewery git rebase",
             Some("git rebase".into()),
             cx,
-            async move |runner, _| runner.rebase(&onto).await,
+            async move |runner, executor| {
+                until_deadline(
+                    runner.rebase(&onto),
+                    executor.timer(OPERATION_TIMEOUT),
+                    "git rebase",
+                )
+                .await
+            },
         )
     }
 
@@ -198,7 +230,14 @@ impl GitCli {
             "brewery git merge --abort",
             None,
             cx,
-            async move |runner, _| runner.abort_merge().await,
+            async move |runner, executor| {
+                until_deadline(
+                    runner.abort_merge(),
+                    executor.timer(OPERATION_TIMEOUT),
+                    "git merge --abort",
+                )
+                .await
+            },
         )
     }
 
@@ -209,7 +248,14 @@ impl GitCli {
             "brewery git merge --continue",
             None,
             cx,
-            async move |runner, _| runner.continue_merge().await,
+            async move |runner, executor| {
+                until_deadline(
+                    runner.continue_merge(),
+                    executor.timer(OPERATION_TIMEOUT),
+                    "git merge --continue",
+                )
+                .await
+            },
         )
     }
 
@@ -219,7 +265,14 @@ impl GitCli {
             "brewery git rebase --abort",
             None,
             cx,
-            async move |runner, _| runner.abort_rebase().await,
+            async move |runner, executor| {
+                until_deadline(
+                    runner.abort_rebase(),
+                    executor.timer(OPERATION_TIMEOUT),
+                    "git rebase --abort",
+                )
+                .await
+            },
         )
     }
 
@@ -229,7 +282,14 @@ impl GitCli {
             "brewery git rebase --continue",
             Some("git rebase".into()),
             cx,
-            async move |runner, _| runner.continue_rebase().await,
+            async move |runner, executor| {
+                until_deadline(
+                    runner.continue_rebase(),
+                    executor.timer(OPERATION_TIMEOUT),
+                    "git rebase --continue",
+                )
+                .await
+            },
         )
     }
 
@@ -239,7 +299,14 @@ impl GitCli {
             "brewery git cherry-pick --abort",
             None,
             cx,
-            async move |runner, _| runner.abort_cherry_pick().await,
+            async move |runner, executor| {
+                until_deadline(
+                    runner.abort_cherry_pick(),
+                    executor.timer(OPERATION_TIMEOUT),
+                    "git cherry-pick --abort",
+                )
+                .await
+            },
         )
     }
 
@@ -253,7 +320,14 @@ impl GitCli {
             "brewery git cherry-pick --continue",
             None,
             cx,
-            async move |runner, _| runner.continue_cherry_pick().await,
+            async move |runner, executor| {
+                until_deadline(
+                    runner.continue_cherry_pick(),
+                    executor.timer(OPERATION_TIMEOUT),
+                    "git cherry-pick --continue",
+                )
+                .await
+            },
         )
     }
 
