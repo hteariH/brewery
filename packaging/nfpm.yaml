@@ -1,7 +1,7 @@
 # deb and rpm for Brewery, built by script/brewery/bundle-linux (--deb/--rpm): it renders
 # this file with envsubst (nFPM doesn't expand variables in contents) and runs nFPM from
 # the repository root. BREWERY_TREE is the tarball's brewery/ tree, BREWERY_GLIBC the
-# newest glibc symbol version the binaries need.
+# newest glibc symbol version the binaries and the bundled lib/ need.
 #
 # Runtime depends are what the tarball doesn't carry: bundle-linux's find_libs leaves out
 # glibc, libgcc, ALSA, GLib and zlib, and the app dlopens the Vulkan loader, Wayland and

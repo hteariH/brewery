@@ -227,8 +227,12 @@ License: GPL-3.0-or-later
  can be found in /usr/share/common-licenses/GPL-3, and in
  /opt/brewery/licenses/brewery/LICENSE-GPL.
 EOF
-    # The newest GLIBC_x.y symbol version either binary needs is the libc floor.
-    glibc=$(readelf --dyn-syms -W "$tree/libexec/brewery-editor" "$tree/bin/brewery" |
+    # The newest GLIBC_x.y symbol version the binaries or the bundled lib/ (copied from the
+    # build host) need is the libc floor.
+    shopt -s nullglob
+    elf_files=("$tree/libexec/brewery-editor" "$tree/bin/brewery" "$tree"/lib/*.so*)
+    shopt -u nullglob
+    glibc=$(readelf --dyn-syms -W "${elf_files[@]}" |
         grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)
     [[ -n "$glibc" ]] || die "no GLIBC symbol versions in the binaries"
     export BREWERY_VERSION="$version" BREWERY_TREE="$tree" BREWERY_PKG_DIR="$pkg_dir" \
