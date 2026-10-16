@@ -191,6 +191,7 @@ impl VsCodeSettings {
             database_panel: None, // brewery:
             services_panel: None, // brewery:
             build_panel: None,    // brewery:
+            git_log_panel: None,  // brewery:
             command_palette: self
                 .read_u64("workbench.commandPalette.history")
                 .map(|history| CommandPaletteSettingsContent {

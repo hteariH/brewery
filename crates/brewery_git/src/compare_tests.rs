@@ -432,7 +432,7 @@ async fn file_target_opens_a_revision_diff(cx: &mut TestAppContext) {
         assert_eq!(
             view.old_side(),
             &ResolvedSide::Revision {
-                rev: "feature".into(),
+                rev: "refs/heads/feature".into(),
                 sha: repo.git(&["rev-parse", "feature"]).parse().expect("sha"),
             }
         );
@@ -440,6 +440,48 @@ async fn file_target_opens_a_revision_diff(cx: &mut TestAppContext) {
     });
     assert!(!modal_open(&fixture, cx), "the picker closed");
     assert!(shown_toasts().is_empty());
+}
+
+#[gpui::test]
+async fn a_listed_branch_is_compared_even_when_a_tag_has_its_name(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::with_two_branches();
+    // A tag `feature` on the base commit, beside the branch `feature`.
+    repo.git(&["tag", "feature", "v1"]);
+    let branch_tip = repo.git(&["rev-parse", "refs/heads/feature"]);
+    let (fixture, cx) = open_real(&repo, cx).await;
+    open_editor(&fixture, "a.txt", cx).await;
+
+    let picker = open_picker(&fixture, cx);
+    wait_until(cx, "tags", |cx| {
+        picker_rows(&picker, cx).contains(&"v1".to_string())
+    });
+    // "Local Branches > feature" is the best match.
+    type_and_confirm(&picker, "feature", cx);
+    let workspace = fixture.workspace.clone();
+    wait_until(cx, "the revision diff", |cx| {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item_as::<RevisionDiffView>(cx).is_some()
+        })
+    });
+    let view = workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .active_item_as::<RevisionDiffView>(cx)
+            .expect("view")
+    });
+    view.read_with(cx, |view, cx| {
+        assert_eq!(
+            view.old_side(),
+            &ResolvedSide::Revision {
+                rev: "refs/heads/feature".into(),
+                sha: branch_tip.parse().expect("sha"),
+            }
+        );
+        assert_eq!(
+            view.tab_content_text(0, cx).as_ref(),
+            "a.txt (feature) \u{2194} Working Copy"
+        );
+    });
 }
 
 #[gpui::test]
@@ -563,6 +605,16 @@ async fn branches_popup_compare_with_current_opens_the_project_compare(cx: &mut 
     assert_eq!(
         active_branch_diff_title(&fixture, cx).as_deref(),
         Some("Changes since feature")
+    );
+    let tooltip = fixture.workspace.read_with(cx, |workspace, cx| {
+        let diff = workspace.active_item_as::<BranchDiff>(cx)?;
+        diff.read(cx)
+            .tab_tooltip_text(cx)
+            .map(|text| text.to_string())
+    });
+    assert_eq!(
+        tooltip.as_deref(),
+        Some("Changes since the merge base with feature")
     );
     // The merge base of `main` and `feature` is the base commit: `main`'s own change (b.txt)
     // shows, `feature`'s change to a.txt does not.

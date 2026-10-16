@@ -40,6 +40,15 @@ use workspace::{
 };
 use zed_actions::agent::ReviewBranchDiff;
 
+// brewery: Brewery's Compare with Branch passes full ref names (`refs/heads/x`), so a tag of
+// the same name does not win; titles show the short name.
+fn brewery_short_ref(base_ref: &str) -> &str {
+    ["refs/heads/", "refs/remotes/", "refs/tags/"]
+        .iter()
+        .find_map(|prefix| base_ref.strip_prefix(prefix))
+        .unwrap_or(base_ref)
+}
+
 /// The workspace item for a branch (merge-base) diff: "Changes since {branch}".
 /// It wraps a single [`DiffMultibuffer`] over [`DiffBase::Merge`] and delegates
 /// the [`Item`] surface to it. The merge base can be changed in place via the
@@ -473,12 +482,25 @@ impl Item for BranchDiff {
     }
 
     fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
+        // brewery: say it is a merge-base diff, not a diff against the ref's tip
+        if let DiffBase::Merge { base_ref } = self.diff_base(cx) {
+            return Some(
+                format!(
+                    "Changes since the merge base with {}",
+                    brewery_short_ref(base_ref)
+                )
+                .into(),
+            );
+        }
         Some(self.tab_content_text(0, cx))
     }
 
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
         match self.diff_base(cx) {
-            DiffBase::Merge { base_ref } => format!("Changes since {}", base_ref).into(),
+            // brewery: the short name of a full ref (`refs/heads/x`)
+            DiffBase::Merge { base_ref } => {
+                format!("Changes since {}", brewery_short_ref(base_ref)).into()
+            }
             DiffBase::Head | DiffBase::Index | DiffBase::Staged => "Changes".into(),
         }
     }
@@ -775,7 +797,8 @@ impl Render for BranchDiffToolbar {
             return div();
         };
         let selected_base_ref = base_ref.clone();
-        let base_ref_label = format!("Base: {base_ref}");
+        // brewery: a persistent note that this is a merge-base diff, by the ref's short name
+        let base_ref_label = format!("Merge base with {}", brewery_short_ref(&base_ref));
         let repository = branch_diff.read(cx).repo(cx);
         let workspace = branch_diff.read(cx).workspace.clone();
         let project = branch_diff.read(cx).project.clone();

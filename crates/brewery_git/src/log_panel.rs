@@ -39,6 +39,7 @@ use project::git_store::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+use settings::{RegisterSetting, Settings};
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -62,6 +63,26 @@ pub struct ShowCommitInLog {
 }
 
 const LOG_PANEL_KEY: &str = "LogPanel";
+
+/// `git_log_panel` in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, RegisterSetting)]
+pub struct GitLogPanelSettings {
+    pub dock: settings::DockPosition,
+}
+
+impl Settings for GitLogPanelSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            // Falls back like `assets/settings/default.json` for builds that read another
+            // checkout's defaults.
+            dock: content
+                .git_log_panel
+                .as_ref()
+                .and_then(|panel| panel.dock)
+                .unwrap_or(settings::DockPosition::Bottom),
+        }
+    }
+}
 pub const LOG_TAB: &str = "Log";
 pub const NO_REPOSITORY: &str = "No Git repository";
 pub const COMMIT_GRAPH_NOTICE: &str = "This repository has no commit-graph file, so the log is \
@@ -109,7 +130,6 @@ pub struct LogPanel {
     /// being updated, when reading the workspace entity panics.
     project: Entity<Project>,
     focus_handle: FocusHandle,
-    position: DockPosition,
     /// Created when the panel is first shown (a full `git log` is not worth running for a panel
     /// nobody looks at) and kept while it is hidden.
     log: Option<HostedGraph>,
@@ -126,6 +146,9 @@ pub struct LogPanel {
     commit_graph_checked: HashSet<RepositoryId>,
     first_chunk: Option<PendingFirstChunk>,
     notice: Option<(RepositoryId, CommitGraphNotice)>,
+    /// A commit to show, asked for while the filtered log was loading: once it has loaded
+    /// without it, the filter is reset to show it.
+    pending_show: Option<Oid>,
     _git_store_events: Subscription,
     _filter_events: Subscription,
 }
@@ -176,7 +199,6 @@ impl LogPanel {
             workspace,
             project,
             focus_handle,
-            position: DockPosition::Bottom,
             log: None,
             histories: Vec::new(),
             active_history: None,
@@ -186,6 +208,7 @@ impl LogPanel {
             commit_graph_checked: HashSet::default(),
             first_chunk: None,
             notice: None,
+            pending_show: None,
             _git_store_events: git_store_events,
             _filter_events: filter_events,
         }
@@ -257,6 +280,7 @@ impl LogPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pending_show = None;
         let had_focus = self.focus_handle.contains_focused(window, cx);
         self.time_first_chunk(repo_id, source.clone().unwrap_or_default(), cx);
         let git_store = self.git_store(cx);
@@ -322,9 +346,10 @@ impl LogPanel {
             };
             this.update_in(cx, |this, window, cx| match sha {
                 Some(sha) => this.select_commit(&sha, window, cx),
-                None => this.filter_bar.update(cx, |bar, cx| {
-                    bar.set_error(Some(format!("No commit {hash}").into()), cx)
-                }),
+                // Not a commit (a date, a ticket number): search the messages for it.
+                None => this
+                    .filter_bar
+                    .update(cx, |bar, cx| bar.set_text_not_a_commit(&hash, cx)),
             })
             .ok();
         })
@@ -559,7 +584,8 @@ impl LogPanel {
         self.log.as_ref().map(|log| &log.graph)
     }
 
-    /// Selects `sha` in the Log tab, once the graph has loaded it.
+    /// Selects `sha` in the Log tab, once the graph has loaded it. When the filter hides it,
+    /// the filter is reset (as IntelliJ does).
     pub fn select_commit(&mut self, sha: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_history.is_some() {
             self.activate_tab(None, window, cx);
@@ -569,6 +595,44 @@ impl LogPanel {
             log::warn!("not a commit hash: {sha}");
             return;
         };
+        self.pending_show = None;
+        match self.filter_hides(oid, false, cx) {
+            Some(true) => return self.show_hidden_commit(oid, window, cx),
+            Some(false) => {}
+            None if self.log.as_ref().is_some_and(|log| log.source.is_some()) => {
+                self.pending_show = Some(oid);
+            }
+            None => {}
+        }
+        if let Some(log) = &self.log {
+            log.graph
+                .update(cx, |graph, cx| graph.select_commit_by_sha(oid, cx));
+        }
+    }
+
+    /// Whether the filtered Log has loaded without `oid`: `None` when the Log is unfiltered or
+    /// (unless `loaded`) still loading.
+    fn filter_hides(&self, oid: Oid, loaded: bool, cx: &mut Context<Self>) -> Option<bool> {
+        let log = self.log.as_ref()?;
+        let source = log.source.clone()?;
+        let repo = self.repository(log.repo_id, cx)?;
+        repo.update(cx, |repo, cx| {
+            if !loaded
+                && repo
+                    .graph_data(source.clone(), LogOrder::default(), 0..0, cx)
+                    .is_loading
+            {
+                return None;
+            }
+            let data = repo.get_graph_data(source, LogOrder::default())?;
+            Some(!data.commit_oid_to_index.contains_key(&oid))
+        })
+    }
+
+    /// Resets the filter that hides `oid` and selects it in the unfiltered Log.
+    fn show_hidden_commit(&mut self, oid: Oid, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_bar.update(cx, |bar, cx| bar.reset(window, cx));
+        self.apply_filter(window, cx);
         if let Some(log) = &self.log {
             log.graph
                 .update(cx, |graph, cx| graph.select_commit_by_sha(oid, cx));
@@ -752,8 +816,20 @@ impl LogPanel {
         }
         // A different repository starts unfiltered (its branches and paths differ).
         let repo = repo_id.and_then(|repo_id| self.repository(repo_id, cx));
-        self.filter_bar
-            .update(cx, |bar, cx| bar.set_repository(repo, window, cx));
+        let project_dir = repo.as_ref().and_then(|repo| {
+            let work_dir = repo.read(cx).work_directory_abs_path.clone();
+            self.project
+                .read(cx)
+                .visible_worktrees(cx)
+                .find_map(|tree| {
+                    let root = tree.read(cx).abs_path();
+                    let dir = root.strip_prefix(&work_dir).ok()?;
+                    Some(dir.to_string_lossy().replace('\\', "/"))
+                })
+        });
+        self.filter_bar.update(cx, |bar, cx| {
+            bar.set_repository(repo, project_dir, window, cx)
+        });
         match repo_id {
             Some(repo_id) => {
                 let source = self.filter_source(cx);
@@ -831,6 +907,12 @@ impl LogPanel {
                         GitGraphEvent::FullyLoaded | GitGraphEvent::LoadingError
                     );
                     self.refresh_status(finished, cx);
+                    if matches!(graph_event, GitGraphEvent::FullyLoaded)
+                        && let Some(oid) = self.pending_show.take()
+                        && self.filter_hides(oid, true, cx) == Some(true)
+                    {
+                        self.show_hidden_commit(oid, window, cx);
+                    }
                 }
             }
             _ => {}
@@ -944,8 +1026,10 @@ impl Panel for LogPanel {
         LOG_PANEL_KEY
     }
 
-    fn position(&self, _: &Window, _: &App) -> DockPosition {
-        self.position
+    /// Read from the settings: the dock moves a panel when the settings change, so a position kept
+    /// only in the panel would never move it.
+    fn position(&self, _: &Window, cx: &App) -> DockPosition {
+        GitLogPanelSettings::get_global(cx).dock.into()
     }
 
     fn position_is_valid(&self, _: DockPosition) -> bool {
@@ -953,8 +1037,10 @@ impl Panel for LogPanel {
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
-        self.position = position;
-        cx.notify();
+        let fs = self.project.read(cx).fs().clone();
+        settings::update_settings_file(fs, cx, move |settings, _| {
+            settings.git_log_panel.get_or_insert_default().dock = Some(position.into());
+        });
     }
 
     fn default_size(&self, _: &Window, _: &App) -> Pixels {

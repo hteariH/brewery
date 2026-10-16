@@ -4,7 +4,11 @@
 //! whole project is compared in Zed's `BranchDiff`.
 //!
 //! The project compare is Zed's merge-base diff: the changes made since the current branch
-//! forked from the chosen ref, not a two-dot diff against the ref's tip. A toast says so.
+//! forked from the chosen ref, not a two-dot diff against the ref's tip. A toast says so, and
+//! the diff's toolbar and tab tooltip keep saying it.
+//!
+//! Listed refs are compared by their full name (`refs/heads/x`, `refs/tags/x`): `rev-parse`
+//! prefers a tag over a branch of the same short name. Titles show the short name.
 
 use crate::branches_popup::{OutcomeToast, show_toast, show_workspace_toast};
 use crate::cli::{GitCli, Oid, RepoPath, check_revision};
@@ -40,7 +44,15 @@ const TAG_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The toast after a project compare: `BranchDiff` diffs against the merge base.
 pub fn merge_base_note(rev: &str) -> String {
-    format!("Compared with the merge base of {rev}")
+    format!("Compared with the merge base of {}", short_ref_name(rev))
+}
+
+/// `x` for `refs/heads/x`, `refs/remotes/x` and `refs/tags/x`; other revisions as they are.
+pub fn short_ref_name(rev: &str) -> &str {
+    ["refs/heads/", "refs/remotes/", "refs/tags/"]
+        .iter()
+        .find_map(|prefix| rev.strip_prefix(prefix))
+        .unwrap_or(rev)
 }
 
 /// What is compared with the chosen revision.
@@ -95,6 +107,16 @@ impl RefGroup {
             Self::Remote => IconName::Server,
             Self::Tags => IconName::Bookmark,
         }
+    }
+
+    /// The full ref name of `name` in this group.
+    pub fn full_ref(self, name: &str) -> String {
+        let prefix = match self {
+            Self::Local => "refs/heads/",
+            Self::Remote => "refs/remotes/",
+            Self::Tags => "refs/tags/",
+        };
+        format!("{prefix}{name}")
     }
 }
 
@@ -159,12 +181,13 @@ impl CompareRow {
         }
     }
 
-    /// The revision this row compares with; `None` for a header.
-    pub fn revision(&self) -> Option<&str> {
+    /// The revision this row compares with: a listed ref by its full name, typed text as it
+    /// is; `None` for a header.
+    pub fn revision(&self) -> Option<String> {
         match self {
             Self::Header(_) => None,
-            Self::Ref { name, .. } => Some(name),
-            Self::Revision(rev) => Some(rev),
+            Self::Ref { name, group, .. } => Some(group.full_ref(name)),
+            Self::Revision(rev) => Some(rev.clone()),
         }
     }
 }
@@ -493,11 +516,7 @@ impl PickerDelegate for CompareDelegate {
     }
 
     fn confirm(&mut self, _secondary: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        let Some(rev) = self
-            .selected_row()
-            .and_then(CompareRow::revision)
-            .map(str::to_string)
-        else {
+        let Some(rev) = self.selected_row().and_then(CompareRow::revision) else {
             return;
         };
         let target = self.target.clone();

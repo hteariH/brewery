@@ -123,9 +123,18 @@ async fn open_real<'a>(
     repo: &TestRepo,
     cx: &'a mut TestAppContext,
 ) -> (Fixture, &'a mut VisualTestContext) {
+    open_real_at(repo, &repo.work, cx).await
+}
+
+/// A project of `root`, a folder in `repo`.
+async fn open_real_at<'a>(
+    repo: &TestRepo,
+    root: &std::path::Path,
+    cx: &'a mut TestAppContext,
+) -> (Fixture, &'a mut VisualTestContext) {
     cx.executor().allow_parking();
     crate::cli::set_test_env(repo.env.clone());
-    let project = Project::test(RealFs::new(None, cx.executor()), [repo.work.as_path()], cx).await;
+    let project = Project::test(RealFs::new(None, cx.executor()), [root], cx).await;
     let tree = project.read_with(cx, |project, cx| {
         project.worktrees(cx).next().expect("worktree")
     });
@@ -297,6 +306,50 @@ async fn without_a_repository_shows_the_empty_state(cx: &mut TestAppContext) {
     assert!(log_graph(&fixture, cx).is_none());
     assert!(panel_has_focus(&fixture, cx));
     assert_eq!(NO_REPOSITORY, "No Git repository");
+}
+
+#[gpui::test]
+async fn the_panel_moves_to_another_dock_and_remembers_it(cx: &mut TestAppContext) {
+    use fs::Fs as _;
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/dir"), json!({ "file.txt": "text" }))
+        .await;
+    let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+    let (fixture, cx) = workspace_with_panel(project, cx).await;
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        let bottom = workspace.bottom_dock().read(cx).panel::<LogPanel>();
+        assert!(bottom.is_some(), "the Log starts at the bottom");
+    });
+
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.position_is_valid(DockPosition::Right));
+        panel.set_position(DockPosition::Right, window, cx);
+    });
+    cx.run_until_parked();
+
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        let bottom = workspace.bottom_dock().read(cx).panel::<LogPanel>();
+        assert!(
+            bottom.is_none(),
+            "the panel should have left the bottom dock"
+        );
+        let right = workspace.right_dock().read(cx).panel::<LogPanel>();
+        assert_eq!(
+            right.map(|panel| panel.entity_id()),
+            Some(fixture.panel.entity_id())
+        );
+        assert_eq!(
+            GitLogPanelSettings::get_global(cx).dock,
+            settings::DockPosition::Right
+        );
+    });
+    let saved = fs
+        .load(paths::settings_file())
+        .await
+        .expect("the dock side is saved to the settings file");
+    let saved: serde_json::Value = settings::parse_json_with_comments(&saved).unwrap();
+    assert_eq!(saved["git_log_panel"]["dock"], json!("right"));
 }
 
 #[gpui::test]
@@ -833,19 +886,72 @@ async fn a_hash_goes_to_the_commit_without_filtering(cx: &mut TestAppContext) {
         "the same graph"
     );
 
-    // An unknown hash says so.
-    apply(
-        &fixture,
-        LogFilter {
-            text: Some("0000000".into()),
-            ..Default::default()
-        },
-        cx,
-    );
+    // Hex text that is not a commit (a date, a ticket number) searches the messages instead.
     let bar = bar(&fixture, cx);
-    wait_until(cx, "the error", |cx| {
-        bar.read_with(cx, |bar, _| bar.error().cloned()) == Some("No commit 0000000".into())
+    bar.update(cx, |bar, cx| bar.set_text("0000000", cx));
+    wait_until(cx, "the message search", |cx| {
+        panel_source(&fixture, cx).is_some()
     });
+    let LogSource::Args(args) = panel_source(&fixture, cx).expect("filtered") else {
+        panic!("a filtered source");
+    };
+    assert!(args.iter().any(|arg| arg == "--grep=0000000"), "{args:?}");
+    assert_eq!(wait_for_graph(&fixture, cx), BTreeSet::new());
+    assert_eq!(bar.read_with(cx, |bar, _| bar.error().cloned()), None);
+
+    // A new text is a hash again until looked up.
+    bar.update(cx, |bar, cx| bar.set_text(&history.c[2][..9], cx));
+    wait_until(cx, "the commit to be selected", |cx| {
+        selected_sha(&fixture, cx) == Some(history.c[2].clone())
+    });
+    assert_eq!(panel_source(&fixture, cx), None, "not filtered");
+}
+
+#[gpui::test]
+async fn showing_a_commit_the_filter_hides_resets_the_filter(cx: &mut TestAppContext) {
+    init_test(cx);
+    let history = History::new();
+    let (fixture, cx) = open_history(&history, cx).await;
+    let alice = LogFilter {
+        authors: vec!["Alice".into()],
+        ..Default::default()
+    };
+
+    // Asked while the filtered log is loading.
+    apply(&fixture, alice.clone(), cx);
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select_commit(&history.c[1], window, cx)
+    });
+    wait_until(cx, "the commit to be selected", |cx| {
+        selected_sha(&fixture, cx) == Some(history.c[1].clone())
+    });
+    assert_eq!(panel_source(&fixture, cx), None, "the filter was reset");
+
+    // Asked on a loaded filtered log.
+    apply(&fixture, alice, cx);
+    assert_eq!(wait_for_graph(&fixture, cx), history.shas(&[1, 4, 5]));
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select_commit(&history.c[2], window, cx)
+    });
+    wait_until(cx, "the commit to be selected", |cx| {
+        selected_sha(&fixture, cx) == Some(history.c[2].clone())
+    });
+    assert_eq!(panel_source(&fixture, cx), None, "the filter was reset");
+
+    // A commit the filter shows keeps it.
+    let bob = LogFilter {
+        authors: vec!["Bob".into()],
+        ..Default::default()
+    };
+    apply(&fixture, bob, cx);
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select_commit(&history.c[2], window, cx)
+    });
+    wait_until(cx, "the commit to be selected", |cx| {
+        selected_sha(&fixture, cx) == Some(history.c[2].clone())
+    });
+    cx.run_until_parked();
+    assert!(panel_source(&fixture, cx).is_some(), "still filtered");
 }
 
 #[gpui::test]
@@ -1117,4 +1223,41 @@ async fn an_option_like_branch_never_enters_the_filter(cx: &mut TestAppContext) 
         assert_eq!(bar.error().cloned(), Some("not a branch name: -foo".into()));
     });
     assert_eq!(panel_source(&fixture, cx), None);
+}
+
+#[gpui::test]
+async fn paths_are_literal_and_relative_to_a_project_inside_the_repository(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    std::fs::create_dir(repo.work.join("sub")).expect("sub dir");
+    let c1 = repo.commit("sub/a.txt", "1\n", "a");
+    let c2 = repo.commit("sub/[ab].txt", "1\n", "brackets");
+    let _c3 = repo.commit("root.txt", "1\n", "root");
+    let (fixture, cx) = open_real_at(&repo, &repo.work.join("sub"), cx).await;
+    cx.dispatch_action(ToggleLogPanel);
+    wait_for_commits(&fixture, 3, cx);
+    let bar = bar(&fixture, cx);
+
+    // Typed relative to the project, matched literally: `[ab]` is not a glob.
+    let rejected = bar.update(cx, |bar, cx| bar.set_paths_text("[ab].txt", cx));
+    assert!(rejected.is_empty());
+    assert_eq!(
+        bar.read_with(cx, |bar, _| bar.filter().paths.clone()),
+        vec![RepoPath::new("sub/[ab].txt").expect("path")]
+    );
+    cx.run_until_parked();
+    assert_eq!(wait_for_graph(&fixture, cx), BTreeSet::from([c2]));
+    assert_eq!(
+        bar.read_with(cx, |bar, cx| bar.path_texts(cx)),
+        vec!["[ab].txt".to_string()],
+        "shown as typed"
+    );
+
+    // "." is the project folder.
+    bar.update(cx, |bar, cx| bar.set_paths_text(".", cx));
+    cx.run_until_parked();
+    let shas = wait_for_graph(&fixture, cx);
+    assert!(shas.contains(&c1) && shas.len() == 2, "{shas:?}");
 }

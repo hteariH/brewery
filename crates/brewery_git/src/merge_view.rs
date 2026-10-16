@@ -63,6 +63,7 @@ actions!(
 pub const BINARY_MESSAGE: &str = "is a binary file: take one side instead";
 pub const LARGE_MESSAGE: &str = "is too large to merge: take one side instead";
 pub const DELETED_MESSAGE: &str = "was deleted on one side: take one side instead";
+pub const NOT_A_FILE_MESSAGE: &str = "is a symlink or a submodule: take one side instead";
 const RESULT_LABEL: &str = "Result";
 
 /// One of the three panes.
@@ -86,6 +87,8 @@ pub enum MergeInput {
     TooLarge,
     /// One side deleted the file (a modify/delete conflict).
     Deleted,
+    /// A side is a symlink or a submodule, not a regular file.
+    NotAFile,
 }
 
 impl MergeInput {
@@ -114,6 +117,12 @@ pub async fn load_input(
         .all(|blob| **blob == StageBlob::Missing)
     {
         bail!("{} is not conflicted", path.as_unix_str());
+    }
+    if [&base, &yours, &theirs]
+        .iter()
+        .any(|blob| matches!(blob, StageBlob::NotAFile(_)))
+    {
+        return Ok((sides, MergeInput::NotAFile));
     }
     if [&base, &yours, &theirs]
         .iter()
@@ -287,6 +296,7 @@ impl MergeView {
                 MergeInput::Binary => bail!("{} {BINARY_MESSAGE}", path.as_unix_str()),
                 MergeInput::TooLarge => bail!("{} {LARGE_MESSAGE}", path.as_unix_str()),
                 MergeInput::Deleted => bail!("{} {DELETED_MESSAGE}", path.as_unix_str()),
+                MergeInput::NotAFile => bail!("{} {NOT_A_FILE_MESSAGE}", path.as_unix_str()),
             };
             let merge = cx
                 .background_spawn(async move { merge3::merge3(&base, &yours, &theirs) })
@@ -337,8 +347,8 @@ impl MergeView {
         })
     }
 
-    /// Whether the merge editor can open this conflicted file: false for binary, too large and
-    /// modify/delete conflicts, which can only take one side.
+    /// Whether the merge editor can open this conflicted file: false for binary, too large,
+    /// symlink, submodule and modify/delete conflicts, which can only take one side.
     pub fn can_merge(
         repo: &Entity<Repository>,
         path: RepoPath,
@@ -718,6 +728,14 @@ impl MergeView {
             }
             if current != stage_ids {
                 return Err(ApplyError::ConflictChanged(display_path).into());
+            }
+            // A symlink put in the file's place would make the save write through it.
+            if fs
+                .metadata(&abs_path)
+                .await?
+                .is_some_and(|metadata| metadata.is_symlink)
+            {
+                bail!("{display_path} {NOT_A_FILE_MESSAGE}");
             }
 
             let on_disk = fs.load_bytes(&abs_path).await.ok();

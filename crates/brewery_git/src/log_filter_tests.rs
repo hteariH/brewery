@@ -221,7 +221,19 @@ fn a_hash_goes_to_the_commit_instead_of_grepping() {
 }
 
 #[test]
-fn paths_rewrite_parents_and_follow_the_separator() {
+fn a_hash_like_text_that_is_not_a_commit_greps_the_messages() {
+    let filter = LogFilter {
+        text: Some("20261013".into()),
+        text_is_hash: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(filter.commit_hash(), None);
+    assert!(args(&filter).contains(&"--grep=20261013".to_string()));
+    assert!(filter.log_source().expect("valid").is_some(), "it filters");
+}
+
+#[test]
+fn paths_rewrite_parents_and_follow_the_separator_literally() {
     let filter = LogFilter {
         paths: vec![path("src/main.rs"), path("-odd dir/x")],
         ..Default::default()
@@ -236,8 +248,8 @@ fn paths_rewrite_parents_and_follow_the_separator() {
             "--tags",
             "HEAD",
             "--",
-            "src/main.rs",
-            "-odd dir/x",
+            ":(literal)src/main.rs",
+            ":(literal)-odd dir/x",
         ]
     );
 }
@@ -251,6 +263,7 @@ fn every_field_combined() {
         until: Some(DateBound::Day(date!(2026 - 12 - 31))),
         paths: vec![path("b.txt")],
         text: Some("fix".into()),
+        text_is_hash: None,
     };
     assert_eq!(
         args(&filter),
@@ -266,7 +279,7 @@ fn every_field_combined() {
             "--parents",
             "main",
             "--",
-            "b.txt",
+            ":(literal)b.txt",
         ]
     );
     let source = filter.log_source().expect("valid").expect("filtered");

@@ -576,7 +576,7 @@ impl ConflictsDialog {
                     .disabled(busy || mergeable != Some(true))
                     .when(mergeable == Some(false), |this| {
                         this.tooltip(Tooltip::text(
-                            "Binary, too large or deleted on one side: take one side instead",
+                            "Binary, too large, a symlink or deleted on one side: take one side instead",
                         ))
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {

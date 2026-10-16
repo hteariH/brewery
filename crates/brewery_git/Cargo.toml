@@ -45,6 +45,7 @@ editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 git_ui = { workspace = true, features = ["test-support"] }
 language_model.workspace = true
+paths.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 release_channel.workspace = true

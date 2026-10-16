@@ -23,6 +23,8 @@ use ui::{
 };
 
 pub const REMOTE_TOOLTIP: &str = "Filters work in local projects";
+const TEXT_TOOLTIP: &str = "Text in commit messages, ignoring case, or a commit hash. While a \
+    text or user filter is set, the Log search ignores case too.";
 /// How many recent commits the User choices are collected from.
 const AUTHOR_SCAN_LIMIT: usize = 2000;
 const GIT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -75,6 +77,9 @@ pub struct FilterStatus {
 pub struct LogFilterBar {
     filter: LogFilter,
     repo: Option<Entity<Repository>>,
+    /// The project's folder inside the repository (`sub/dir`), when the project is not the
+    /// repository root: relative paths are typed and shown relative to it.
+    project_dir: Option<String>,
     enabled: bool,
     /// `user.name` and `user.email` from git config: the "me" User choice.
     me: Option<Person>,
@@ -99,6 +104,7 @@ impl LogFilterBar {
         Self {
             filter: LogFilter::default(),
             repo: None,
+            project_dir: None,
             enabled: true,
             me: None,
             authors: Vec::new(),
@@ -178,12 +184,15 @@ impl LogFilterBar {
 
     /// The repository the choices come from. Switching to another repository resets the
     /// filter; a filter set before the first repository is kept.
+    /// `project_dir` is the project's folder inside the repository, if it is not the root.
     pub fn set_repository(
         &mut self,
         repo: Option<Entity<Repository>>,
+        project_dir: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.project_dir = project_dir.filter(|dir| !dir.is_empty());
         if self.repo.as_ref().map(Entity::entity_id) == repo.as_ref().map(Entity::entity_id) {
             return;
         }
@@ -347,8 +356,9 @@ impl LogFilterBar {
         );
     }
 
-    /// One path per line, repository-relative; absolute paths inside the repository are
-    /// accepted too. Returns the lines that are not paths of this repository.
+    /// One path per line, relative to the project (the repository root when the project is a
+    /// subfolder of it, too); absolute paths inside the repository are accepted too. Returns
+    /// the lines that are not paths of this repository.
     pub fn set_paths_text(&mut self, text: &str, cx: &mut Context<Self>) -> Vec<String> {
         let work_dir = self
             .repo
@@ -357,7 +367,7 @@ impl LogFilterBar {
         let mut paths = Vec::new();
         let mut rejected = Vec::new();
         for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-            match parse_path(line, work_dir.as_deref()) {
+            match parse_path(line, work_dir.as_deref(), self.project_dir.as_deref()) {
                 Some(path) if !paths.contains(&path) => paths.push(path),
                 Some(_) => {}
                 None => rejected.push(line.to_string()),
@@ -374,7 +384,28 @@ impl LogFilterBar {
 
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let text = Some(text.trim().to_string()).filter(|text| !text.is_empty());
-        self.change(|filter| filter.text = text, cx);
+        self.change(
+            |filter| {
+                if filter.text != text {
+                    filter.text = text;
+                    filter.text_is_hash = None;
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Marks the hash-like text as not a commit, so it greps the messages instead; ignored
+    /// when the text changed since it was looked up.
+    pub fn set_text_not_a_commit(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.change(
+            |filter| {
+                if filter.text.as_deref().map(str::trim) == Some(text) {
+                    filter.text_is_hash = Some(false);
+                }
+            },
+            cx,
+        );
     }
 
     fn confirm_text(&mut self, _: &menu::Confirm, _: &mut Window, cx: &mut Context<Self>) {
@@ -420,14 +451,39 @@ impl LogFilterBar {
         }
     }
 
-    fn paths_label(&self) -> String {
-        let paths = self
-            .filter
+    fn paths_label(&self, cx: &App) -> String {
+        summary("Paths", &self.path_texts(cx))
+    }
+
+    /// The filter's paths as the user types them: relative to the project, or absolute when
+    /// outside the project's folder.
+    pub fn path_texts(&self, cx: &App) -> Vec<String> {
+        let work_dir = self
+            .repo
+            .as_ref()
+            .map(|repo| repo.read(cx).work_directory_abs_path.clone());
+        self.filter
             .paths
             .iter()
-            .map(|path| path.as_unix_str().to_string())
-            .collect::<Vec<_>>();
-        summary("Paths", &paths)
+            .map(|path| {
+                let path = path.as_unix_str();
+                let Some(dir) = self.project_dir.as_deref() else {
+                    return path.to_string();
+                };
+                if path == dir {
+                    return ".".to_string();
+                }
+                match (
+                    path.strip_prefix(dir)
+                        .and_then(|rest| rest.strip_prefix('/')),
+                    &work_dir,
+                ) {
+                    (Some(rest), _) => rest.to_string(),
+                    (None, Some(work_dir)) => work_dir.join(path).to_string_lossy().into_owned(),
+                    (None, None) => path.to_string(),
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn choice_picker(
@@ -520,7 +576,11 @@ fn summary(name: &str, values: &[String]) -> String {
     }
 }
 
-fn parse_path(line: &str, work_dir: Option<&std::path::Path>) -> Option<RepoPath> {
+fn parse_path(
+    line: &str,
+    work_dir: Option<&std::path::Path>,
+    project_dir: Option<&str>,
+) -> Option<RepoPath> {
     let as_path = std::path::Path::new(line);
     if as_path.is_absolute() {
         let relative = as_path.strip_prefix(work_dir?).ok()?;
@@ -529,10 +589,17 @@ fn parse_path(line: &str, work_dir: Option<&std::path::Path>) -> Option<RepoPath
     }
     let text = line.replace('\\', "/");
     let text = text.trim_start_matches("./").trim_end_matches('/');
-    if text.is_empty() || text.split('/').any(|part| part == "..") {
+    let text = if text == "." { "" } else { text };
+    if text.split('/').any(|part| part == "..") {
         return None;
     }
-    RepoPath::new(text).ok()
+    let text = match project_dir {
+        Some(dir) if text.is_empty() => dir.to_string(),
+        Some(dir) => format!("{dir}/{text}"),
+        None if text.is_empty() => return None,
+        None => text.to_string(),
+    };
+    RepoPath::new(&text).ok()
 }
 
 impl Render for LogFilterBar {
@@ -585,16 +652,11 @@ impl Render for LogFilterBar {
                 })
         };
         let paths = {
-            let current = filter
-                .paths
-                .iter()
-                .map(|path| path.as_unix_str().to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
+            let current = self.path_texts(cx).join("\n");
             PopoverMenu::new("log-filter-paths-menu")
                 .trigger(self.filter_button(
                     "log-filter-paths",
-                    self.paths_label(),
+                    self.paths_label(cx),
                     !filter.paths.is_empty(),
                 ))
                 .menu(move |window, cx| {
@@ -613,7 +675,10 @@ impl Render for LogFilterBar {
             .rounded_sm()
             .border_1()
             .border_color(cx.theme().colors().border_variant)
-            .when(self.enabled, |this| this.child(self.text_editor.clone()))
+            .when(self.enabled, |this| {
+                this.child(self.text_editor.clone())
+                    .tooltip(Tooltip::text(TEXT_TOOLTIP))
+            })
             .when(!self.enabled, |this| {
                 this.child(
                     Label::new("Text or hash")

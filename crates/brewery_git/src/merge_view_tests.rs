@@ -598,6 +598,67 @@ async fn binary_conflicts_are_not_offered(cx: &mut TestAppContext) {
     });
 }
 
+/// Commits `path` as a symlink to `target` (mode 120000) straight into the index, so the test
+/// needs no symlink support, then checks it out.
+fn commit_symlink(repo: &TestRepo, path: &str, target: &str, message: &str) {
+    repo.write(".link-target", target);
+    let oid = repo.git(&["hash-object", "-w", "--", ".link-target"]);
+    std::fs::remove_file(repo.work.join(".link-target")).expect("remove target");
+    let info = format!("120000,{oid},{path}");
+    repo.git(&["update-index", "--add", "--cacheinfo", &info]);
+    repo.git(&["commit", "--quiet", "-m", message]);
+    repo.git(&["reset", "--quiet", "--hard"]);
+}
+
+#[gpui::test]
+async fn symlink_conflicts_are_not_offered(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    commit_symlink(&repo, "link", "base.txt", "base");
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    commit_symlink(&repo, "link", "feature.txt", "feature");
+    repo.git(&["checkout", "--quiet", "main"]);
+    commit_symlink(&repo, "link", "main.txt", "main");
+    let output = repo.run(&["merge", "--no-edit", "feature"]);
+    assert!(!output.status.success(), "the merge should conflict");
+    let (fixture, cx) = open_real(&repo, cx).await;
+
+    let repository = fixture.repository.clone();
+    let mergeable = cx
+        .update(|_, cx| MergeView::can_merge(&repository, path("link"), cx))
+        .await
+        .expect("can merge");
+    assert!(!mergeable);
+    let error = open_view(&fixture, "link", cx)
+        .await
+        .err()
+        .expect("symlinks do not open");
+    assert!(error.to_string().contains("symlink"), "{error}");
+    assert_eq!(open_views(&fixture, cx), 0);
+}
+
+#[cfg(unix)]
+#[gpui::test]
+async fn apply_refuses_to_write_through_a_symlink(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_left(cx));
+
+    let outside = tempfile::tempdir().expect("temp dir");
+    let target = outside.path().join("target.txt");
+    std::fs::write(&target, "outside\n").expect("write target");
+    std::fs::remove_file(repo.work.join("a.txt")).expect("remove");
+    std::os::unix::fs::symlink(&target, repo.work.join("a.txt")).expect("symlink");
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    let error = task.await.err().expect("apply should fail");
+    assert!(error.to_string().contains("symlink"), "{error}");
+    assert_eq!(std::fs::read_to_string(&target).expect("read"), "outside\n");
+}
+
 fn close_view(
     fixture: &Fixture,
     view: &Entity<MergeView>,
