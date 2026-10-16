@@ -3,6 +3,31 @@
 The text under `## <version>` is the top of that version's GitHub Release (install notes and checksums are added below it; see
 "Releasing" in docs/brewery/FORK.md). A version without a section gets a generic intro in its place.
 
+## 0.1.3
+
+Bug fixes from the first review round.
+
+- Databases:
+  - a password typed into the URL or driver options goes to the OS secret store, never into `.brewery/db.json`;
+  - PostgreSQL transactions stay intact after `COMMIT AND CHAIN` and while the schema tree is expanded;
+  - expanding a MariaDB/MySQL schema no longer ends results that are still being read;
+  - abandoned results release their locks after a minute;
+  - very large results inside a transaction are capped at 100 000 rows instead of exhausting memory;
+  - SQLite reports 0 rows for statements that change nothing;
+  - switching projects no longer freezes the daemon.
+- SQL completion replaces the rest of the word, qualifies MySQL/MariaDB tables when the URL names no database, and recovers after a daemon restart or an abandoned DDL run.
+- Git:
+  - the merge editor no longer writes through symlinks;
+  - merge and rebase steps time out instead of hanging on a stuck hook;
+  - the Log's text filter falls back to a message search for hash-like text;
+  - Show Commit in Log clears a filter that hides the commit;
+  - path filters are relative to the project folder and taken literally;
+  - Compare picks the branch over a same-named tag and says it is relative to the merge base;
+  - the Log tool window can move to another side.
+- Java: Gradle runs on your JDK (`JAVA_HOME`) when the wrapper supports it, so projects on Gradle older than 8.5 import; jdtls follows the `min_memory`/`max_memory` settings.
+- Updates: Preview builds only notify, never install the Stable release; requests identify as Brewery; a misleading palette entry is gone.
+- Packages: Linux and macOS packages include the font licences; the README lists the distributions the packages really support.
+
 ## 0.1.2
 
 - Java: Gradle projects import again after a Brewery update. jdtls kept an old path to its Gradle init script ("The specified initialization script ... init.gradle does not exist"); the bundled jdtls now starts with a fresh workspace whenever it changes, so each project is imported once after an update.
