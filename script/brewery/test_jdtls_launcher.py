@@ -52,7 +52,8 @@ FAKE_LAUNCHER = textwrap.dedent(
                 out.append("jvm=").append(jvm).append('\\n');
             }
             for (String key : new String[] {"java.home", "user.dir", "brewery.agent", "brewery.java",
-                    "osgi.configuration.area", "osgi.sharedConfiguration.area"}) {
+                    "osgi.configuration.area", "osgi.sharedConfiguration.area",
+                    "brewery.gradle.java.home"}) {
                 out.append("prop:").append(key).append('=')
                     .append(System.getProperty(key)).append('\\n');
             }
@@ -281,6 +282,89 @@ class LauncherTest(unittest.TestCase):
         launcher = self.make_bundle(self.tmp / "bundle")
         _, props, _ = self.parse(self.run_launcher(launcher).stdout)
         self.assertEqual(norm(Path(props["java.home"]).resolve()), norm(JDK.resolve()))
+
+    def fake_jdk(self, name="user jdk", version=None) -> Path:
+        """A directory the launcher takes for a JDK: it has bin/java (and a release file)."""
+        home = self.tmp / name
+        java = home / "bin" / f"java{EXE}"
+        java.parent.mkdir(parents=True)
+        java.write_text("", encoding="utf-8")
+        java.chmod(0o755)
+        if version:
+            (home / "release").write_text(
+                f'IMPLEMENTOR="Eclipse Adoptium"\nJAVA_VERSION="{version}"\nOS_NAME="x"\n',
+                encoding="utf-8",
+            )
+        return home
+
+    def wrapper(self, version, kind="bin"):
+        props = self.project / "gradle" / "wrapper" / "gradle-wrapper.properties"
+        props.parent.mkdir(parents=True, exist_ok=True)
+        props.write_text(
+            "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\n"
+            f"distributionUrl=https\\://services.gradle.org/distributions/gradle-{version}-{kind}.zip\n"
+            "zipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n",
+            encoding="utf-8",
+        )
+
+    def test_gradle_java_home_only_when_the_wrapper_can_run_on_it(self):
+        # Otherwise jdtls picks one (the Gradle compatibility matrix, as in jdtls's
+        # GradleUtils.getHighestSupportedJava; Gradle 9 needs Java 17).
+        launcher = self.make_bundle(self.tmp / "bundle", with_jre_link=True)
+        cases = [
+            ("17.0.12", "8.4", "bin", True),
+            ("1.8.0_402", "8.4", "all", True),
+            ("21.0.2", "8.4", "bin", False),
+            ("21.0.2", "8.5", "bin", True),
+            ("23", "8.10.2", "bin", True),
+            ("25.0.1", "8.14.3", "bin", False),
+            ("25.0.1", "9.1.0", "bin", True),
+            ("11.0.2", "9.4.0", "bin", False),
+            ("17.0.12", "9.4.0", "bin", True),
+            ("99", "9.4.0", "bin", False),
+        ]
+        for i, (java, gradle, kind, used) in enumerate(cases):
+            home = self.fake_jdk(f"jdk {i}", java)
+            self.wrapper(gradle, kind)
+            _, props, _ = self.parse(self.run_launcher(launcher, env=self.env(JAVA_HOME=str(home))).stdout)
+            self.assertEqual(props["brewery.gradle.java.home"], str(home) if used else "", (java, gradle))
+
+    def test_gradle_java_home_without_a_wrapper_or_a_release_file(self):
+        launcher = self.make_bundle(self.tmp / "bundle", with_jre_link=True)
+        home = self.fake_jdk("jdk", "25")
+        _, props, _ = self.parse(self.run_launcher(launcher, env=self.env(JAVA_HOME=str(home))).stdout)
+        self.assertEqual(props["brewery.gradle.java.home"], str(home))
+        self.wrapper("8.4")
+        home = self.fake_jdk("jdk without release")
+        _, props, _ = self.parse(self.run_launcher(launcher, env=self.env(JAVA_HOME=str(home))).stdout)
+        self.assertEqual(props["brewery.gradle.java.home"], str(home))
+
+    def test_gradle_runs_on_java_home_next_to_the_bundled_jre(self):
+        # jdtls runs on the bundled JRE, Gradle on the user's JDK (the overlay's
+        # java.import.gradle.java.home is "${brewery.gradle.java.home}").
+        launcher = self.make_bundle(self.tmp / "bundle", with_jre_link=True)
+        home = self.fake_jdk()
+        _, props, _ = self.parse(self.run_launcher(launcher, env=self.env(JAVA_HOME=str(home))).stdout)
+        self.assertEqual(props["brewery.gradle.java.home"], str(home))
+        # A trailing separator would escape the closing quote of the JVM argument on Windows.
+        _, props, _ = self.parse(
+            self.run_launcher(launcher, env=self.env(JAVA_HOME=str(home) + os.sep)).stdout
+        )
+        self.assertEqual(props["brewery.gradle.java.home"], str(home))
+
+    def test_gradle_java_home_is_empty_without_a_usable_java_home(self):
+        # Empty, not unset: an unexpanded "${...}" would turn off jdtls's own choice of a
+        # JDK that the project's Gradle version can run on.
+        launcher = self.make_bundle(self.tmp / "bundle", with_jre_link=True)
+        for java_home in (None, str(self.tmp / "no-such-jdk")):
+            _, props, _ = self.parse(self.run_launcher(launcher, env=self.env(JAVA_HOME=java_home)).stdout)
+            self.assertEqual(props["brewery.gradle.java.home"], "", java_home)
+
+    def test_gradle_java_home_is_empty_when_jdtls_runs_on_java_home(self):
+        # Then JAVA_HOME is jdtls's default JVM already.
+        launcher = self.make_bundle(self.tmp / "bundle")
+        _, props, _ = self.parse(self.run_launcher(launcher).stdout)
+        self.assertEqual(props["brewery.gradle.java.home"], "")
 
     def test_default_cache_is_the_user_cache_dir(self):
         launcher = self.make_bundle(self.tmp / "bundle")

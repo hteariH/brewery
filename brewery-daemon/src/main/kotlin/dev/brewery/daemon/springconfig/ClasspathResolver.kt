@@ -1,6 +1,7 @@
 package dev.brewery.daemon.springconfig
 
 import dev.brewery.daemon.BuildTool
+import dev.brewery.daemon.project.GradleJvm
 import dev.brewery.daemon.project.MavenModelReader
 import dev.brewery.daemon.project.detectBuildTool
 import org.gradle.tooling.GradleConnector
@@ -85,8 +86,13 @@ fun projectMetadataRoots(modules: List<Path>): List<File> =
         .distinct()
         .toList()
 
-class GradleClasspathResolver(private val fallbackGradleVersion: String = "9.8.1") : ClasspathResolver {
+class GradleClasspathResolver(
+    private val fallbackGradleVersion: String = "9.8.1",
+    private val jvm: GradleJvm = GradleJvm(),
+) : ClasspathResolver {
     override fun resolve(root: Path, resolution: Resolution): List<File> {
+        val javaHome = jvm.javaHome(root, fallbackGradleVersion)
+        jvm.check(root, fallbackGradleVersion, javaHome)
         val connector = GradleConnector.newConnector().forProjectDirectory(root.toFile())
         if (!Files.exists(root.resolve("gradle/wrapper/gradle-wrapper.properties"))) {
             connector.useGradleVersion(fallbackGradleVersion)
@@ -98,6 +104,7 @@ class GradleClasspathResolver(private val fallbackGradleVersion: String = "9.8.1
             // stdout carries the LSP stream, so Gradle's own output must never reach it.
             val project = connection.model(IdeaProject::class.java)
                 .withCancellationToken(cancellation.token())
+                .setJavaHome(javaHome)
                 .setStandardOutput(OutputStream.nullOutputStream())
                 .setStandardError(OutputStream.nullOutputStream())
                 .get()

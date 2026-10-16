@@ -10,8 +10,13 @@ import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 
-class GradleModelReader(private val fallbackGradleVersion: String = "9.8.1") : ProjectModelReader {
+class GradleModelReader(
+    private val fallbackGradleVersion: String = "9.8.1",
+    private val jvm: GradleJvm = GradleJvm(),
+) : ProjectModelReader {
     override fun read(root: Path): ProjectModel {
+        val javaHome = jvm.javaHome(root, fallbackGradleVersion)
+        jvm.check(root, fallbackGradleVersion, javaHome)
         val connector = GradleConnector.newConnector().forProjectDirectory(root.toFile())
         // A project without a wrapper still needs some distribution to answer the model query.
         if (!Files.exists(root.resolve("gradle/wrapper/gradle-wrapper.properties"))) {
@@ -21,6 +26,7 @@ class GradleModelReader(private val fallbackGradleVersion: String = "9.8.1") : P
         try {
             // stdout carries the JSON-RPC stream, so Gradle's own output must never reach it.
             val project = connection.model(GradleProject::class.java)
+                .setJavaHome(javaHome)
                 .setStandardOutput(OutputStream.nullOutputStream())
                 .setStandardError(OutputStream.nullOutputStream())
                 .get()

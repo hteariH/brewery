@@ -122,7 +122,9 @@ bundle in place. `smoke_bundle.py` starts the daemon on the bundled JRE and jdtl
 way the Java extension does (proxy, launcher, Lombok agent, java-debug) against a copy
 of the maven-multi fixture. `--checks basic,gradle` adds a Gradle import (online: the
 fixture's wrapper downloads Gradle) that starts jdtls again after "updating" a copy of
-it, to catch workspaces that keep the old jdtls's Gradle init script path. CI's `bundle`
+it, to catch workspaces that keep the old jdtls's Gradle init script path;
+`gradle-old` reads and imports the same build on Gradle 8.4 with a JDK 17 as
+`JAVA_HOME` (the hosted runners' `JAVA_HOME_17_*`, or `BREWERY_SMOKE_JDK17`). CI's `bundle`
 job does the same for Windows, Linux (inside a network namespace, `--require-offline`;
 the Gradle check runs in a separate online step) and macOS (allowed to fail), and uploads
 `bundle-<os>-<arch>` artifacts. It runs on tags, manual runs and changes to
@@ -156,6 +158,15 @@ names (Dev Drive/ReFS, `fsutil 8dot3name`) and a spaced install path, Brewery se
   `jre/` itself, and `java_home` would only hand the stripped JRE to jdtls as
   `JAVA_HOME`, the default project runtime. Projects that need a particular JDK set
   `lsp.jdtls.initialization_options.settings.java.configuration.runtimes`.
+- Gradle runs on the user's JDK, as `gradlew` does, not on the bundled JRE (Gradle
+  before 8.5 cannot run on Java 21). jdtls: the overlay sets
+  `lsp.jdtls.initialization_options.settings.java.import.gradle.java.home` to
+  `${brewery.gradle.java.home}` (initialization options: jdtls reads them before its
+  first import), and the launcher sets that property to `JAVA_HOME` when the
+  project's wrapper can run on it, else to "" so jdtls picks a JDK itself. The daemon
+  (`GradleJvm`) leaves `org.gradle.java.home` in gradle.properties to Gradle, else
+  uses `JAVA_HOME` under the same rule, and fails with what to change when the
+  wrapper cannot run on the JVM it ends up with. Both use jdtls's Gradle/Java table.
 - In launcher mode the extension ignores `min_memory` and `max_memory`; the launcher
   starts jdtls with `-Xms1G` and the JVM's default maximum heap. To change that, point
   `jdtls_launcher` at your own script that calls the bundled one with
