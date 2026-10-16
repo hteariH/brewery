@@ -16,7 +16,8 @@ use release_channel::ReleaseChannel;
 
 use crate::ReleaseAsset;
 
-/// The manifest of the newest non-draft, non-pre-release GitHub Release.
+/// The manifest of the newest non-draft, non-pre-release GitHub Release. Stable
+/// and Preview builds both poll it; Preview only notifies, see [`update_action_for`].
 /// GitHub redirects this to the asset's storage host, so the request must
 /// follow redirects.
 pub const DEFAULT_MANIFEST_URL: &str =
@@ -124,10 +125,17 @@ pub enum UpdateAction {
     Notify,
 }
 
-/// Windows installs updates; every other OS gets a notification.
-pub fn update_action_for_os(os: &str) -> UpdateAction {
-    match os {
-        "windows" => UpdateAction::Install,
+/// Stable Windows builds install updates; everything else gets a notification.
+///
+/// Preview is notify-only: there is a single manifest, the one on the newest
+/// Stable release, and its Windows installer is the Stable app (another AppId and
+/// install directory), so a Preview build must never run it. A Preview build is
+/// told about newer Stable releases and links to the release page. A separate
+/// Preview manifest is only worth adding once Preview releases are published.
+pub fn update_action_for(channel: ReleaseChannel, os: &str) -> UpdateAction {
+    match (channel, os) {
+        (ReleaseChannel::Preview, _) => UpdateAction::Notify,
+        (_, "windows") => UpdateAction::Install,
         _ => UpdateAction::Notify,
     }
 }
@@ -576,10 +584,23 @@ mod tests {
 
     #[test]
     fn test_only_windows_installs_updates() {
-        assert_eq!(update_action_for_os("windows"), UpdateAction::Install);
-        assert_eq!(update_action_for_os("linux"), UpdateAction::Notify);
-        assert_eq!(update_action_for_os("macos"), UpdateAction::Notify);
-        assert_eq!(update_action_for_os("freebsd"), UpdateAction::Notify);
+        let stable = ReleaseChannel::Stable;
+        assert_eq!(update_action_for(stable, "windows"), UpdateAction::Install);
+        assert_eq!(update_action_for(stable, "linux"), UpdateAction::Notify);
+        assert_eq!(update_action_for(stable, "macos"), UpdateAction::Notify);
+        assert_eq!(update_action_for(stable, "freebsd"), UpdateAction::Notify);
+    }
+
+    #[test]
+    fn test_preview_never_installs_the_stable_release() {
+        // The manifest is the Stable one; its installer is another AppId and directory.
+        for os in ["windows", "linux", "macos"] {
+            assert_eq!(
+                update_action_for(ReleaseChannel::Preview, os),
+                UpdateAction::Notify,
+                "{os}"
+            );
+        }
     }
 
     #[test]

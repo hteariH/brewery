@@ -601,14 +601,18 @@ impl AutoUpdater {
             .map(|update| (self.available_update_seq, update))
     }
 
-    // brewery: Windows installs; Linux and macOS only notify (tests may override)
-    fn update_action(cx: &AsyncApp) -> brewery_update::UpdateAction {
+    // brewery: Stable on Windows installs; Linux, macOS and Preview only notify
+    // (tests may override)
+    fn update_action(
+        release_channel: ReleaseChannel,
+        cx: &AsyncApp,
+    ) -> brewery_update::UpdateAction {
         #[cfg(test)]
         if let Some(action) = cx.try_read_global::<tests::UpdateActionOverride, _>(|g, _| g.0) {
             return action;
         }
         let _ = cx;
-        brewery_update::update_action_for_os(OS)
+        brewery_update::update_action_for(release_channel, OS)
     }
 
     pub fn dismissed_status(&self) -> Option<AutoUpdateStatus> {
@@ -798,7 +802,7 @@ impl AutoUpdater {
             });
 
         // brewery: rsync is only needed to install, and only Windows installs
-        let update_action = Self::update_action(cx);
+        let update_action = Self::update_action(release_channel, cx);
         if update_action == brewery_update::UpdateAction::Install {
             Self::check_dependencies()?;
         }
