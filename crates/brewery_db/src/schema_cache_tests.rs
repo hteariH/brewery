@@ -164,3 +164,25 @@ async fn a_failed_fetch_leaves_keywords_only_until_retried(cx: &mut TestAppConte
     assert_eq!(cache.read_with(cx, |cache, _| cache.error().cloned()), None);
     assert_eq!(fixture.calls_of("db/schema").len(), 2);
 }
+
+#[gpui::test]
+async fn a_restarted_daemon_retries_a_failed_fetch(cx: &mut TestAppContext) {
+    let (fixture, cache, cx) = cache_for("c1", cx).await;
+    fixture.state.fail("db/schema", "the daemon stopped");
+    cache.update(cx, |cache, cx| cache.schema(cx));
+    cx.run_until_parked();
+    assert!(cache.read_with(cx, |cache, _| cache.error().is_some()));
+
+    fixture.state.succeed("db/schema");
+    let daemon = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.daemon().cloned())
+        .unwrap();
+    daemon.update(cx, |daemon, cx| daemon.reload(cx));
+    cx.run_until_parked();
+    assert_eq!(cache.read_with(cx, |cache, _| cache.error().cloned()), None);
+    cache.update(cx, |cache, cx| cache.schema(cx));
+    cx.run_until_parked();
+    assert!(cache.update(cx, |cache, cx| cache.schema(cx)).is_some());
+    assert_eq!(fixture.calls_of("db/schema").len(), 2);
+}

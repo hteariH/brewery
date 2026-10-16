@@ -2,9 +2,12 @@
 //! completion request, shared by every console of that data source, refreshed by the Database
 //! tool window's Refresh, by saving the data source and by DDL run in a console.
 
-use brewery_daemon_client::{DbSchema, ProjectDaemon, SchemaParams, daemon_error_message};
+use brewery_daemon_client::{
+    DbSchema, ProjectDaemon, ProjectDaemonEvent, SchemaParams, daemon_error_message,
+};
 use gpui::{
-    App, AppContext as _, Context, Entity, EntityId, Global, SharedString, Task, WeakEntity,
+    App, AppContext as _, Context, Entity, EntityId, Global, SharedString, Subscription, Task,
+    WeakEntity,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -27,10 +30,12 @@ pub struct SchemaCache {
     /// The last snapshot that arrived; still served while a refresh is under way.
     schema: Option<Arc<DbSchema>>,
     fetch: Option<Task<()>>,
-    /// Why the last fetch failed. No new fetch starts until `refresh` or `retry_after_failure`.
+    /// Why the last fetch failed. No new fetch starts until `refresh`, `retry_after_failure` or
+    /// the daemon is ready again after a restart.
     error: Option<SharedString>,
     /// The next fetch asks the daemon to rebuild its snapshot.
     refresh_next: bool,
+    _daemon_events: Subscription,
 }
 
 impl SchemaCache {
@@ -48,13 +53,23 @@ impl SchemaCache {
         let refresh_next = caches.stale.remove(&key);
         let daemon = daemon.clone();
         let connection_id = connection_id.to_string();
-        let cache = cx.new(|_| Self {
-            daemon,
-            connection_id,
-            schema: None,
-            fetch: None,
-            error: None,
-            refresh_next,
+        let cache = cx.new(|cx| {
+            // A fetch that failed because the daemon stopped is worth trying again once it
+            // is back.
+            let daemon_events = cx.subscribe(&daemon, |this: &mut Self, _, event, cx| {
+                if *event == ProjectDaemonEvent::Ready && this.error.take().is_some() {
+                    cx.notify();
+                }
+            });
+            Self {
+                daemon,
+                connection_id,
+                schema: None,
+                fetch: None,
+                error: None,
+                refresh_next,
+                _daemon_events: daemon_events,
+            }
         });
         let caches = cx.default_global::<SchemaCaches>();
         caches.caches.retain(|_, cache| cache.upgrade().is_some());
