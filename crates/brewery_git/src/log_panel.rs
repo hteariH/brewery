@@ -126,6 +126,9 @@ pub struct LogPanel {
     commit_graph_checked: HashSet<RepositoryId>,
     first_chunk: Option<PendingFirstChunk>,
     notice: Option<(RepositoryId, CommitGraphNotice)>,
+    /// A commit to show, asked for while the filtered log was loading: once it has loaded
+    /// without it, the filter is reset to show it.
+    pending_show: Option<Oid>,
     _git_store_events: Subscription,
     _filter_events: Subscription,
 }
@@ -186,6 +189,7 @@ impl LogPanel {
             commit_graph_checked: HashSet::default(),
             first_chunk: None,
             notice: None,
+            pending_show: None,
             _git_store_events: git_store_events,
             _filter_events: filter_events,
         }
@@ -257,6 +261,7 @@ impl LogPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pending_show = None;
         let had_focus = self.focus_handle.contains_focused(window, cx);
         self.time_first_chunk(repo_id, source.clone().unwrap_or_default(), cx);
         let git_store = self.git_store(cx);
@@ -560,7 +565,8 @@ impl LogPanel {
         self.log.as_ref().map(|log| &log.graph)
     }
 
-    /// Selects `sha` in the Log tab, once the graph has loaded it.
+    /// Selects `sha` in the Log tab, once the graph has loaded it. When the filter hides it,
+    /// the filter is reset (as IntelliJ does).
     pub fn select_commit(&mut self, sha: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_history.is_some() {
             self.activate_tab(None, window, cx);
@@ -570,6 +576,44 @@ impl LogPanel {
             log::warn!("not a commit hash: {sha}");
             return;
         };
+        self.pending_show = None;
+        match self.filter_hides(oid, false, cx) {
+            Some(true) => return self.show_hidden_commit(oid, window, cx),
+            Some(false) => {}
+            None if self.log.as_ref().is_some_and(|log| log.source.is_some()) => {
+                self.pending_show = Some(oid);
+            }
+            None => {}
+        }
+        if let Some(log) = &self.log {
+            log.graph
+                .update(cx, |graph, cx| graph.select_commit_by_sha(oid, cx));
+        }
+    }
+
+    /// Whether the filtered Log has loaded without `oid`: `None` when the Log is unfiltered or
+    /// (unless `loaded`) still loading.
+    fn filter_hides(&self, oid: Oid, loaded: bool, cx: &mut Context<Self>) -> Option<bool> {
+        let log = self.log.as_ref()?;
+        let source = log.source.clone()?;
+        let repo = self.repository(log.repo_id, cx)?;
+        repo.update(cx, |repo, cx| {
+            if !loaded
+                && repo
+                    .graph_data(source.clone(), LogOrder::default(), 0..0, cx)
+                    .is_loading
+            {
+                return None;
+            }
+            let data = repo.get_graph_data(source, LogOrder::default())?;
+            Some(!data.commit_oid_to_index.contains_key(&oid))
+        })
+    }
+
+    /// Resets the filter that hides `oid` and selects it in the unfiltered Log.
+    fn show_hidden_commit(&mut self, oid: Oid, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter_bar.update(cx, |bar, cx| bar.reset(window, cx));
+        self.apply_filter(window, cx);
         if let Some(log) = &self.log {
             log.graph
                 .update(cx, |graph, cx| graph.select_commit_by_sha(oid, cx));
@@ -832,6 +876,12 @@ impl LogPanel {
                         GitGraphEvent::FullyLoaded | GitGraphEvent::LoadingError
                     );
                     self.refresh_status(finished, cx);
+                    if matches!(graph_event, GitGraphEvent::FullyLoaded)
+                        && let Some(oid) = self.pending_show.take()
+                        && self.filter_hides(oid, true, cx) == Some(true)
+                    {
+                        self.show_hidden_commit(oid, window, cx);
+                    }
                 }
             }
             _ => {}

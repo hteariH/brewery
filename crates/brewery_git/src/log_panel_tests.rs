@@ -855,6 +855,53 @@ async fn a_hash_goes_to_the_commit_without_filtering(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn showing_a_commit_the_filter_hides_resets_the_filter(cx: &mut TestAppContext) {
+    init_test(cx);
+    let history = History::new();
+    let (fixture, cx) = open_history(&history, cx).await;
+    let alice = LogFilter {
+        authors: vec!["Alice".into()],
+        ..Default::default()
+    };
+
+    // Asked while the filtered log is loading.
+    apply(&fixture, alice.clone(), cx);
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select_commit(&history.c[1], window, cx)
+    });
+    wait_until(cx, "the commit to be selected", |cx| {
+        selected_sha(&fixture, cx) == Some(history.c[1].clone())
+    });
+    assert_eq!(panel_source(&fixture, cx), None, "the filter was reset");
+
+    // Asked on a loaded filtered log.
+    apply(&fixture, alice, cx);
+    assert_eq!(wait_for_graph(&fixture, cx), history.shas(&[1, 4, 5]));
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select_commit(&history.c[2], window, cx)
+    });
+    wait_until(cx, "the commit to be selected", |cx| {
+        selected_sha(&fixture, cx) == Some(history.c[2].clone())
+    });
+    assert_eq!(panel_source(&fixture, cx), None, "the filter was reset");
+
+    // A commit the filter shows keeps it.
+    let bob = LogFilter {
+        authors: vec!["Bob".into()],
+        ..Default::default()
+    };
+    apply(&fixture, bob, cx);
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select_commit(&history.c[2], window, cx)
+    });
+    wait_until(cx, "the commit to be selected", |cx| {
+        selected_sha(&fixture, cx) == Some(history.c[2].clone())
+    });
+    cx.run_until_parked();
+    assert!(panel_source(&fixture, cx).is_some(), "still filtered");
+}
+
+#[gpui::test]
 async fn a_bad_branch_or_disabled_filters_leave_the_log_unfiltered(cx: &mut TestAppContext) {
     init_test(cx);
     let history = History::new();
