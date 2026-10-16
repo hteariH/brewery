@@ -167,6 +167,39 @@ class PostgresCursorTest {
     }
 
     @Test
+    fun `buffered results inside a transaction and from RETURNING are capped`() {
+        val capped = DbService(Files.createTempDirectory("brewery-pg-capped"), InMemorySecretStore(), maxBufferedRows = 1000)
+        try {
+            val cid = capped.save(ConnectionInfo("", "pg", "postgresql", postgres.jdbcUrl, postgres.username, false, emptyMap()), postgres.password).id
+            fun all(cursor: String): DbFetchResult {
+                val rows = mutableListOf<List<String?>>()
+                while (true) {
+                    val page = capped.fetch(cursor, rows.size, 1000)
+                    rows += page.rows
+                    if (page.done) return page.copy(rows = rows)
+                }
+            }
+            capped.execute(cid, "BEGIN")
+            val inTx = all(capped.execute(cid, "SELECT generate_series(1, 5000) AS g").cursorId!!)
+            assertEquals(1000, inTx.rows.size)
+            assertTrue(inTx.truncated)
+            capped.execute(cid, "ROLLBACK")
+            capped.execute(cid, "CREATE TABLE IF NOT EXISTS capped_t (a int)")
+            val returning = all(capped.execute(cid, "INSERT INTO capped_t SELECT generate_series(1, 3000) RETURNING a").cursorId!!)
+            assertEquals(1000, returning.rows.size)
+            assertTrue(returning.truncated)
+            // Every row was still inserted.
+            assertEquals(listOf(listOf("3000")), capped.fetch(capped.execute(cid, "SELECT count(*) FROM capped_t").cursorId!!, 0, 1).rows)
+            // Streamed results are not capped.
+            val streamed = all(capped.execute(cid, "SELECT generate_series(1, 5000) AS g").cursorId!!)
+            assertEquals(5000, streamed.rows.size)
+            assertEquals(false, streamed.truncated)
+        } finally {
+            capped.close()
+        }
+    }
+
+    @Test
     fun `insert returning commits at once`() {
         service.execute(id, "CREATE TABLE IF NOT EXISTS ret_t (a int)")
         val r = service.execute(id, "INSERT INTO ret_t VALUES (7) RETURNING a")

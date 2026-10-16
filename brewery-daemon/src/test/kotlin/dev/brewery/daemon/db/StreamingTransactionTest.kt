@@ -87,6 +87,41 @@ class StreamingTransactionTest {
     }
 
     @Test
+    fun `buffered results are capped and say so`() {
+        val capped = DbService(
+            Files.createTempDirectory("brewery-capped"),
+            InMemorySecretStore(),
+            manageTransactions = { true },
+            maxBufferedRows = 2,
+        )
+        try {
+            val cid = capped.save(ConnectionInfo("", "lite", "sqlite", "jdbc:sqlite:$db", null, false, emptyMap()), null).id
+            // Streamed: no cap.
+            val streamed = capped.fetch(capped.execute(cid, "SELECT id FROM t").cursorId!!, 0, 10)
+            assertEquals(3, streamed.rows.size)
+            assertEquals(false, streamed.truncated)
+            // Buffered by the driver: DML ... RETURNING, and reads inside a user transaction.
+            val returning = capped.fetch(capped.execute(cid, "UPDATE t SET name = name RETURNING id").cursorId!!, 0, 10)
+            assertEquals(2, returning.rows.size)
+            assertTrue(returning.done && returning.truncated)
+            capped.execute(cid, "BEGIN")
+            val inTx = capped.execute(cid, "SELECT id FROM t ORDER BY id").cursorId!!
+            val first = capped.fetch(inTx, 0, 1)
+            assertEquals(false, first.done || first.truncated)
+            val rest = capped.fetch(inTx, 1, 10)
+            assertEquals(listOf(listOf("2")), rest.rows)
+            assertTrue(rest.done && rest.truncated)
+            // Exactly the cap is not a truncation.
+            val exact = capped.fetch(capped.execute(cid, "SELECT id FROM t WHERE id < 3").cursorId!!, 0, 10)
+            assertEquals(2, exact.rows.size)
+            assertTrue(exact.done && !exact.truncated)
+            capped.execute(cid, "ROLLBACK")
+        } finally {
+            capped.close()
+        }
+    }
+
+    @Test
     fun `an implicit streaming transaction expires after inactivity`() {
         val cursor = service.execute(id, "SELECT id FROM t").cursorId!!
         now = 30_000

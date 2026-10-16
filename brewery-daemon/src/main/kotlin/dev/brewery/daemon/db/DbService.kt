@@ -27,6 +27,8 @@ class DbService(
     private val maxSchemaTables: Int = SchemaSnapshot.MAX_TABLES,
     /** Whether snapshots and introspection of a saved connection use a separate connection (its driver drains pending results); decided without connecting. */
     private val snapshotOnSeparateConnection: (ConnectionInfo) -> Boolean = { isMariaDbUrl(it.url) },
+    /** Most rows of a result the driver buffers in the heap instead of streaming; tests inject a small value. */
+    private val maxBufferedRows: Long = CursorManager.DEFAULT_MAX_BUFFERED_ROWS,
 ) : AutoCloseable {
     private val projectKey: String = try {
         root.toRealPath().toString()
@@ -328,7 +330,7 @@ class DbService(
 
     private fun cursorsOf(connectionId: String, session: Session): CursorManager =
         cursorManagers.compute(connectionId) { _, old ->
-            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions, clock, streamingTtlMs, expireUnfinishedBeforeCommands).also { manager ->
+            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions, clock, streamingTtlMs, expireUnfinishedBeforeCommands, maxBufferedRows).also { manager ->
                 // A manager of a closed session would otherwise stay in the map (and keep the session alive).
                 session.onClose { if (session.closed) cursorManagers.remove(connectionId, manager) }
             }

@@ -204,6 +204,7 @@ class DbProtocolTest {
         val fetch = gson.fromJson(fixture("db-fetch.result.json"), DbFetchResult::class.java)
         assertEquals(listOf("2", null), fetch.rows[1])
         assertEquals(false, fetch.done)
+        assertEquals(false, fetch.truncated)
         val nodes = gson.fromJson(fixture("db-introspect.result.json"), Array<DbNode>::class.java)
         assertEquals(listOf("schema", "table", "folder", "column", "index", "foreignKey", "sequence"), nodes.map { it.kind })
         assertEquals(null, nodes[0].detail)

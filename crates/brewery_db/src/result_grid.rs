@@ -25,6 +25,9 @@ pub const NULL_TEXT: &str = "<null>";
 /// Shown instead of the daemon error when a cursor timed out or was replaced by another
 /// statement on the same connection (`DB_NOT_FOUND`).
 pub const RESULT_EXPIRED: &str = "Result expired — run again";
+/// Shown when the daemon cut a result off: it caps results it cannot stream (inside a
+/// PostgreSQL transaction, `... RETURNING`, `FOR UPDATE`) at 100 000 rows.
+pub const RESULT_TRUNCATED: &str = "first rows only, the rest was cut off";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FetchFailure {
@@ -48,6 +51,8 @@ pub struct GridPages {
     state: PageState,
     /// Characters per column, measured on the first page.
     column_chars: Vec<usize>,
+    /// The daemon cut the result off after these rows.
+    truncated: bool,
 }
 
 impl GridPages {
@@ -58,6 +63,7 @@ impl GridPages {
             rows: Vec::new(),
             state: PageState::Idle,
             column_chars,
+            truncated: false,
         }
     }
 
@@ -115,11 +121,17 @@ impl GridPages {
         self.state = PageState::Stopped(failure);
     }
 
+    /// The last page said the daemon cut the result off (`truncated`).
+    pub fn mark_truncated(&mut self) {
+        self.truncated = true;
+    }
+
     /// Why paging stopped early, if it did.
     pub fn problem(&self) -> Option<&str> {
         match &self.state {
             PageState::Stopped(FetchFailure::Expired) => Some(RESULT_EXPIRED),
             PageState::Stopped(FetchFailure::Error(message)) => Some(message),
+            PageState::Done if self.truncated => Some(RESULT_TRUNCATED),
             _ => None,
         }
     }
@@ -273,7 +285,12 @@ impl ResultGrid {
             let page = fetch.await;
             this.update(cx, |this, cx| {
                 match page {
-                    Ok(page) => this.pages.page_loaded(page.rows, page.done),
+                    Ok(page) => {
+                        this.pages.page_loaded(page.rows, page.done);
+                        if page.truncated {
+                            this.pages.mark_truncated();
+                        }
+                    }
                     Err(error) => {
                         let failure = if daemon_error_code(&error) == Some(DB_NOT_FOUND.into()) {
                             FetchFailure::Expired

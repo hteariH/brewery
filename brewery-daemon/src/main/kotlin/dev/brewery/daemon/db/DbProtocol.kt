@@ -57,7 +57,11 @@ data class DbExecuteResult(val cursorId: String?, val columns: List<ColumnInfo>,
  * what was already fetched is rejected with -32602, an offset ahead skips rows.
  */
 data class DbFetchParams(val cursorId: String, val offset: Int, val limit: Int)
-data class DbFetchResult(val rows: List<List<String?>>, val done: Boolean)
+/**
+ * [truncated] comes with the last page ([done]) of a result that was cut off: one the driver has to hold in memory
+ * (PostgreSQL inside a user transaction, DML ... RETURNING, SELECT ... FOR UPDATE) stops after 100 000 rows.
+ */
+data class DbFetchResult(val rows: List<List<String?>>, val done: Boolean, val truncated: Boolean = false)
 
 /** Cancels the running statement of the session of [connectionId]; [cursorId] may stand in for it when it is blank. */
 data class DbCancelParams(val connectionId: String?, val cursorId: String? = null)

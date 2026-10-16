@@ -110,6 +110,20 @@ fn status_line() {
 }
 
 #[test]
+fn a_truncated_result_says_so() {
+    let mut pages = GridPages::new(columns());
+    pages.start_fetch();
+    pages.page_loaded(page(0, 500), false);
+    assert_eq!(pages.problem(), None);
+    pages.start_fetch();
+    pages.page_loaded(page(500, 2), true);
+    pages.mark_truncated();
+    assert!(pages.is_done());
+    assert_eq!(pages.status(12), "502 rows fetched in 12 ms");
+    assert_eq!(pages.problem(), Some(RESULT_TRUNCATED));
+}
+
+#[test]
 fn column_widths_come_from_the_first_page() {
     let mut pages = GridPages::new(columns());
     pages.start_fetch();

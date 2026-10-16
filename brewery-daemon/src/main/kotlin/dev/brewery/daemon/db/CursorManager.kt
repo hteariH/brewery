@@ -13,7 +13,12 @@ private class Cursor(
     val statement: Statement,
     val resultSet: ResultSet,
     val kinds: List<ValueRenderer.Kind>,
+    /** Most rows delivered from a result the driver buffers; one more row read means [truncated]. */
+    val rowLimit: Long?,
 ) {
+    /** Rows read from the result set so far. */
+    var read = 0L
+    var truncated = false
     val columnCount: Int get() = kinds.size
     /** True while this cursor relies on the autocommit-off transaction [CursorManager] opened for streaming. */
     var ownsTx = false
@@ -43,6 +48,8 @@ private class Cursor(
  *    back on. It is also ended after [streamTtlMs] without a fetch or execute (the owning cursors are dropped,
  *    fetch -> -32013), so an abandoned result tab cannot hold a server transaction open.
  *  - Every other statement runs unchanged in the driver's current mode (DML ... RETURNING is therefore buffered).
+ *    Such buffered results, and reads inside a user transaction, stop after [maxBufferedRows] rows; the last
+ *    fetch then reports `truncated`.
  *    Running one while the implicit transaction is open first commits it and drops the streaming cursors
  *    (fetch -> -32013): the clients must treat that as "result expired".
  *  - A failing plain read while cursors stream is rolled back to a savepoint; they survive. A failing or
@@ -73,6 +80,8 @@ class CursorManager(
     private val streamTtlMs: Long = DEFAULT_STREAM_TTL_MS,
     /** Whether the driver drains a pending streaming result into memory before the next command (MariaDB). */
     private val expireUnfinishedBeforeCommands: (Connection) -> Boolean = { false },
+    /** Most rows of a result the driver buffers instead of streaming (see "Streaming"); the rest is cut off. */
+    private val maxBufferedRows: Long = DEFAULT_MAX_BUFFERED_ROWS,
 ) {
     private val cursors = LinkedHashMap<String, Cursor>()
     private var txOwners = 0
@@ -209,6 +218,14 @@ class CursorManager(
         try {
             // A driver that rejects a fetch size just buffers.
             runCatching { statement.fetchSize = FETCH_SIZE }
+            // PostgreSQL outside our streaming transaction (a user transaction, DML ... RETURNING, FOR UPDATE) reads the
+            // whole result into the heap: cap it, asking for one row more to tell a truncated result from an exact fit.
+            val rowLimit = maxBufferedRows.takeIf { !ownsTx && managesTransactions(connection) && runCatching { connection.autoCommit }.getOrDefault(false) }
+            if (rowLimit != null) {
+                runCatching { statement.largeMaxRows = rowLimit + 1 }.onFailure {
+                    runCatching { statement.maxRows = (rowLimit + 1).coerceAtMost(Int.MAX_VALUE.toLong()).toInt() }
+                }
+            }
             val started = System.nanoTime()
             val hasResultSet = statement.execute(sql)
             val elapsedMs = (System.nanoTime() - started) / 1_000_000
@@ -218,7 +235,7 @@ class CursorManager(
             val rs = statement.resultSet
             val meta = rs.metaData
             val columns = (1..meta.columnCount).map { ColumnInfo(meta.getColumnLabel(it) ?: "", meta.getColumnTypeName(it) ?: "") }
-            val cursor = Cursor(UUID.randomUUID().toString(), statement, rs, ValueRenderer.kinds(meta))
+            val cursor = Cursor(UUID.randomUUID().toString(), statement, rs, ValueRenderer.kinds(meta), rowLimit)
             cursor.lastActivity = clock()
             synchronized(cursors) {
                 // Count this cursor before evicting, so that evicting the last older owner cannot end the transaction.
@@ -271,7 +288,8 @@ class CursorManager(
                 cursor.position++
             }
             if (!cursor.done && rows.size == max) cursor.pending = step(cursor, render = true)
-            return DbFetchResult(rows, cursor.done && cursor.pending == null)
+            val done = cursor.done && cursor.pending == null
+            return DbFetchResult(rows, done, done && cursor.truncated)
         } catch (e: Throwable) {
             // A failed or cancelled result set cannot be resumed; inside our streaming transaction the failure
             // also aborts every other streaming cursor.
@@ -402,13 +420,17 @@ class CursorManager(
             return it
         }
         if (cursor.done) return null
-        if (!cursor.resultSet.next()) {
+        val limit = cursor.rowLimit
+        val atLimit = limit != null && cursor.read >= limit
+        if (atLimit) cursor.truncated = cursor.resultSet.next()
+        if (atLimit || !cursor.resultSet.next()) {
             cursor.done = true
             runCatching { cursor.resultSet.close() }
             runCatching { cursor.statement.close() }
             release(cursor)
             return null
         }
+        cursor.read++
         if (!render) return emptyList()
         return List(cursor.columnCount) { ValueRenderer.read(cursor.resultSet, it + 1, cursor.kinds[it]) }
     }
@@ -418,5 +440,6 @@ class CursorManager(
         const val MAX_LIMIT = 1000
         const val FETCH_SIZE = 500
         const val DEFAULT_STREAM_TTL_MS = 60_000L
+        const val DEFAULT_MAX_BUFFERED_ROWS = 100_000L
     }
 }

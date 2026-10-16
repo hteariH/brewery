@@ -392,6 +392,10 @@ pub struct FetchParams {
 pub struct FetchResult {
     pub rows: Vec<Vec<Option<String>>>,
     pub done: bool,
+    /// Set with the last page of a result the daemon cut off (it caps results the driver has to
+    /// buffer, at 100 000 rows).
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Cancels the running statement of a connection's session; `cursor_id` may stand in for the
@@ -714,6 +718,9 @@ mod tests {
     fn db_fetch_fixture_round_trips() {
         let result: FetchResult = round_trips(DB_FETCH);
         assert!(!result.done);
+        assert!(!result.truncated);
+        let older: FetchResult = serde_json::from_str(r#"{"rows": [], "done": true}"#).unwrap();
+        assert!(!older.truncated);
         assert_eq!(result.rows.len(), 4);
         assert_eq!(
             result.rows[0],
