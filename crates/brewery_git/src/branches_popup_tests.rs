@@ -1,13 +1,14 @@
 use super::*;
 use fs::RealFs;
 use git::repository::{CommitSummary, RepoPath};
-use gpui::{TestAppContext, VisualTestContext};
+use gpui::{Modifiers, MouseButton, MouseUpEvent, TestAppContext, VisualTestContext};
 use project::{FakeFs, Project};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+use ui::{PopoverMenu, PopoverMenuHandle};
 use util::path;
 use workspace::MultiWorkspace;
 use worktree::WorktreeModelHandle;
@@ -1154,4 +1155,172 @@ async fn rename_new_branch_and_checkout_revision(cx: &mut TestAppContext) {
     }
     assert_eq!(repo.head(), repo.git(&["rev-parse", "v1^{commit}"]));
     assert!(!repo.git_status(&["symbolic-ref", "--quiet", "HEAD"]).0);
+}
+
+fn submenu_is_open(popup: &Entity<BranchesPopup>, cx: &mut VisualTestContext) -> bool {
+    popup.read_with(cx, |popup, cx| {
+        popup.picker.read(cx).delegate.submenu.is_some()
+    })
+}
+
+fn close_submenu(popup: &Entity<BranchesPopup>, cx: &mut VisualTestContext) {
+    let picker = popup.read_with(cx, |popup, _| popup.picker.clone());
+    picker.update(cx, |picker, cx| {
+        picker.delegate.submenu = None;
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+/// Lets a checkout the click may have started reach git before checking HEAD.
+fn settle(cx: &mut VisualTestContext) {
+    for _ in 0..10 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    cx.run_until_parked();
+}
+
+async fn repo_with_feature_branch(cx: &mut TestAppContext) -> (TestRepo, Opened) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.commit("a.txt", "base\n", "base");
+    repo.git(&["branch", "feature"]);
+    // A list long enough to scroll, like a real repository's.
+    for i in 0..30 {
+        repo.git(&["branch", &format!("more-{i:02}")]);
+    }
+    let mut opened = open_real(&repo, cx).await;
+    wait_for_branch_list(&mut opened, "branches", |names| names.len() == 32);
+    (repo, opened)
+}
+
+#[gpui::test]
+async fn clicking_the_arrow_or_right_clicking_opens_the_menu_without_checkout(
+    cx: &mut TestAppContext,
+) {
+    let (repo, mut opened) = repo_with_feature_branch(cx).await;
+    let popup = open_popup(&mut opened);
+    click_arrow_right_click_and_row(&repo, &popup, &mut opened.cx);
+}
+
+/// The title bar shows the popup inside a `PopoverMenu`, not as a modal.
+struct TitleBarHost {
+    handle: PopoverMenuHandle<git_ui_core::GitPickerPopover>,
+    workspace: WeakEntity<Workspace>,
+    repository: Entity<Repository>,
+    popup: Rc<RefCell<Option<Entity<BranchesPopup>>>>,
+}
+
+impl Render for TitleBarHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let workspace = self.workspace.clone();
+        let repository = self.repository.clone();
+        let popup = self.popup.clone();
+        div().size_full().child(
+            PopoverMenu::new("branch-menu")
+                .menu(move |window, cx| {
+                    let workspace = workspace.clone();
+                    let repository = Some(repository.clone());
+                    let view = cx.new(|cx| BranchesPopup::new(workspace, repository, window, cx));
+                    popup.replace(Some(view.clone()));
+                    Some(cx.new(|cx| git_ui_core::GitPickerPopover::new(view, cx)))
+                })
+                .trigger(Button::new("branch-trigger", "main"))
+                .with_handle(self.handle.clone())
+                .anchor(gpui::Anchor::TopLeft),
+        )
+    }
+}
+
+#[gpui::test]
+async fn clicking_the_arrow_in_the_title_bar_popover_opens_the_menu(cx: &mut TestAppContext) {
+    let (repo, opened) = repo_with_feature_branch(cx).await;
+    let host = TitleBarHost {
+        handle: PopoverMenuHandle::default(),
+        workspace: opened.workspace.downgrade(),
+        repository: opened.repository,
+        popup: Rc::default(),
+    };
+    let handle = host.handle.clone();
+    let popup_slot = host.popup.clone();
+    let (_, cx) = cx.add_window_view(|_, _| host);
+    cx.update(|window, cx| handle.show(window, cx));
+    cx.run_until_parked();
+    let popup = popup_slot.borrow().clone().expect("popover popup is open");
+    click_arrow_right_click_and_row(&repo, &popup, cx);
+}
+
+fn click_arrow_right_click_and_row(
+    repo: &TestRepo,
+    popup: &Entity<BranchesPopup>,
+    cx: &mut VisualTestContext,
+) {
+    wait_until(cx, "feature row", |cx| {
+        rows(popup, cx).contains(&"  feature [Local]".to_string())
+    });
+    let current_branch = || repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+
+    // Left click on the row's arrow.
+    let arrow = cx
+        .debug_bounds("BRANCH_ACTIONS-Local-feature")
+        .expect("arrow is rendered");
+    cx.simulate_mouse_move(arrow.center(), None, Modifiers::none());
+    cx.simulate_click(arrow.center(), Modifiers::none());
+    settle(cx);
+    assert_eq!(current_branch(), "main", "the arrow must not check out");
+    assert!(submenu_is_open(popup, cx), "the arrow opens the submenu");
+
+    // The second click of a double click lands where the first one opened the menu: that
+    // must not be the menu's Checkout entry.
+    cx.simulate_event(MouseDownEvent {
+        position: arrow.center(),
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_event(MouseUpEvent {
+        position: arrow.center(),
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 2,
+    });
+    settle(cx);
+    assert_eq!(
+        current_branch(),
+        "main",
+        "a double click on the arrow must not check out"
+    );
+    // Like →, the menu opens beside the row, not under the pointer.
+    let row = cx
+        .debug_bounds("BRANCH_ROW-Local-feature")
+        .expect("row is rendered");
+    let position = popup
+        .read_with(cx, |popup, cx| {
+            popup
+                .picker
+                .read(cx)
+                .delegate
+                .submenu
+                .as_ref()
+                .map(|submenu| submenu.position)
+        })
+        .expect("the arrow keeps the submenu open");
+    assert_eq!(position, row.top_right());
+
+    // Close it, then right-click the row's label.
+    close_submenu(popup, cx);
+    let on_label = row.origin + gpui::point(px(40.), row.size.height / 2.);
+    cx.simulate_mouse_move(on_label, None, Modifiers::none());
+    cx.simulate_mouse_down(on_label, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(on_label, MouseButton::Right, Modifiers::none());
+    settle(cx);
+    assert_eq!(current_branch(), "main", "right-click must not check out");
+    assert!(submenu_is_open(popup, cx), "right-click opens the submenu");
+
+    // A plain click on the rest of the row still checks the branch out.
+    close_submenu(popup, cx);
+    cx.simulate_click(on_label, Modifiers::none());
+    wait_until(cx, "checkout", |_| current_branch() == "feature");
 }

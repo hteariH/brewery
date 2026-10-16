@@ -9,7 +9,7 @@
 //! watcher sees the `.git` changes these commands make and rescans, so the title bar and the
 //! git panel refresh by themselves.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,8 +20,8 @@ use fuzzy_nucleo::{Case, LengthPenalty, StringMatchCandidate};
 use git::repository::Branch;
 use gpui::{
     Action, Anchor, App, AsyncWindowContext, Bounds, ClickEvent, Context, DismissEvent, Entity,
-    EventEmitter, FocusHandle, Focusable, MouseDownEvent, Pixels, Point, PromptLevel, Render,
-    SharedString, Subscription, Task, WeakEntity, Window, anchored, canvas, deferred, rems,
+    EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, Pixels, Point, PromptLevel,
+    Render, SharedString, Subscription, Task, WeakEntity, Window, anchored, canvas, deferred, rems,
 };
 use picker::{Picker, PickerDelegate};
 use project::git_store::{Repository, RepositoryEvent};
@@ -610,7 +610,8 @@ pub struct BranchesDelegate {
     selected_index: usize,
     mode: Mode,
     submenu: Option<Submenu>,
-    selected_row_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Painted bounds of the branch rows by index; the submenu opens beside its row.
+    row_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
 }
 
 impl BranchesDelegate {
@@ -625,7 +626,7 @@ impl BranchesDelegate {
             selected_index: 0,
             mode: Mode::List,
             submenu: None,
-            selected_row_bounds: Rc::default(),
+            row_bounds: Rc::default(),
         };
         this.reload_branches(cx);
         this
@@ -679,8 +680,9 @@ impl BranchesDelegate {
         self.selected_index = ix;
         let position = position
             .or_else(|| {
-                self.selected_row_bounds
-                    .get()
+                self.row_bounds
+                    .borrow()
+                    .get(&ix)
                     .map(|bounds| bounds.top_right())
             })
             .unwrap_or_default();
@@ -1229,6 +1231,7 @@ impl PickerDelegate for BranchesDelegate {
                 rev: query.trim().to_string(),
             }),
         };
+        self.row_bounds.borrow_mut().clear();
         match input {
             Some(input) => {
                 self.rows = vec![Row::Input(input)];
@@ -1328,6 +1331,9 @@ impl PickerDelegate for BranchesDelegate {
                 } else {
                     Icon::new(IconName::GitBranch).color(Color::Muted)
                 };
+                let selector = format!("{:?}-{}", branch_row.group, branch_row.branch.name());
+                let actions_selector = format!("BRANCH_ACTIONS-{selector}");
+                let row_selector = format!("BRANCH_ROW-{selector}");
                 let item = ListItem::new(("branch", ix))
                     .inset(true)
                     .spacing(ListItemSpacing::Sparse)
@@ -1341,16 +1347,24 @@ impl PickerDelegate for BranchesDelegate {
                         branch_row.positions.clone(),
                     ))
                     .end_slot(
-                        IconButton::new(("branch-actions", ix), IconName::ChevronRight)
-                            .icon_size(IconSize::Small)
-                            .icon_color(Color::Muted)
-                            .on_click(cx.listener(
-                                move |picker, event: &ClickEvent, window, cx| {
-                                    cx.stop_propagation();
-                                    let position = event.position();
-                                    picker.delegate.open_submenu(ix, Some(position), window, cx);
-                                },
-                            )),
+                        div()
+                            .debug_selector(move || actions_selector)
+                            // A press on the arrow never reaches the picker row, whose click
+                            // checks the branch out.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                IconButton::new(("branch-actions", ix), IconName::ChevronRight)
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .on_click(cx.listener(
+                                        move |picker, _: &ClickEvent, window, cx| {
+                                            cx.stop_propagation();
+                                            // Beside the row like →, not under the pointer
+                                            // where Checkout would take the next click.
+                                            picker.delegate.open_submenu(ix, None, window, cx);
+                                        },
+                                    )),
+                            ),
                     )
                     .on_secondary_mouse_down(cx.listener(
                         move |picker, event: &MouseDownEvent, window, cx| {
@@ -1360,20 +1374,26 @@ impl PickerDelegate for BranchesDelegate {
                                 .open_submenu(ix, Some(event.position), window, cx);
                         },
                     ));
-                let bounds = self.selected_row_bounds.clone();
+                let bounds = self.row_bounds.clone();
                 div()
                     .relative()
+                    .debug_selector(move || row_selector)
+                    // The picker confirms (checks out) on a right-button release too; here the
+                    // right button opens the submenu instead.
+                    .on_mouse_up(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                     .child(item)
-                    .when(selected, move |this| {
-                        this.child(
-                            canvas(
-                                move |row_bounds, _, _| bounds.set(Some(row_bounds)),
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .size_full(),
+                    .child(
+                        canvas(
+                            move |row_bounds, _, _| {
+                                bounds.borrow_mut().insert(ix, row_bounds);
+                            },
+                            |_, _, _, _| {},
                         )
-                    })
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
                     .into_any_element()
             }
         };
