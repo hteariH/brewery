@@ -99,7 +99,7 @@ fn short_ref(rev: &str) -> &str {
     if rev.len() > SHORT_SHA_LEN && rev.chars().all(|c| c.is_ascii_hexdigit()) {
         &rev[..SHORT_SHA_LEN]
     } else {
-        rev
+        crate::compare::short_ref_name(rev)
     }
 }
 

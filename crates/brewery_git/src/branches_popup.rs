@@ -793,13 +793,15 @@ impl BranchesDelegate {
                 cx,
             ),
             BranchAction::CompareWithCurrent => {
-                // The project against the branch, as a merge-base diff.
+                // The project against the branch, as a merge-base diff, by its full ref name
+                // (a tag of the same name would win otherwise).
                 let Some(repo) = self.repo.clone() else {
                     return;
                 };
+                let full_ref = row.branch.ref_name.clone();
                 self.workspace
                     .update(cx, |workspace, cx| {
-                        compare::compare_project(workspace, repo, name.into(), window, cx)
+                        compare::compare_project(workspace, repo, full_ref, window, cx)
                     })
                     .ok();
                 cx.emit(DismissEvent);
