@@ -63,6 +63,8 @@ class BreweryDaemon(
     private val windows: Boolean = System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true),
     // Opened lazily on first use, so a machine without a keyring costs nothing until a password is saved.
     private val secretStore: SecretStore = KeyringSecretStore(),
+    // The database service of a project root; tests keep a handle on it.
+    private val dbServiceFactory: (Path) -> DbService = { DbService(it, secretStore) },
     // Last so call sites can pass the reader as a trailing lambda.
     private val modelReader: ((Path) -> ProjectModel)? = null,
 ) : BreweryServer, AutoCloseable {
@@ -133,11 +135,11 @@ class BreweryDaemon(
             System.err.println("brewery: build-file watching disabled for $dir: $e")
             null
         }
-        synchronized(lock) {
+        val oldDb = synchronized(lock) {
             watcher?.close()
             watcher = newWatcher
             root = dir
-            db?.close()
+            val oldDb = db
             db = null
             cached = null
             cachedSpring = null
@@ -146,6 +148,15 @@ class BreweryDaemon(
             pendingNotification = null
             pendingSpringNotification?.cancel(false)
             pendingSpringNotification = null
+            oldDb
+        }
+        // Closing waits up to 5 s per busy session; outside the lock it does not hold up every other request.
+        if (oldDb != null) {
+            try {
+                dbExecutor.execute { oldDb.close() }
+            } catch (_: RejectedExecutionException) {
+                oldDb.close()
+            }
         }
         return CompletableFuture.completedFuture(null)
     }
@@ -213,7 +224,7 @@ class BreweryDaemon(
     private fun <T> dbCall(block: (DbService) -> T): CompletableFuture<T> {
         val service = synchronized(lock) {
             val dir = root ?: return failed(ErrorCodes.NOT_OPENED, "No project is open")
-            db ?: DbService(dir, secretStore).also { db = it }
+            db ?: dbServiceFactory(dir).also { db = it }
         }
         val future = CompletableFuture<T>()
         try {
