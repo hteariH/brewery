@@ -33,7 +33,7 @@ class DbService(
     } catch (_: Exception) {
         root.toAbsolutePath().normalize().toString()
     }
-    private val store = ConnectionStore(root)
+    private val store = ConnectionStore(root, ::moveEmbeddedSecrets)
     val registry = DriverRegistry(store)
     /** One thread and one connection per saved connection id; Task 3 runs execute/fetch/cancel through it. */
     val sessions = SessionManager({ store.connection(it) != null }, ::openSaved, clock, idleTimeoutMs)
@@ -52,11 +52,49 @@ class DbService(
         if (registry.list().none { it.id == connection.driverId }) {
             throw DbException(DbErrorCodes.NOT_FOUND, "Unknown driver: ${connection.driverId}")
         }
-        val saved = store.saveConnection(connection)
+        val id = (connection.id as String?).orEmpty().ifBlank { java.util.UUID.randomUUID().toString() }
+        val clean = EmbeddedSecrets.strip(connection.url, connection.user, connection.options)
+        var password = password
+        var notice: String? = null
+        if (clean.found) {
+            val urlPassword = clean.urlPassword
+            if (urlPassword != null && !password.isNullOrEmpty() && password != urlPassword) {
+                throw DbException(
+                    DbErrorCodes.INVALID_PARAMS,
+                    "The URL and the Password field contain different passwords. Remove the password from the URL.",
+                )
+            }
+            // What the driver would have used: a URL value overrides the properties, the password property an option.
+            // A typed password is stored below as usual; "forget the password" drops a leftover option with it.
+            val embedded = when {
+                !password.isNullOrEmpty() -> null
+                urlPassword != null -> urlPassword
+                password != null -> null
+                else -> clean.optionsPassword?.takeIf { secrets.get(account(id)) == null }
+            }
+            val where = if (urlPassword != null) "URL" else "driver options"
+            if (embedded != null) {
+                // Stored before db.json loses it; without a store the password would only survive in plain text.
+                try {
+                    secrets.set(account(id), embedded)
+                } catch (e: SecretStoreUnavailable) {
+                    throw DbException(
+                        DbErrorCodes.INVALID_PARAMS,
+                        "A password in the $where cannot be kept out of .brewery/db.json: ${e.message}. " +
+                            "Remove the password from the $where.",
+                    )
+                }
+                password = null
+            }
+            if (urlPassword != null || embedded != null) {
+                notice = "The password from the $where was moved to the OS secret store; .brewery/db.json keeps the connection without it."
+            }
+        }
+        val saved = store.saveConnection(connection.copy(id = id, url = clean.url, user = clean.user, options = clean.options))
         // URL, user or options may have changed: the next use opens a fresh session.
         sessions.close(saved.id)
         forgetSchema(saved.id)
-        var warning: String? = null
+        var warning: String? = notice
         try {
             when {
                 password == null -> {}
@@ -73,6 +111,27 @@ class DbService(
         return saved.copy(hasPassword = secrets.get(account(saved.id)) != null, warning = warning)
     }
 
+    /** [ConnectionStore] hook for connections already in `db.json`: moves an embedded password, as the driver used it. */
+    private fun moveEmbeddedSecrets(c: ConnectionInfo): ConnectionInfo {
+        val clean = try {
+            EmbeddedSecrets.strip(c.url, c.user, c.options)
+        } catch (_: DbException) {
+            return c // Ambiguous (two passwords, two users): left for the user to fix in the dialog.
+        }
+        if (!clean.found) return c
+        val account = account(c.id)
+        val current = secrets.get(account)
+        val secret = clean.urlPassword ?: current ?: clean.optionsPassword
+        try {
+            if (secret != null && secret != current) secrets.set(account, secret)
+        } catch (e: SecretStoreUnavailable) {
+            // Dropping it would lose the only copy of the password.
+            System.err.println("brewery: a password stays in db.json for connection ${c.id}: ${e.message}")
+            return c
+        }
+        return c.copy(url = clean.url, user = clean.user, options = clean.options)
+    }
+
     fun delete(id: String) {
         if (!store.deleteConnection(id)) throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
         sessions.close(id)
@@ -86,10 +145,21 @@ class DbService(
 
     /** Never throws for connection problems: they come back as `ok = false` with the driver's message. */
     fun test(connection: ConnectionInfo, password: String?): DbTestResult {
-        val effective = password?.takeIf { it.isNotEmpty() }
+        // The same connection save would store, so a URL with credentials tests like it will be used.
+        val clean = try {
+            EmbeddedSecrets.strip(connection.url, connection.user, connection.options)
+        } catch (e: DbException) {
+            return DbTestResult(false, e.message ?: "Invalid connection", null)
+        }
+        val typed = password?.takeIf { it.isNotEmpty() }
+        if (typed != null && clean.urlPassword != null && typed != clean.urlPassword) {
+            return DbTestResult(false, "The URL and the Password field contain different passwords. Remove the password from the URL.", null)
+        }
+        val effective = typed ?: clean.urlPassword
             ?: connection.id.takeIf { it.isNotBlank() && password == null }?.let { secrets.get(account(it)) }
+            ?: clean.optionsPassword.takeIf { password == null }
         val task = testThreads.submit(Callable {
-            openConnection(connection.driverId, connection.url, connection.user, effective, connection.options).use { c ->
+            openConnection(connection.driverId, clean.url, clean.user, effective, clean.options).use { c ->
                 val meta = c.metaData
                 "${meta.databaseProductName} ${meta.databaseProductVersion}".trim()
             }

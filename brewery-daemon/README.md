@@ -26,7 +26,9 @@ The daemon owns database access for the editor's Database tool window.
   (both served by MariaDB Connector/J), `sqlite`, plus user JDBC drivers. Each user
   driver is loaded from its jars in its own class loader.
 - `db/connections/list|save|delete|test`: connections are stored per project in
-  `.brewery/db.json`. The file never contains passwords.
+  `.brewery/db.json`. The file never contains passwords: one typed into the URL
+  (`//user:password@host`, `?password=`, `pwd=`) or a `password`/`pwd` driver option is
+  moved to the OS secret store on save, and the save is refused when there is no store.
 - `db/introspect { connectionId, path }`: lazy schema tree (catalogs or schemas, tables,
   views, sequences, then `columns`, `indexes` and `foreignKeys` folders).
 - `db/schema { connectionId, refresh? }`: flat snapshot for SQL completion (schemas, each

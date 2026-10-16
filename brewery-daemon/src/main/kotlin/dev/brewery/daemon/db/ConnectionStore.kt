@@ -26,8 +26,14 @@ private class DbFile(
     val drivers: List<StoredDriver>? = null,
 )
 
-/** `.brewery/db.json` of one project. Holds no secrets. All access is serialised on the instance. */
-class ConnectionStore(root: Path) {
+/**
+ * `.brewery/db.json` of one project. Holds no secrets. All access is serialised on the instance.
+ *
+ * Every write passes each connection through [moveSecrets] first, so a file written before passwords were
+ * taken out of URLs and options (or edited by hand) is cleaned on the next save. It returns the connection
+ * unchanged when it has nothing to move or the secret could not be stored.
+ */
+class ConnectionStore(root: Path, private val moveSecrets: (ConnectionInfo) -> ConnectionInfo = { it }) {
     private val file: Path = root.resolve(".brewery").resolve("db.json")
     private val gson: Gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
 
@@ -84,8 +90,13 @@ class ConnectionStore(root: Path) {
     }
 
     private fun write(connections: List<StoredConnection>, drivers: List<StoredDriver>) {
+        val cleaned = connections.map { stored ->
+            val info = stored.toInfo()
+            val moved = moveSecrets(info)
+            if (moved == info) stored else stored.copy(url = moved.url, user = moved.user, options = TreeMap(moved.options))
+        }
         Files.createDirectories(file.parent)
-        val text = gson.toJson(DbFile(connections, drivers)).replace("\r\n", "\n") + "\n"
+        val text = gson.toJson(DbFile(cleaned, drivers)).replace("\r\n", "\n") + "\n"
         val tmp = file.resolveSibling("db.json.tmp")
         Files.writeString(tmp, text)
         try {
