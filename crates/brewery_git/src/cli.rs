@@ -79,6 +79,9 @@ pub enum StageBlob {
     Missing,
     /// Larger than the limit the caller gave; not read.
     TooLarge,
+    /// Not a regular file: a symlink (120000) or a submodule (160000), given by its mode; not
+    /// read. Writing a merge result to such a path would follow the link out of the repository.
+    NotAFile(String),
     Bytes(Vec<u8>),
 }
 
@@ -906,12 +909,38 @@ impl GitRunner {
         path: &RepoPath,
         max_size: u64,
     ) -> Result<ConflictStages> {
-        let object = |stage: u8| format!(":{stage}:{}", path.as_unix_str());
+        let records = self.conflict_stage_ids(path).await?;
         Ok(ConflictStages {
-            base: self.stage_blob(&object(1), path, max_size).await?,
-            ours: self.stage_blob(&object(2), path, max_size).await?,
-            theirs: self.stage_blob(&object(3), path, max_size).await?,
+            base: self.stage(&records, 1, path, max_size).await?,
+            ours: self.stage(&records, 2, path, max_size).await?,
+            theirs: self.stage(&records, 3, path, max_size).await?,
         })
+    }
+
+    /// One stage of a conflicted file; `records` are its `ls-files -u -s` records, which give
+    /// the stage's mode.
+    async fn stage(
+        &self,
+        records: &[String],
+        stage: u8,
+        path: &RepoPath,
+        max_size: u64,
+    ) -> Result<StageBlob> {
+        let stage_field = stage.to_string();
+        let mode = records.iter().find_map(|record| {
+            let mut fields = record.split(' ');
+            let mode = fields.next()?;
+            (fields.nth(1)? == stage_field).then_some(mode)
+        });
+        match mode {
+            Some(mode) if mode != "100644" && mode != "100755" => {
+                Ok(StageBlob::NotAFile(mode.to_string()))
+            }
+            _ => {
+                let object = format!(":{stage}:{}", path.as_unix_str());
+                self.stage_blob(&object, path, max_size).await
+            }
+        }
     }
 
     pub(crate) async fn conflict_stage_ids(&self, path: &RepoPath) -> Result<Vec<String>> {
