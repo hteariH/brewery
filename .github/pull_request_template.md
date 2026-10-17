@@ -1,20 +1,14 @@
 ## Summary
 
-What problem does this solve, how, and why does this change matter?
-Use "Closes #123" for each issue resolved.
-Include artifacts produced when testing: before/after screenshots, GIFs, videos, benchmarks.
+What does this change, and why? Use "Fixes #123" for each issue it resolves.
 
 ## Testing
 
-Manually test your changes; report results, mention platforms if relevant.
-How can reviewers test this easily? Include setup and steps.
+How did you test it (tests added, commands run, platforms)? For UI changes, add before/after screenshots.
 
-## Self-review
+## Checklist
 
-- [ ] I've reviewed my diff for quality, security, reliability, and performance.
-- [ ] UI changes follow the [checklist](https://zed.dev/docs/development/ui-checklist).
-- [ ] Tests cover the new or changed behavior.
-
-Release Notes:
-
-- N/A or Added/Fixed/Improved ...
+- [ ] Tests cover the new or changed behaviour.
+- [ ] Edits to Zed's own files are small and marked `// brewery:` (see `docs/brewery/FORK.md`).
+- [ ] Files use LF line endings.
+- [ ] `CHANGELOG.md` updated if users will notice the change.

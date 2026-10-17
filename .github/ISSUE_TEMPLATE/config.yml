@@ -1,9 +1,12 @@
 # yaml-language-server: $schema=https://www.schemastore.org/github-issue-config.json
 blank_issues_enabled: false
 contact_links:
-  - name: Feature request
-    url: https://github.com/zed-industries/zed/discussions/new?category=feature-requests
-    about: To request a feature, open a new discussion under one of the appropriate categories.
-  - name: Our Discord community
-    url: https://discord.com/invite/zedindustries
-    about: Join our Discord server for real-time discussion and user support.
+  - name: Feature request or idea
+    url: https://github.com/hteariH/brewery/discussions/new?category=ideas
+    about: Suggest a feature or an improvement in Discussions.
+  - name: Question or help
+    url: https://github.com/hteariH/brewery/discussions/new?category=q-a
+    about: Ask how to do something with Brewery.
+  - name: Security problem
+    url: https://github.com/hteariH/brewery/blob/main/SECURITY.md
+    about: Please report vulnerabilities privately, not as a public issue.
