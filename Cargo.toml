@@ -1071,7 +1071,7 @@ scratch = { path = "tooling/corgi/patches/scratch" }
 split-debuginfo = "unpacked"
 incremental = true
 codegen-units = 16
-debug = "limited"
+debug = "line-tables-only"
 
 # mirror configuration for crates compiled for the build platform
 # (without this cargo will compile ~400 crates twice)
