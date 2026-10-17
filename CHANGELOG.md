@@ -3,6 +3,18 @@
 The text under `## <version>` is the top of that version's GitHub Release (install notes and checksums are added below it; see
 "Releasing" in docs/brewery/FORK.md). A version without a section gets a generic intro in its place.
 
+## 0.1.4
+
+- Based on Zed 1.26.0 (upstream changes up to 2026-10-17):
+  - stopped language servers can be restarted;
+  - jumping to a location inside folded code unfolds it;
+  - the tab switcher shows a preview of the file;
+  - built-in support for the Pyrefly language server for Python;
+  - "Open SVG preview" in the project panel;
+  - file icons also match by file name stem.
+- Ctrl+scroll-wheel zoom stays off by default, as in IntelliJ; turn it on with `"mouse_wheel_zoom": true`.
+- The project now has its own issue and pull request templates, contributing guide, code of conduct and security policy.
+
 ## 0.1.3
 
 Bug fixes from the first review round.
