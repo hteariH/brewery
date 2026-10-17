@@ -28,7 +28,7 @@ while IFS= read -r path; do
   case "$path" in
     .github/workflows/brewery_*) ;;
     .github/workflows/*) git rm -q --ignore-unmatch -- "$path" ;;
-    README.md|CONTRIBUTING.md|CODE_OF_CONDUCT.md|.github/ISSUE_TEMPLATE/*|.github/DISCUSSION_TEMPLATE/*|.github/pull_request_template.md)
+    README.md|CONTRIBUTING.md|CODE_OF_CONDUCT.md|.github/FUNDING.yml|.github/ISSUE_TEMPLATE/*|.github/DISCUSSION_TEMPLATE/*|.github/pull_request_template.md)
       if git cat-file -e "HEAD:$path" 2>/dev/null; then
         git checkout --ours -- "$path" && git add "$path"
       else
@@ -38,7 +38,7 @@ while IFS= read -r path; do
 done < <(git diff --name-only --diff-filter=U)
 
 # Zed's own GitHub files that Brewery removed stay removed, even when upstream changes them.
-for path in .github/FUNDING.yml .github/renovate.json .github/ISSUE_TEMPLATE/11_crash_report.yml   .github/DISCUSSION_TEMPLATE/feature-requests.yml; do
+for path in .github/renovate.json .github/ISSUE_TEMPLATE/11_crash_report.yml   .github/DISCUSSION_TEMPLATE/feature-requests.yml; do
   if ! git cat-file -e "HEAD:$path" 2>/dev/null; then git rm -q -f --ignore-unmatch -- "$path"; fi
 done
 while IFS= read -r path; do
