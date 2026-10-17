@@ -190,6 +190,11 @@ in the background and installs it when you quit. On Linux, update with your pack
 manager (or download the new release); Brewery shows a notification when one is out.
 Use Check for Updates in the menu to check now.
 
+## Support
+
+If Brewery is useful to you, you can support its development on
+[Ko-fi](https://ko-fi.com/mamoru113).
+
 ## Licence
 
 - The editor is GPL-3.0-or-later, like Zed (`LICENSE-GPL`); Zed's GPUI framework is
