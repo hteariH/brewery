@@ -35,8 +35,16 @@
 
 Shift Shift (Search Everywhere) is bound only in the JetBrains base keymap.
 
-The script resolves Zed workflow changes (kept deleted) and `README.md` (ours).
-Everything else it leaves to you and lists.
+The script resolves Zed workflow changes (kept deleted), Brewery's own GitHub and
+community files (`README.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, the issue,
+discussion and PR templates, `FUNDING.yml`: ours) and keeps Zed's removed GitHub files
+removed. Everything else it leaves to you and lists. Last merge: upstream `56934ec056`
+(2026-10-17).
+
+When testing a second checkout (a worktree) with a shared `CARGO_TARGET_DIR`, debug
+test binaries load assets such as `assets/settings/default.json` from the checkout
+that built them first, not from the one under test. Add `--features util/debug-embed`
+to embed the tested checkout's assets, or use a separate target directory.
 
 ## Log scale check
 
