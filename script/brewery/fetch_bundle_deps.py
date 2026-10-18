@@ -40,6 +40,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 import urllib.error
 import urllib.parse
@@ -261,8 +262,33 @@ def _hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
+# Waits before the 2nd, 3rd and 4th download attempt. Only network failures and
+# HTTP 429/5xx are retried; 4xx answers and checksum mismatches fail at once.
+RETRY_DELAYS = (5, 15, 45)
+
+
+class _Retryable(FetchError):
+    """A download failure worth another attempt."""
+
+
 def fetch(art: Artifact, cache: Path, log: Callable) -> Path:
-    """Return the verified cached file for art, downloading it on a cache miss."""
+    """Return the verified cached file for art, downloading it on a cache miss.
+
+    Network failures are retried (RETRY_DELAYS), so a single unreachable mirror
+    moment doesn't fail a whole release build.
+    """
+    for attempt, delay in enumerate((*RETRY_DELAYS, None), start=1):
+        try:
+            return _fetch_once(art, cache, log)
+        except _Retryable as err:
+            if delay is None:
+                raise FetchError(str(err)) from None
+            log(f"  retry   {art.name}: {err} (attempt {attempt} of {len(RETRY_DELAYS) + 1}, waiting {delay} s)")
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
+def _fetch_once(art: Artifact, cache: Path, log: Callable) -> Path:
     entry = cache_path(cache, art.sha256, art.url)
     if entry.is_file():
         if _hash_file(entry) == art.sha256:
@@ -291,9 +317,12 @@ def fetch(art: Artifact, cache: Path, log: Callable) -> Path:
         return entry
     except urllib.error.HTTPError as err:
         err.close()
-        raise FetchError(f"download of {art.name} from {art.url} failed: HTTP {err.code}") from None
+        message = f"download of {art.name} from {art.url} failed: HTTP {err.code}"
+        if err.code == 429 or err.code >= 500:
+            raise _Retryable(message) from None
+        raise FetchError(message) from None
     except (urllib.error.URLError, OSError, TimeoutError) as err:
-        raise FetchError(f"download of {art.name} from {art.url} failed: {err}") from err
+        raise _Retryable(f"download of {art.name} from {art.url} failed: {err}") from err
     finally:
         part.unlink(missing_ok=True)
         try:

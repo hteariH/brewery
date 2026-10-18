@@ -51,9 +51,14 @@ def make_zip(files: dict) -> bytes:
 
 class CountingHandler(SimpleHTTPRequestHandler):
     hits: dict = {}
+    # path -> number of first requests answered with 503
+    fail_first: dict = {}
 
     def do_GET(self):
         CountingHandler.hits[self.path] = CountingHandler.hits.get(self.path, 0) + 1
+        if CountingHandler.hits[self.path] <= CountingHandler.fail_first.get(self.path, 0):
+            self.send_error(503)
+            return
         super().do_GET()
 
     def log_message(self, *args):
@@ -65,6 +70,7 @@ class FixtureServer:
 
     def __init__(self, root: Path):
         CountingHandler.hits = {}
+        CountingHandler.fail_first = {}
         handler = partial(CountingHandler, directory=str(root))
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -543,6 +549,29 @@ class BuildTest(BundleFixture):
         with self.assertRaisesRegex(fbd.FetchError, "lombok"):
             self.build()
         self.assertFalse(self.out.exists() and any(self.out.iterdir()))
+
+    def test_a_temporary_server_error_is_retried(self):
+        path = "/lombok-1.0.jar"
+        CountingHandler.fail_first[path] = 2
+        with mock.patch.object(fbd, "RETRY_DELAYS", (0, 0, 0)):
+            self.build()
+        self.assertEqual(self.server.hits(path), 3)
+
+    def test_a_server_error_that_lasts_fails_after_the_retries(self):
+        path = "/lombok-1.0.jar"
+        CountingHandler.fail_first[path] = 10
+        with mock.patch.object(fbd, "RETRY_DELAYS", (0, 0, 0)):
+            with self.assertRaisesRegex(fbd.FetchError, "HTTP 503"):
+                self.build()
+        self.assertEqual(self.server.hits(path), 4)
+
+    def test_a_missing_file_is_not_retried(self):
+        path = "/lombok-1.0.jar"
+        (self.served / "lombok-1.0.jar").unlink()
+        with mock.patch.object(fbd, "RETRY_DELAYS", (0, 0, 0)):
+            with self.assertRaises(fbd.FetchError):
+                self.build()
+        self.assertEqual(self.server.hits(path), 1)
 
 
 def find_test_jdk() -> Path | None:
