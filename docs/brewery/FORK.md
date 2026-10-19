@@ -149,7 +149,9 @@ language server at what the pinned Java extension version downloads itself (its
 Gradle language server's `dest` names its version). If a licence changes,
 update the matching file in `script/brewery/licenses/` (the upstream LICENSE at the new
 tag). The JDK entry also names its GPLv2 corresponding source (`source_code`,
-`source_tag`), which ends up in `licenses/jre/SOURCE.txt`; the EPL components (jdtls,
+`source_sha256` from the Temurin release's `.sha256.txt`, `source_tag`), which ends up in
+`licenses/jre/SOURCE.txt` and, as the archive itself, on every GitHub Release; bump it
+together with the JDK; the EPL components (jdtls,
 java-debug) name their source tag the same way (`licenses/<component>/SOURCE.txt`).
 
 At startup `brewery_bundle::java_setup` points the extension at the bundle through the
@@ -266,8 +268,10 @@ installs and smoke-tests.
    `publish` fails: delete the draft (and fix a moved tag) before re-running. A pre-release tag (`v0.1.0-rc.1`) works
    when the file says `0.1.0-rc.1` too; it creates a pre-release draft.
 4. The `publish` job creates a **draft** release with the packages, `SHA256SUMS`,
-   `latest.json` (what the updater reads), `jre-source.txt` (source of the bundled
-   Temurin JRE, GPLv2 section 3) and zips of the winget manifests and the AUR
+   `latest.json` (what the updater reads), the bundled Temurin JRE's source archive
+   (`OpenJDK21U-jdk-sources_*.tar.gz`, GPLv2 section 3(a): downloaded in the `assemble`
+   job (`release_assets.py fetch-jdk-source`) from the pin in `bundle-deps.toml`, `source_code` + `source_sha256`, and refused on a
+   checksum mismatch), `jre-source.txt` (where that archive comes from) and zips of the winget manifests and the AUR
    `PKGBUILD` + `.SRCINFO`. The macOS zip is included when its job passed.
 5. Check the draft, then publish it by hand. Publishing it is what makes
    `releases/latest/download/latest.json` serve the new version, so installed Windows

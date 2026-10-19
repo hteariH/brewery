@@ -15,6 +15,24 @@ import release_assets as ra
 VERSION = "0.1.0"
 SHA = {name: f"{i:x}" * 64 for i, name in enumerate(ra.package_names(VERSION).values(), start=1)}
 BASE = "https://github.com/hteariH/brewery/releases/download/v0.1.0"
+REAL_DEPS = Path(__file__).with_name("bundle-deps.toml")
+SOURCE_NAME = "OpenJDK21U-jdk-sources_21_1.tar.gz"
+SOURCE_BYTES = b"jdk source tarball"
+
+
+def write_deps(path: Path, source_sha256: str) -> Path:
+    """A bundle-deps.toml with only what release_assets.py reads: the JDK's source pin."""
+    path.write_text(
+        "[artifacts.jdk]\n"
+        'version = "21+1"\n'
+        'license = "GPL-2.0-only WITH Classpath-exception-2.0"\n'
+        'source = "https://example.invalid/jdk-21+1"\n'
+        f'source_code = "https://example.invalid/download/{SOURCE_NAME}"\n'
+        f'source_sha256 = "{source_sha256}"\n'
+        'source_tag = "https://example.invalid/tree/jdk-21+1"\n',
+        encoding="utf-8",
+    )
+    return path
 
 
 class NamesTests(unittest.TestCase):
@@ -157,6 +175,8 @@ class NotesTests(unittest.TestCase):
         self.assertIn("SmartScreen", body)
         self.assertIn("xattr", body)
         self.assertIn("jre-source.txt", body)
+        # GPLv2 section 3(a): the source travels with the binaries, on the same page.
+        self.assertIn("OpenJDK21U-jdk-sources", body)
         self.assertEqual(body.count("## Brewery 0.1.0"), 0)
 
     def test_template_when_no_section(self):
@@ -185,6 +205,32 @@ class JreSourceTests(unittest.TestCase):
         self.assertIn("Eclipse Temurin", text)
         self.assertIn("OpenJDK21U-jdk-sources", text)
         self.assertIn("GPL", text)
+        self.assertIn("attached to this release", text)
+
+    def test_the_source_archive_is_pinned_like_the_binaries(self):
+        name, url, digest = ra.jdk_source_pin(REAL_DEPS)
+        self.assertTrue(url.startswith("https://github.com/adoptium/"), url)
+        self.assertTrue(url.endswith("/" + name), url)
+        self.assertRegex(name, r"^OpenJDK21U-jdk-sources_.*\.tar\.gz$")
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    def test_fetch_verifies_the_pinned_checksum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deps = write_deps(Path(tmp, "deps.toml"), hashlib.sha256(SOURCE_BYTES).hexdigest())
+            seen = []
+
+            def download(art, cache, log):
+                seen.append(art)
+                path = Path(cache) / art.sha256 / "x.tar.gz"
+                path.parent.mkdir(parents=True)
+                path.write_bytes(SOURCE_BYTES)
+                return path
+
+            got = ra.fetch_jdk_source(Path(tmp, "out"), bundle_deps=deps, download=download)
+            self.assertEqual(got, Path(tmp, "out", SOURCE_NAME))
+            self.assertEqual(got.read_bytes(), SOURCE_BYTES)
+            self.assertEqual(seen[0].url, f"https://example.invalid/download/{SOURCE_NAME}")
+            self.assertEqual(seen[0].sha256, hashlib.sha256(SOURCE_BYTES).hexdigest())
 
 
 class AssembleTests(unittest.TestCase):
@@ -206,6 +252,12 @@ class AssembleTests(unittest.TestCase):
         (root / "package-aur" / ".SRCINFO").write_text("pkgbase = brewery-bin\n")
 
     def run_assemble(self, root: Path, out: Path, **kw):
+        source_dir = root.parent / "jdk-source"
+        source_dir.mkdir(exist_ok=True)
+        source = source_dir / SOURCE_NAME
+        if not source.exists() and kw.get("with_source", True):
+            source.write_bytes(kw.get("source_bytes", SOURCE_BYTES))
+        deps = write_deps(root.parent / "deps.toml", hashlib.sha256(SOURCE_BYTES).hexdigest())
         return ra.assemble(
             VERSION,
             root,
@@ -213,6 +265,8 @@ class AssembleTests(unittest.TestCase):
             changelog=kw.get("changelog"),
             render=lambda installer_sha256, release_date: {"winget/x.yaml": f"sha={installer_sha256}\n"},
             published_at="2026-10-15T00:00:00Z",
+            jdk_source=source_dir,
+            bundle_deps=deps,
         )
 
     def test_assemble_everything(self):
@@ -229,6 +283,7 @@ class AssembleTests(unittest.TestCase):
                     "SHA256SUMS",
                     "latest.json",
                     "jre-source.txt",
+                    SOURCE_NAME,
                     "brewery-0.1.0-winget.zip",
                     "brewery-0.1.0-aur.zip",
                 },
@@ -244,6 +299,30 @@ class AssembleTests(unittest.TestCase):
             self.assertIn("SHA256SUMS", (out / "release-notes.md").read_text())
             win = names["windows"]
             self.assertIn(f"sha={sums[win]}", (out / "winget" / "x.yaml").read_text())
+
+    def test_the_jdk_source_archive_is_attached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp, "in"), Path(tmp, "out")
+            self.make_artifacts(root)
+            self.run_assemble(root, out)
+            self.assertEqual((out / "assets" / SOURCE_NAME).read_bytes(), SOURCE_BYTES)
+            sums = ra.parse_sha256sums((out / "assets" / "SHA256SUMS").read_text())
+            self.assertEqual(sums[SOURCE_NAME], hashlib.sha256(SOURCE_BYTES).hexdigest())
+            self.assertIn(SOURCE_NAME, (out / "assets" / "jre-source.txt").read_text())
+
+    def test_missing_jdk_source_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp, "in"), Path(tmp, "out")
+            self.make_artifacts(root)
+            with self.assertRaisesRegex(ValueError, SOURCE_NAME):
+                self.run_assemble(root, out, with_source=False)
+
+    def test_jdk_source_must_match_its_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp, "in"), Path(tmp, "out")
+            self.make_artifacts(root)
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                self.run_assemble(root, out, source_bytes=b"something else")
 
     def test_macos_is_optional(self):
         with tempfile.TemporaryDirectory() as tmp:

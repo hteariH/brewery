@@ -39,6 +39,9 @@ license = "GPL-2.0-only WITH Classpath-exception-2.0"
 source = "https://github.com/adoptium/temurin21-binaries/releases/tag/jdk-21.0.12.1%2B1"
 # GPLv2 section 3: corresponding source for the redistributed binaries.
 source_code = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk-sources_21.0.12.1_1.tar.gz"
+# Its .sha256.txt and the release asset digest; release_assets.py fetch-jdk-source checks it
+# and the release workflow attaches the archive to every GitHub Release.
+source_sha256 = "573057d03584ae793fb7ec9a14c76d826d9187a53efeefd99da47403a5308234"
 source_tag = "https://github.com/adoptium/jdk21u/tree/jdk-21.0.12.1+1"
 license_dir = "jre/legal/java.base"
 into = "work"
