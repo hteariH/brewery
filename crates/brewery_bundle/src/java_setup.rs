@@ -29,14 +29,27 @@ fn tools_dir(root: &Path) -> PathBuf {
 /// `lsp.jdtls.settings` defaults for the bundle at `root`; empty without a bundle. Each key
 /// is set only when its piece is present, so a partial bundle gives a partial overlay.
 pub fn java_settings_overlay_for_root(root: Option<&Path>) -> Map<String, Value> {
-    overlay_with(root, &cmd_safe_path)
+    let cache = if cfg!(windows) { launcher_cache_dir() } else { None };
+    overlay_with(root, &cmd_safe_path, cache.as_deref())
+}
+
+/// The Windows launcher's cache: `BREWERY_JDTLS_CACHE_DIR`, else
+/// `%LOCALAPPDATA%\Brewery\jdtls` (brewery-jdtls.cmd uses the same rule).
+fn launcher_cache_dir() -> Option<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    var("BREWERY_JDTLS_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| var("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("Brewery").join("jdtls")))
 }
 
 /// `cmd_safe` gives the form of a path that may cross `cmd /C`, or `None` when there is
-/// none (a spaced path on a volume without 8.3 names).
+/// none (a spaced path on a volume without 8.3 names). `launcher_cache` is the Windows
+/// launcher's cache dir: its workspaces become the extension's `data_directory`, so the
+/// extension passes `-data` and the launcher needs no process to hash the project path.
 fn overlay_with(
     root: Option<&Path>,
     cmd_safe: &dyn Fn(&Path) -> Option<PathBuf>,
+    launcher_cache: Option<&Path>,
 ) -> Map<String, Value> {
     let mut overlay = Map::new();
     let Some(root) = root else {
@@ -79,7 +92,15 @@ fn overlay_with(
         // A spaced launcher path still works as long as no later argument is quoted, so
         // without a short name jdtls starts without the (quoted) Lombok agent.
         lombok_off = safe.is_none() && lombok.is_some();
+        // `-data <dir>` follows the launcher through `cmd /C` too, so both must be cmd-safe.
+        let workspaces = launcher_cache.filter(|_| safe.is_some()).and_then(|cache| {
+            let workspaces = cache.join("workspace");
+            // A short name needs the directory to exist; the launcher would create it anyway.
+            std::fs::create_dir_all(&workspaces).ok();
+            cmd_safe(&workspaces)
+        });
         any |= set_path("jdtls_launcher", Some(safe.unwrap_or_else(|| launcher.clone())));
+        set_path("data_directory", workspaces);
     }
     if !lombok_off && let Some(lombok) = &lombok {
         any |= set_path("lombok_jar", Some(cmd_safe(lombok).unwrap_or_else(|| lombok.clone())));
@@ -128,6 +149,36 @@ pub fn java_initialization_options_for(overlay: &Map<String, Value>) -> Map<Stri
     options
 }
 
+/// The variable the Windows launcher names its configuration area after.
+pub const CONFIG_KEY_ENV: &str = "BREWERY_JDTLS_CONFIG_KEY";
+
+/// `lsp.jdtls.binary.env` defaults for a jdtls overlay. On Windows, with the bundled
+/// launcher: [`CONFIG_KEY_ENV`], a hash of the launcher's directory as the launcher sees
+/// it, so it finds its configuration area without starting a process to hash the path.
+pub fn java_launcher_env_for(overlay: &Map<String, Value>) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    if !cfg!(windows) {
+        return env;
+    }
+    let Some(launcher) = overlay.get("jdtls_launcher").and_then(Value::as_str) else {
+        return env;
+    };
+    // brewery-jdtls.cmd's JDTLS_HOME: %~dp0 without the trailing backslash.
+    let Some((jdtls_home, _)) = launcher.rsplit_once(['\\', '/']) else {
+        return env;
+    };
+    env.insert(CONFIG_KEY_ENV.to_string(), path_key(jdtls_home));
+    env
+}
+
+/// 40 hex digits of the SHA-256 of `path`, short enough to keep jdtls's deep
+/// configuration paths under MAX_PATH.
+fn path_key(path: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(path.as_bytes());
+    digest[..20].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Defaults a bundle contributes on top of `assets/settings/default.json`.
 #[derive(Debug, Default, PartialEq)]
 pub struct BundleDefaults {
@@ -135,6 +186,8 @@ pub struct BundleDefaults {
     pub jdtls: Map<String, Value>,
     /// Merged into the default `lsp.jdtls.initialization_options`.
     pub jdtls_initialization_options: Map<String, Value>,
+    /// Added to the default `lsp.jdtls.binary.env`.
+    pub jdtls_env: BTreeMap<String, String>,
     /// Bundled extensions that default to `auto_update_extensions: false`, so the
     /// extension stays at the version the bundled helpers were pinned and tested with.
     pub pinned_extensions: Vec<String>,
@@ -181,6 +234,7 @@ pub fn bundle_defaults_for(root: Option<&Path>, installed_dir: &Path) -> BundleD
     };
     BundleDefaults {
         jdtls_initialization_options: java_initialization_options_for(&jdtls),
+        jdtls_env: java_launcher_env_for(&jdtls),
         jdtls,
         pinned_extensions,
     }
@@ -192,9 +246,14 @@ pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
     let BundleDefaults {
         jdtls,
         jdtls_initialization_options,
+        jdtls_env,
         pinned_extensions,
     } = defaults;
-    if jdtls.is_empty() && jdtls_initialization_options.is_empty() && pinned_extensions.is_empty() {
+    if jdtls.is_empty()
+        && jdtls_initialization_options.is_empty()
+        && jdtls_env.is_empty()
+        && pinned_extensions.is_empty()
+    {
         return;
     }
     if !jdtls.is_empty() {
@@ -219,13 +278,18 @@ pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
                     .entry(id.as_str().into())
                     .or_insert(false);
             }
-            if jdtls.is_some() || options.is_some() {
+            if jdtls.is_some() || options.is_some() || !jdtls_env.is_empty() {
                 let server = defaults.project.lsp.0.entry(JDTLS_SERVER.into()).or_default();
                 if let Some(jdtls) = &jdtls {
                     merge(&mut server.settings, jdtls);
                 }
                 if let Some(options) = &options {
                     merge(&mut server.initialization_options, options);
+                }
+                if !jdtls_env.is_empty() {
+                    let binary = server.binary.get_or_insert_default();
+                    let vars = binary.env.get_or_insert_default();
+                    vars.extend(jdtls_env.iter().map(|(k, v)| (k.clone(), v.clone())));
                 }
             }
         });
@@ -542,7 +606,53 @@ mod tests {
         // The launcher runs on the bundled JRE by itself; `java_home` would also become
         // jdtls's JAVA_HOME and so the default project runtime, so it is left to the user.
         assert!(!overlay.contains_key("java_home"), "{overlay:?}");
-        assert_eq!(overlay.len(), 6, "{overlay:?}");
+        // Windows also gets `data_directory` (see the launcher workspace test below).
+        let expected = if cfg!(windows) { 7 } else { 6 };
+        assert_eq!(overlay.len(), expected, "{overlay:?}");
+    }
+
+    #[test]
+    fn launcher_workspaces_become_the_data_directory() {
+        // The extension then passes `-data <dir>/jdtls-<sha1 of the project>`, so the
+        // Windows launcher starts no process to hash the project path (#40).
+        let temp = TempDir::new("data-directory");
+        populate(&temp.0);
+        let cache = temp.0.join("cache");
+        let overlay = overlay_with(Some(&temp.0), &cmd_safe_path, Some(&cache));
+        assert_eq!(overlay["data_directory"], string(cache.join("workspace")));
+        assert!(cache.join("workspace").is_dir());
+        assert!(!overlay_with(Some(&temp.0), &cmd_safe_path, None).contains_key("data_directory"));
+        // `-data` crosses `cmd /C` after the launcher: not without cmd-safe paths.
+        let no_short_names = |_: &Path| None;
+        let overlay = overlay_with(Some(&temp.0), &no_short_names, Some(&cache));
+        assert!(!overlay.contains_key("data_directory"), "{overlay:?}");
+        // Nor without the bundled launcher.
+        let partial = TempDir::new("data-directory-partial");
+        touch(&tools(&partial.0).join("lombok.jar"));
+        let overlay = overlay_with(Some(&partial.0), &cmd_safe_path, Some(&cache));
+        assert!(!overlay.contains_key("data_directory"), "{overlay:?}");
+    }
+
+    #[test]
+    fn windows_launcher_gets_its_config_key_in_the_env() {
+        let temp = TempDir::new("config-key");
+        populate(&temp.0);
+        let overlay = overlay_with(Some(&temp.0), &cmd_safe_path, None);
+        let env = java_launcher_env_for(&overlay);
+        if cfg!(windows) {
+            let jdtls = temp.0.join("jdtls");
+            let key = &env[CONFIG_KEY_ENV];
+            assert_eq!(key, &path_key(jdtls.to_str().unwrap()));
+            assert_eq!(key.len(), 40);
+            assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()), "{key}");
+            let other = path_key(temp.0.join("other").join("jdtls").to_str().unwrap());
+            assert_ne!(key, &other);
+        } else {
+            assert!(env.is_empty(), "{env:?}");
+        }
+        let mut no_launcher = overlay;
+        no_launcher.remove("jdtls_launcher");
+        assert!(java_launcher_env_for(&no_launcher).is_empty());
     }
 
     #[test]
@@ -595,7 +705,7 @@ mod tests {
         let temp = TempDir::new("no-8dot3");
         populate(&temp.0);
         let no_short_names = |_: &Path| None;
-        let overlay = overlay_with(Some(&temp.0), &no_short_names);
+        let overlay = overlay_with(Some(&temp.0), &no_short_names, None);
         assert_eq!(
             overlay["jdtls_launcher"],
             string(temp.0.join("jdtls").join(launcher_name()))
@@ -659,12 +769,14 @@ mod tests {
             java_initialization_options_for(&defaults.jdtls)
         );
         assert!(!defaults.jdtls_initialization_options.is_empty());
+        assert_eq!(defaults.jdtls_env, java_launcher_env_for(&defaults.jdtls));
 
         // The user updated the extension: its own proxy and downloads, not ours.
         write_extension_toml(&installed.join("java"), "6.9.0");
         let defaults = bundle_defaults_for(Some(&root), &installed);
         assert!(defaults.jdtls.is_empty());
         assert!(defaults.jdtls_initialization_options.is_empty());
+        assert!(defaults.jdtls_env.is_empty());
         assert_eq!(defaults.pinned_extensions, vec!["java".to_string()]);
     }
 
@@ -701,6 +813,7 @@ mod tests {
         let jdtls = java_settings_overlay_for_root(Some(root));
         BundleDefaults {
             jdtls_initialization_options: java_initialization_options_for(&jdtls),
+            jdtls_env: env(&[(CONFIG_KEY_ENV, "abc")]),
             jdtls,
             pinned_extensions: vec!["java".to_string()],
         }
@@ -838,6 +951,7 @@ mod tests {
             cx.set_global(store);
             apply_bundle_defaults(full_defaults(&temp.0), cx);
 
+            assert_eq!(jdtls_binary_env(cx), Some(env(&[(CONFIG_KEY_ENV, "abc")])));
             let settings = jdtls_settings(cx);
             // The overlay beats default.json's `jdk_auto_download: true`.
             assert_eq!(settings["jdk_auto_download"], Value::Bool(false));

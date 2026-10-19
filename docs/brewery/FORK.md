@@ -185,6 +185,13 @@ names (Dev Drive/ReFS, `fsutil 8dot3name`) and a spaced install path, Brewery se
 - jdtls writes its configuration and workspaces to the user cache
   (`%LOCALAPPDATA%\Brewery\jdtls`, `~/Library/Caches/Brewery/jdtls`,
   `~/.cache/brewery/jdtls`; `BREWERY_JDTLS_CACHE_DIR` overrides), never into the bundle.
+  On Windows the launcher starts no process besides java (it used to start PowerShell
+  for SHA-1 keys, 0.3-1 s per start): Brewery sets the extension's `data_directory` to
+  `<cache>\workspace`, so the extension passes `-data <cache>\workspace\jdtls-<sha1 of
+  the project>`, and `BREWERY_JDTLS_CONFIG_KEY` (a hash of the jdtls directory) in the
+  default `lsp.jdtls.binary.env` names the configuration area. Run by hand, without
+  them, the launcher uses the sanitized paths as keys. `data_directory` is left unset
+  when the launcher or the cache path has no cmd-safe form (see Lombok above).
   A workspace (`workspace/jdtls-<hash>` or the extension's `-data`) is deleted and
   rebuilt on the first start after jdtls changes (a Brewery update): Gradle projects
   remember the path of jdtls's init script inside the configuration area
