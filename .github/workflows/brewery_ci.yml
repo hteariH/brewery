@@ -211,14 +211,8 @@ jobs:
       - name: Dev Drive
         shell: pwsh
         run: script/brewery/setup-dev-drive.ps1
-      - name: Install MSVC Spectre libraries
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $p = Start-Process -Wait -PassThru -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
-          # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
-          if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
+      - name: MSVC Spectre libraries
+        uses: ./.github/actions/msvc-spectre
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0
@@ -482,14 +476,8 @@ jobs:
         run: |
           echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
           echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
-      - name: Install MSVC Spectre libraries
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $p = Start-Process -Wait -PassThru -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
-          # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
-          if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
+      - name: MSVC Spectre libraries
+        uses: ./.github/actions/msvc-spectre
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0

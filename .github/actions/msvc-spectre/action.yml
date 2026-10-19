@@ -1,0 +1,62 @@
+name: MSVC Spectre libraries
+description: >
+  Puts the x64 Spectre-mitigated MSVC libraries (lib\spectre\x64 of the default toolset) in place.
+  pet's msvc_spectre_libs build script fails the build without them (its "error" feature), and
+  windows-2025 doesn't ship them. The Visual Studio installer takes 3.5 to 11.5 minutes per job,
+  so the directory is cached by toolset version (saved from main and tags only, SAVE_CACHE) and
+  copied into place; the installer runs only on a miss.
+runs:
+  using: composite
+  steps:
+    - name: Locate the MSVC toolset
+      id: locate
+      shell: pwsh
+      run: |
+        $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+        # The toolset cl.exe resolves to, which is where msvc_spectre_libs looks (..\lib\spectre\x64).
+        $toolset = (Get-Content "$vs\VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt" -TotalCount 1).Trim()
+        $spectre = "$vs\VC\Tools\MSVC\$toolset\lib\spectre\x64"
+        Write-Host "MSVC $toolset at $vs"
+        "vs=$vs" >> $env:GITHUB_OUTPUT
+        "toolset=$toolset" >> $env:GITHUB_OUTPUT
+        "spectre=$spectre" >> $env:GITHUB_OUTPUT
+        "present=$(Test-Path "$spectre\msvcrt.lib")" >> $env:GITHUB_OUTPUT
+    - name: Restore the Spectre libraries
+      id: cache
+      if: steps.locate.outputs.present != 'True'
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ${{ runner.temp }}/msvc-spectre-x64
+        key: msvc-spectre-x64-${{ steps.locate.outputs.toolset }}
+    - name: Install the Spectre libraries
+      if: steps.locate.outputs.present != 'True'
+      shell: pwsh
+      env:
+        VS: ${{ steps.locate.outputs.vs }}
+        SPECTRE: ${{ steps.locate.outputs.spectre }}
+        CACHED: ${{ runner.temp }}/msvc-spectre-x64
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
+        if ($env:CACHE_HIT -eq 'true') {
+          New-Item -ItemType Directory -Force $env:SPECTRE | Out-Null
+          Copy-Item "$env:CACHED\*" $env:SPECTRE -Recurse -Force
+          Write-Host "copied from the cache"
+        } else {
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $p = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList "modify --installPath `"$env:VS`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
+          # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
+          if (Test-Path "$env:SPECTRE\msvcrt.lib") {
+            New-Item -ItemType Directory -Force $env:CACHED | Out-Null
+            Copy-Item "$env:SPECTRE\*" $env:CACHED -Recurse -Force
+          }
+        }
+        if (-not (Test-Path "$env:SPECTRE\msvcrt.lib")) { throw "MSVC Spectre libraries not found at $env:SPECTRE" }
+        $files = Get-ChildItem $env:SPECTRE -Recurse -File | Measure-Object -Sum Length
+        Write-Host ('{0} files, {1:N0} MB at {2}' -f $files.Count, ($files.Sum / 1MB), $env:SPECTRE)
+    - name: Save the Spectre libraries
+      if: env.SAVE_CACHE == 'true' && steps.locate.outputs.present != 'True' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ${{ runner.temp }}/msvc-spectre-x64
+        key: ${{ steps.cache.outputs.cache-primary-key }}

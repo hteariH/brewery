@@ -135,5 +135,25 @@ class LicenceTests(unittest.TestCase):
             self.assertEqual(downloads[0]["with"]["path"], "assets", job_id)
 
 
+@unittest.skipIf(yaml is None, "PyYAML is not installed")
+class SpectreTests(unittest.TestCase):
+    """The Visual Studio installer runs only on a cache miss (#48)."""
+
+    def test_windows_rust_jobs_use_the_cached_spectre_libraries(self):
+        jobs = load(WORKFLOW)["jobs"]
+        for job_id in ["check-windows", "build-windows"]:
+            uses = [s.get("uses") for s in jobs[job_id]["steps"]]
+            self.assertIn("./.github/actions/msvc-spectre", uses, job_id)
+
+    def test_the_installer_runs_only_on_a_miss(self):
+        installs = [
+            (job_id, step) for job_id, step in steps() if "vs_installer" in step.get("run", "")
+        ]
+        self.assertEqual([job_id for job_id, _ in installs], ["action msvc-spectre"])
+        (_, step) = installs[0]
+        run = step["run"]
+        self.assertLess(run.index("CACHE_HIT"), run.index("vs_installer"))
+
+
 if __name__ == "__main__":
     unittest.main()
