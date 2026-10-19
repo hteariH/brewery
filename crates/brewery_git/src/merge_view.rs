@@ -17,7 +17,7 @@
 //! Save All, Save in the close prompt) only writes the result: the file stays conflicted and
 //! the view stays open, as in IntelliJ where only Apply marks the file resolved.
 
-use crate::cli::{ConflictSides, GitCli, Operation, RepoPath, StageBlob};
+use crate::cli::{ConflictSides, ConflictStages, GitCli, Operation, RepoPath, StageBlob};
 use crate::merge3::{self, ChunkKind, Merge3, MergeResult, Resolution, Side, Version};
 use crate::revision_diff_view::{MAX_FILE_SIZE, in_memory_buffer, language_for_path};
 use anyhow::{Result, bail};
@@ -109,6 +109,17 @@ pub async fn load_input(
     let stages = cx
         .update(|cx| GitCli::conflict_stages(repo, path.clone(), MAX_FILE_SIZE as u64, cx))
         .await?;
+    let input = merge_input(stages, &sides, path)?;
+    Ok((sides, input))
+}
+
+/// What a conflicted file's stages offer the merge editor. [`GitCli::mergeable_conflicts`]
+/// answers [`MergeInput::is_text`] for all conflicted files at once and must agree with this.
+pub(crate) fn merge_input(
+    stages: ConflictStages,
+    sides: &ConflictSides,
+    path: &RepoPath,
+) -> Result<MergeInput> {
     let (yours, theirs) = match sides.yours_stage() {
         crate::cli::Side::Ours => (stages.ours, stages.theirs),
         crate::cli::Side::Theirs => (stages.theirs, stages.ours),
@@ -124,13 +135,13 @@ pub async fn load_input(
         .iter()
         .any(|blob| matches!(blob, StageBlob::NotAFile(_)))
     {
-        return Ok((sides, MergeInput::NotAFile));
+        return Ok(MergeInput::NotAFile);
     }
     if [&base, &yours, &theirs]
         .iter()
         .any(|blob| **blob == StageBlob::TooLarge)
     {
-        return Ok((sides, MergeInput::TooLarge));
+        return Ok(MergeInput::TooLarge);
     }
     let text = |blob: StageBlob| -> Option<Option<String>> {
         match blob {
@@ -140,19 +151,16 @@ pub async fn load_input(
         }
     };
     let (Some(base), Some(yours), Some(theirs)) = (text(base), text(yours), text(theirs)) else {
-        return Ok((sides, MergeInput::Binary));
+        return Ok(MergeInput::Binary);
     };
     let (Some(yours), Some(theirs)) = (yours, theirs) else {
-        return Ok((sides, MergeInput::Deleted));
+        return Ok(MergeInput::Deleted);
     };
-    Ok((
-        sides,
-        MergeInput::Text {
-            base: base.unwrap_or_default(),
-            yours,
-            theirs,
-        },
-    ))
+    Ok(MergeInput::Text {
+        base: base.unwrap_or_default(),
+        yours,
+        theirs,
+    })
 }
 
 pub struct MergeView {
