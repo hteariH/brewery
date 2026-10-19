@@ -94,23 +94,36 @@ class CursorManager(
     /** True from the moment we turned autocommit off until we turned it back on. */
     private var implicitOpen = false
     @Volatile private var lastStreamActivity = 0L
-    private var userTx = false
+    @Volatile private var userTx = false
 
     init {
         session.onClose { closeAll() }
         session.onSweep(::anyExpired) { expireIdle(it) }
+        // Closing the session would roll the user's work back.
+        session.keepOpenWhile { userTx }
     }
 
     val openCount: Int get() = synchronized(cursors) { cursors.size }
 
     /**
-     * Runs [sql] and returns after the first result: an update count (no cursor) or the column list of a
-     * result set that stays open as a cursor. A driver [java.sql.SQLException] propagates after the statement
-     * has been released, so the caller can classify it.
+     * True while the user has a transaction open on this session (BEGIN ... COMMIT / ROLLBACK). PostgreSQL's own
+     * transaction state decides on pgjdbc; other drivers are judged by the keywords of the statements run, so a
+     * transaction ended by other means (MySQL's implicit commit before DDL, SET autocommit) is not seen. Safe from any
+     * thread.
      */
-    fun execute(connection: Connection, sql: String): DbExecuteResult {
+    val inUserTransaction: Boolean get() = userTx
+
+    /**
+     * Runs [sql] and returns after the first result: an update count (no cursor) or the column list of a
+     * result set that stays open as a cursor, with [DbExecuteResult.inTransaction] as of afterwards. A driver
+     * [java.sql.SQLException] propagates after the statement has been released, so the caller can classify it.
+     */
+    fun execute(connection: Connection, sql: String): DbExecuteResult =
+        executeStatement(connection, sql).copy(inTransaction = userTx)
+
+    private fun executeStatement(connection: Connection, sql: String): DbExecuteResult {
         expireUnfinishedIfNeeded(connection)
-        if (!managesTransactions(connection)) return runStatement(connection, sql, ownsTx = false)
+        if (!managesTransactions(connection)) return runTracking(connection, sql, SqlText.classify(sql))
         val kind = SqlText.classify(sql)
         serverInTransaction(connection)?.let { userTx = it }
         if (userTx) return runTracking(connection, sql, kind)

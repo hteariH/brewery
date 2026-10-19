@@ -52,7 +52,8 @@ data class ColumnInfo(val name: String, val type: String)
 /**
  * [cursorId] is null for statements that produce no result set; then [updateCount] is set instead. Only the first
  * result of the SQL is returned: [moreResults] says that an update count was followed by further results, which were
- * dropped (for a result set the last page says so, see [DbFetchResult.moreResults]).
+ * dropped (for a result set the last page says so, see [DbFetchResult.moreResults]). [inTransaction] says the
+ * session has a transaction of the user's open afterwards (BEGIN without COMMIT or ROLLBACK yet).
  */
 data class DbExecuteResult(
     val cursorId: String?,
@@ -60,6 +61,7 @@ data class DbExecuteResult(
     val updateCount: Long?,
     val elapsedMs: Long,
     val moreResults: Boolean = false,
+    val inTransaction: Boolean = false,
 )
 
 /**

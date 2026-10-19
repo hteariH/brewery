@@ -37,6 +37,10 @@ actions!(
         RunAllStatements,
         /// Cancels the statement running in the query console.
         CancelStatement,
+        /// Commits the transaction open in the query console.
+        CommitTransaction,
+        /// Rolls back the transaction open in the query console.
+        RollbackTransaction,
         /// Copies the selected result cells: one value, or a range as tab-separated rows.
         CopyResultCell,
         /// Selects the result cell above.

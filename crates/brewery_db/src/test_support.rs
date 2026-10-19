@@ -37,6 +37,8 @@ pub struct FakeState {
     pub held: RefCell<Vec<(String, oneshot::Sender<()>)>>,
     /// Replaces the `db/schema` answer of `schema()`.
     pub schema_reply: RefCell<Option<Value>>,
+    /// Between a `begin` and a `commit` or `rollback`.
+    pub in_transaction: Cell<bool>,
 }
 
 /// The `db/schema` snapshot of the fake: `public` with two tables and a view, `billing` with one
@@ -205,6 +207,14 @@ impl FakeState {
             }
             "db/execute" => {
                 let sql = params["sql"].as_str().unwrap_or_default().to_lowercase();
+                let tx_end = sql.starts_with("commit") || sql.starts_with("rollback");
+                if sql.starts_with("begin") || tx_end {
+                    self.in_transaction.set(!tx_end);
+                    return Ok(json!({
+                        "cursorId": null, "columns": [], "updateCount": 0, "elapsedMs": 1,
+                        "inTransaction": !tx_end
+                    }));
+                }
                 if sql.starts_with("update")
                     || sql.starts_with("insert")
                     || sql.starts_with("delete")
@@ -212,7 +222,8 @@ impl FakeState {
                     // `/*more*/` stands for SQL the daemon found further results in.
                     return Ok(json!({
                         "cursorId": null, "columns": [], "updateCount": 3, "elapsedMs": 4,
-                        "moreResults": sql.contains("/*more*/")
+                        "moreResults": sql.contains("/*more*/"),
+                        "inTransaction": self.in_transaction.get()
                     }));
                 }
                 if sql.starts_with("fail") {
@@ -224,7 +235,8 @@ impl FakeState {
                     "cursorId": format!("k{cursor}"),
                     "columns": [{ "name": "id", "type": "int4" }, { "name": "name", "type": "text" }],
                     "updateCount": null,
-                    "elapsedMs": 12
+                    "elapsedMs": 12,
+                    "inTransaction": self.in_transaction.get()
                 }))
             }
             "db/fetch" => {

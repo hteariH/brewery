@@ -109,10 +109,10 @@ class PostgresCursorTest {
 
     @Test
     fun `BEGIN INSERT ROLLBACK really rolls back`() {
-        service.execute(id, "CREATE TABLE IF NOT EXISTS tx_t (a int)")
-        service.execute(id, "BEGIN")
-        service.execute(id, "INSERT INTO tx_t VALUES (1)")
-        service.execute(id, "ROLLBACK")
+        assertEquals(false, service.execute(id, "CREATE TABLE IF NOT EXISTS tx_t (a int)").inTransaction)
+        assertEquals(true, service.execute(id, "BEGIN").inTransaction)
+        assertEquals(true, service.execute(id, "INSERT INTO tx_t VALUES (1)").inTransaction)
+        assertEquals(false, service.execute(id, "ROLLBACK").inTransaction)
         val count = service.fetch(service.execute(id, "SELECT count(*) FROM tx_t").cursorId!!, 0, 1)
         assertEquals(listOf(listOf("0")), count.rows)
     }

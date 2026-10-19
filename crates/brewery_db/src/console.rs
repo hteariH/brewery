@@ -9,7 +9,9 @@ use crate::result_grid::{MORE_RESULTS_DROPPED, ResultGrid};
 use crate::schema_cache::SchemaCache;
 use crate::sql_context::is_schema_change;
 use crate::statements::{split_statements, statements_to_run};
-use crate::{CancelStatement, RunAllStatements, RunStatement};
+use crate::{
+    CancelStatement, CommitTransaction, RollbackTransaction, RunAllStatements, RunStatement,
+};
 use anyhow::Context as _;
 use brewery_daemon_client::{
     CancelParams, ConnectionInfo, ExecuteParams, ExecuteResult, ProjectDaemon, daemon_error_message,
@@ -81,6 +83,8 @@ pub struct QueryConsole {
     awaiting_page: Option<usize>,
     /// `Some` while a statement runs; `true` once cancelling was asked for.
     running: Option<bool>,
+    /// The daemon said after the last statement that the session has a transaction open.
+    in_transaction: bool,
     /// Numbers the runs, so the late answer of an abandoned statement is not shown.
     run_id: u64,
     /// Gives up waiting for a cancelled statement that keeps running.
@@ -197,6 +201,7 @@ impl QueryConsole {
             run_len: 0,
             awaiting_page: None,
             running: None,
+            in_transaction: false,
             run_id: 0,
             cancel_timeout: None,
             schema_cache,
@@ -319,6 +324,24 @@ impl QueryConsole {
         if index < self.results.len() {
             self.active_result = index;
             cx.notify();
+        }
+    }
+
+    /// The session has a transaction of the user's open (after `BEGIN`): closing the connection
+    /// would roll it back.
+    pub fn in_transaction(&self) -> bool {
+        self.in_transaction
+    }
+
+    pub fn commit(&mut self, _: &CommitTransaction, _: &mut Window, cx: &mut Context<Self>) {
+        if self.in_transaction {
+            self.run_sql("COMMIT".to_string(), cx);
+        }
+    }
+
+    pub fn rollback(&mut self, _: &RollbackTransaction, _: &mut Window, cx: &mut Context<Self>) {
+        if self.in_transaction {
+            self.run_sql("ROLLBACK".to_string(), cx);
         }
     }
 
@@ -458,7 +481,8 @@ impl QueryConsole {
         }
         self.running = None;
         self.cancel_timeout = None;
-        if result.is_ok() {
+        if let Ok(result) = &result {
+            self.in_transaction = result.in_transaction;
             self.schema_cache
                 .update(cx, |cache, _| cache.retry_after_failure());
         }
@@ -675,6 +699,39 @@ impl QueryConsole {
                     ),
             )
             .child(div().flex_1())
+            .when(self.in_transaction, |toolbar| {
+                toolbar
+                    .child(
+                        Label::new("In transaction")
+                            .size(LabelSize::Small)
+                            .color(Color::Warning),
+                    )
+                    .child(
+                        Button::new("console-commit", "Commit")
+                            .label_size(LabelSize::Small)
+                            .disabled(running)
+                            .tooltip(Tooltip::for_action_title(
+                                "Commit Transaction",
+                                &CommitTransaction,
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.commit(&CommitTransaction, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("console-rollback", "Rollback")
+                            .label_size(LabelSize::Small)
+                            .disabled(running)
+                            .tooltip(Tooltip::for_action_title(
+                                "Roll Back Transaction",
+                                &RollbackTransaction,
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.rollback(&RollbackTransaction, window, cx)
+                            })),
+                    )
+                    .child(div().w_2())
+            })
             .child(
                 h_flex()
                     .gap_1()
@@ -762,6 +819,8 @@ impl Render for QueryConsole {
             .bg(colors.editor_background)
             .on_action(cx.listener(Self::run))
             .on_action(cx.listener(Self::run_all))
+            .on_action(cx.listener(Self::commit))
+            .on_action(cx.listener(Self::rollback))
             .on_action(cx.listener(Self::cancel))
             .child(toolbar)
             .child(div().flex_1().min_h(px(60.)).child(self.editor.clone()))

@@ -103,6 +103,9 @@ New Query Console opens a SQL editor for the selected data source. Ctrl+Enter
 runs the statement under the cursor, or every statement of the selection one after
 another, and Ctrl+F2 stops it; Run All in the console toolbar runs the whole console.
 Each statement of a run gets a result tab, and a failing statement ends the run.
+After `BEGIN` the console toolbar says "In transaction" and offers Commit and Rollback;
+an idle connection with an open transaction is not closed, and saving the data source
+again (which reconnects and rolls it back) asks for a second Save first.
 Results appear in a grid under the editor, and more rows load as you scroll.
 Click a cell or move with the arrow keys; Shift+click, Shift+arrows or a drag
 select a range, and Ctrl+C copies it as tab-separated rows.

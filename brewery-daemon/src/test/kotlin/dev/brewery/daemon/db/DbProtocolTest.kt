@@ -202,6 +202,7 @@ class DbProtocolTest {
         assertEquals(null, exec.updateCount)
         assertEquals(12L, exec.elapsedMs)
         assertEquals(false, exec.moreResults)
+        assertEquals(false, exec.inTransaction)
         val fetch = gson.fromJson(fixture("db-fetch.result.json"), DbFetchResult::class.java)
         assertEquals(listOf("2", null), fetch.rows[1])
         assertEquals(false, fetch.done)

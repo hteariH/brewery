@@ -6,5 +6,6 @@
   ],
   "updateCount": null,
   "elapsedMs": 12,
-  "moreResults": false
+  "moreResults": false,
+  "inTransaction": false
 }

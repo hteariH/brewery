@@ -1,8 +1,8 @@
 use super::*;
-use crate::NewQueryConsole;
 use crate::result_grid::{GridSelection, RESULT_EXPIRED};
 use crate::test_support::*;
 use crate::tree::RowKey;
+use crate::{CommitTransaction, NewQueryConsole, RollbackTransaction};
 use brewery_daemon_client::{DB_NOT_FOUND, DB_QUERY_FAILED};
 use editor::SelectionEffects;
 use gpui::{
@@ -1268,4 +1268,96 @@ async fn results_the_daemon_dropped_are_mentioned(cx: &mut TestAppContext) {
     console.console.read_with(cx, |console, cx| {
         assert_eq!(console.status_line(cx).1, Color::Warning)
     });
+}
+
+#[gpui::test]
+async fn the_console_shows_an_open_transaction_until_commit_or_rollback(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let in_transaction = |console: &Console, cx: &mut VisualTestContext| {
+        console
+            .console
+            .read_with(cx, |console, _| console.in_transaction())
+    };
+    console.type_sql("begin", cx);
+    console.run(cx);
+    assert!(in_transaction(&console, cx));
+    console.type_sql("update owners set name = 'x'", cx);
+    console.run(cx);
+    assert!(in_transaction(&console, cx), "still open after a statement");
+
+    console.console.update_in(cx, |console, window, cx| {
+        console.commit(&CommitTransaction, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        executed_sql(&console).last().map(String::as_str),
+        Some("COMMIT")
+    );
+    assert!(!in_transaction(&console, cx));
+
+    // Without a transaction, Commit and Rollback do nothing.
+    console.console.update_in(cx, |console, window, cx| {
+        console.rollback(&RollbackTransaction, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(executed_sql(&console).len(), 3);
+
+    console.type_sql("begin", cx);
+    console.run(cx);
+    console.console.update_in(cx, |console, window, cx| {
+        console.rollback(&RollbackTransaction, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        executed_sql(&console).last().map(String::as_str),
+        Some("ROLLBACK")
+    );
+    assert!(!in_transaction(&console, cx));
+}
+
+#[gpui::test]
+async fn saving_a_data_source_with_an_open_transaction_warns_first(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("begin", cx);
+    console.run(cx);
+    let fixture = &console.fixture;
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select(Some(RowKey::data_source("c1")), cx);
+        panel.edit_selected(window, cx)
+    });
+    cx.run_until_parked();
+    let modal = fixture.modal(cx).expect("the dialog should be open");
+    modal.update(cx, |modal, cx| modal.save(cx));
+    cx.run_until_parked();
+    assert!(
+        fixture.calls_of("db/connections/save").is_empty(),
+        "saving reconnects, which would roll the transaction back"
+    );
+    let warning = modal.read_with(cx, |modal, _| modal.rollback_warning().cloned());
+    assert!(
+        warning.is_some_and(|warning| warning.contains("rolls it back")),
+        "the dialog says why"
+    );
+
+    modal.update(cx, |modal, cx| modal.save(cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.calls_of("db/connections/save").len(), 1);
+    assert!(fixture.modal(cx).is_none());
+}
+
+#[gpui::test]
+async fn saving_another_data_source_does_not_warn(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("begin", cx);
+    console.run(cx);
+    let fixture = &console.fixture;
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select(Some(RowKey::data_source("c2")), cx);
+        panel.edit_selected(window, cx)
+    });
+    cx.run_until_parked();
+    let modal = fixture.modal(cx).expect("the dialog should be open");
+    modal.update(cx, |modal, cx| modal.save(cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.calls_of("db/connections/save").len(), 1);
 }

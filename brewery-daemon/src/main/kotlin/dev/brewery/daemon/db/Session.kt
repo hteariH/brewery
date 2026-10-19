@@ -42,6 +42,7 @@ class Session(
     private val busy = AtomicInteger()
     private val closeListeners = CopyOnWriteArrayList<() -> Unit>()
     private val sweepHooks = CopyOnWriteArrayList<Pair<() -> Boolean, (Connection) -> Unit>>()
+    private val keepOpenConditions = CopyOnWriteArrayList<() -> Boolean>()
 
     @Volatile private var connection: Connection? = null
     @Volatile private var sessionThread: Thread? = null
@@ -170,10 +171,19 @@ class Session(
         closeListeners.add(listener)
     }
 
-    /** Closes the session if nothing is running and it has been unused for [timeoutMs]; true if it was closed. */
+    /** While [condition] holds (cheap, any thread), [closeIfIdle] leaves the session open: an open transaction. */
+    fun keepOpenWhile(condition: () -> Boolean) {
+        keepOpenConditions.add(condition)
+    }
+
+    /**
+     * Closes the session if nothing is running, nothing keeps it open (see [keepOpenWhile]) and it has been unused
+     * for [timeoutMs]; true if it was closed.
+     */
     fun closeIfIdle(timeoutMs: Long): Boolean {
         gate.withLock {
             if (closed || busy.get() > 0 || clock() - lastUsed < timeoutMs) return false
+            if (keepOpenConditions.any { runCatching(it).getOrDefault(false) }) return false
             closed = true
         }
         shutdown()

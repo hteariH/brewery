@@ -378,6 +378,10 @@ pub struct ExecuteResult {
     pub elapsed_ms: u64,
     #[serde(default)]
     pub more_results: bool,
+    /// The session has a transaction of the user's open afterwards (`BEGIN` without `COMMIT` or
+    /// `ROLLBACK` yet).
+    #[serde(default)]
+    pub in_transaction: bool,
 }
 
 /// Rows `[offset, offset + limit)` of a cursor. Cursors are forward-only: an offset behind what
