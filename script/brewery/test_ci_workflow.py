@@ -104,5 +104,36 @@ class PathsFilterTests(unittest.TestCase):
             self.assertFalse(filter_matches("bundle", path), path)
 
 
+@unittest.skipIf(yaml is None, "PyYAML is not installed")
+class LicenceTests(unittest.TestCase):
+    """cargo-about runs once per run, in the Licences job, and only on a cache miss (#49)."""
+
+    def test_licences_are_generated_only_in_the_licences_job(self):
+        generating = {
+            job_id
+            for job_id, step in steps()
+            if "generate-licenses" in step.get("run", "") or "cargo-about" in str(step.get("with", {}).get("tool", ""))
+        }
+        self.assertEqual(generating, {"licenses"})
+
+    def test_generation_is_skipped_on_a_cache_hit(self):
+        job = load(WORKFLOW)["jobs"]["licenses"]
+        for step in job["steps"]:
+            if "generate-licenses" in step.get("run", "") or "cargo-about" in str(step.get("with", {}).get("tool", "")):
+                self.assertIn("steps.cache.outputs.cache-hit != 'true'", step.get("if", ""))
+
+    def test_build_jobs_take_the_licences_from_the_licences_job(self):
+        jobs = load(WORKFLOW)["jobs"]
+        for job_id in ["build-windows", "build-other"]:
+            self.assertIn("licenses", jobs[job_id]["needs"], job_id)
+            downloads = [
+                s for s in jobs[job_id]["steps"]
+                if s.get("uses", "").startswith("actions/download-artifact@")
+                and s["with"]["name"] == "rust-licenses"
+            ]
+            self.assertEqual(len(downloads), 1, job_id)
+            self.assertEqual(downloads[0]["with"]["path"], "assets", job_id)
+
+
 if __name__ == "__main__":
     unittest.main()
