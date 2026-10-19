@@ -67,5 +67,42 @@ class CacheWriteTests(unittest.TestCase):
             self.assertEqual(path, saved, job_id)
 
 
+def glob_regex(pattern):
+    """dorny/paths-filter (picomatch) globs, as far as brewery_ci.yml uses them."""
+    out = ""
+    for part in re.split(r"(\*\*/|\*\*|\*)", pattern):
+        out += {"**/": "(?:.*/)?", "**": ".*", "*": "[^/]*"}.get(part, re.escape(part))
+    return re.compile(out + r"\Z")
+
+
+def filter_matches(name, path):
+    changes = load(WORKFLOW)["jobs"]["changes"]
+    (step,) = [s for s in changes["steps"] if s.get("id") == "filter"]
+    patterns = yaml.safe_load(step["with"]["filters"])[name]
+    return any(glob_regex(p).match(path) for p in patterns)
+
+
+@unittest.skipIf(yaml is None, "PyYAML is not installed")
+class PathsFilterTests(unittest.TestCase):
+    def test_bundle_filter_covers_the_packaging_inputs(self):
+        # The package jobs (and package-winget) run only when "bundle" changed (#46).
+        for path in [
+            "packaging/nfpm.yaml",
+            "packaging/winget/Brewery.installer.yaml.in",
+            "packaging/aur/PKGBUILD.in",
+            "packaging/linux/postinstall.sh",
+            "crates/zed/resources/windows/brewery.iss",
+            "crates/zed/resources/brewery.desktop.in",
+            "crates/zed/resources/info/DocumentTypes.plist",
+            "script/brewery/bundle-linux",
+            "brewery-daemon/build.gradle.kts",
+        ]:
+            self.assertTrue(filter_matches("bundle", path), path)
+
+    def test_bundle_filter_skips_unrelated_paths(self):
+        for path in ["crates/editor/src/editor.rs", "docs/src/README.md", "packaging"]:
+            self.assertFalse(filter_matches("bundle", path), path)
+
+
 if __name__ == "__main__":
     unittest.main()

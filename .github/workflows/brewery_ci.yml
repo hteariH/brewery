@@ -94,9 +94,13 @@ jobs:
             daemon:
               - 'brewery-daemon/**'
               - '.github/workflows/brewery_ci.yml'
+            # Everything the bundle and packaging scripts read: the winget/AUR/nfpm templates, the
+            # Inno script, and the icons, desktop file and Info.plist parts of crates/zed/resources.
             bundle:
               - 'script/brewery/**'
               - 'brewery-daemon/**'
+              - 'packaging/**'
+              - 'crates/zed/resources/**'
               - '.github/workflows/brewery_ci.yml'
       - id: plan
         shell: bash
