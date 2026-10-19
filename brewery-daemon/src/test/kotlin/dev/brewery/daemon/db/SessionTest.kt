@@ -196,9 +196,15 @@ class SessionTest {
         val caller = Thread { runCatching { slow.run("x") { 1 } } }
         caller.start()
         assertTrue(opening.await(10, TimeUnit.SECONDS))
+        val session = slow.session("x")
         val closer = Thread { slow.close("x") }
         closer.start()
-        Thread.sleep(200)
+        // The close must win the race against the open: release the opener only once the session is closed.
+        val deadline = System.nanoTime() + 10_000_000_000L
+        while (!session.closed) {
+            check(System.nanoTime() < deadline) { "the session never closed" }
+            Thread.sleep(1)
+        }
         proceed.countDown()
         caller.join(10_000)
         closer.join(10_000)

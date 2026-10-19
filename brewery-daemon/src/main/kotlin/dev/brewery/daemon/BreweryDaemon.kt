@@ -48,6 +48,7 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
@@ -65,6 +66,8 @@ class BreweryDaemon(
     private val secretStore: SecretStore = KeyringSecretStore(),
     // The database service of a project root; tests keep a handle on it.
     private val dbServiceFactory: (Path) -> DbService = { DbService(it, secretStore) },
+    // Runs the debounced notifications; tests substitute a manual clock.
+    private val notifier: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor(daemonThreads("brewery-notify")),
     // Last so call sites can pass the reader as a trailing lambda.
     private val modelReader: ((Path) -> ProjectModel)? = null,
 ) : BreweryServer, AutoCloseable {
@@ -84,7 +87,6 @@ class BreweryDaemon(
     private val importer = Executors.newSingleThreadExecutor(daemonThreads("brewery-import"))
     // Scanning parses every source file, so it gets its own thread rather than delaying the next import.
     private val scanner = Executors.newSingleThreadExecutor(daemonThreads("brewery-spring-scan"))
-    private val notifier = Executors.newSingleThreadScheduledExecutor(daemonThreads("brewery-notify"))
     // Database calls block on keyrings, drivers and the network, so they must not run on the JSON-RPC reader thread.
     private val dbExecutor = Executors.newCachedThreadPool(daemonThreads("brewery-db"))
 

@@ -1,5 +1,7 @@
 package dev.brewery.daemon.springconfig
 
+import dev.brewery.daemon.InlineExecutor
+import dev.brewery.daemon.ManualScheduler
 import org.eclipse.lsp4j.ClientCapabilities
 import org.eclipse.lsp4j.CompletionItem
 import org.eclipse.lsp4j.CompletionList
@@ -78,12 +80,21 @@ class SpringConfigServerTest {
         gate: CompletableFuture<Unit>? = null,
         capabilities: ClientCapabilities = ClientCapabilities(),
         load: (Path, Resolution) -> SpringMetadata = { _, _ -> gate?.get(); metadata },
+        // A manual debounce clock; metadata then loads synchronously on the server's message thread.
+        clock: ManualScheduler? = null,
     ): LanguageServer {
-        val server = SpringConfigServer(
-            loadMetadata = { root, resolution -> loads.incrementAndGet(); load(root, resolution) },
-            debounceMs = 50,
-            reloadDebounceMs = 150,
-        )
+        val loadMetadata = { root: Path, resolution: Resolution -> loads.incrementAndGet(); load(root, resolution) }
+        val server = if (clock == null) {
+            SpringConfigServer(loadMetadata = loadMetadata, debounceMs = 50, reloadDebounceMs = 150)
+        } else {
+            SpringConfigServer(
+                loadMetadata = loadMetadata,
+                debounceMs = 50,
+                reloadDebounceMs = 150,
+                loader = InlineExecutor(),
+                publisher = clock,
+            )
+        }
         val c2s = PipedOutputStream()
         val s2c = PipedOutputStream()
         val serverIn = PipedInputStream(c2s)
@@ -370,10 +381,10 @@ class SpringConfigServerTest {
         assertEquals("true", complete(server, props, 0, 20).edit("true").newText)
     }
 
-    private fun awaitLoads(n: Int) {
-        val deadline = System.currentTimeMillis() + 10_000
-        while (loads.get() < n && System.currentTimeMillis() < deadline) Thread.sleep(20)
-        assertEquals(n, loads.get())
+
+    /** The server handles messages in order, so once a request is answered every earlier notification is done. */
+    private fun sync(server: LanguageServer) {
+        complete(server, uri("sync.properties"), 0, 0)
     }
 
     private fun changed(server: LanguageServer, vararg names: String) =
@@ -383,18 +394,23 @@ class SpringConfigServerTest {
 
     @Test
     fun `the classpath is resolved on the first Spring config file, not on initialized`() {
-        val server = start()
-        Thread.sleep(300)
+        val clock = ManualScheduler()
+        val server = start(clock = clock)
+        sync(server)
+        clock.advance(10_000)
         assertEquals(0, loads.get())
         // Build changes before any Spring file is open do not start anything either.
         changed(server, "build.gradle.kts")
         open(server, "config.properties", "a=1\n")
-        Thread.sleep(400)
+        sync(server)
+        clock.advance(10_000)
         assertEquals(0, loads.get())
         open(server, "application.yml", "server:\n  port: 1\n")
-        awaitLoads(1)
+        sync(server)
+        assertEquals(1, loads.get())
         open(server, "application-dev.properties", "server.port=1\n")
-        Thread.sleep(300)
+        sync(server)
+        clock.advance(10_000)
         assertEquals(1, loads.get())
     }
 
@@ -406,23 +422,33 @@ class SpringConfigServerTest {
         )
         val before = SpringMetadata.fromClasspath(listOf(jar))
         val after = SpringMetadata.fromClasspath(listOf(jar, bogus))
-        val server = start(load = { _, _ -> if (loads.get() == 1) before else after })
+        val clock = ManualScheduler()
+        val server = start(load = { _, _ -> if (loads.get() == 1) before else after }, clock = clock)
         val u = open(server, "application.properties", "bogus.key=1\n")
+        sync(server)
+        clock.advance(50)
         assertEquals(1, nextDiagnostics(u).size)
         changed(server, "src/main/java/A.java")
         changed(server, "build.gradle.kts", "settings.gradle")
         changed(server, "gradle/libs.versions.toml")
-        // The first load may publish twice (open and load completion); wait for the reloaded result.
+        sync(server)
+        clock.advance(149)
+        assertEquals(1, loads.get())
+        clock.advance(1)
+        assertEquals(2, loads.get())
+        // The first load published twice (open and load completion); wait for the reloaded result.
         while (nextDiagnostics(u).isNotEmpty()) continue
-        awaitLoads(2)
-        Thread.sleep(400)
+        clock.advance(10_000)
         assertEquals(2, loads.get())
 
         // A save of a build file the client routed to this server is the fallback when nothing is watched.
         server.textDocumentService.didSave(DidSaveTextDocumentParams(TextDocumentIdentifier(uri("pom.xml"))))
-        awaitLoads(3)
+        sync(server)
+        clock.advance(150)
+        assertEquals(3, loads.get())
         server.textDocumentService.didSave(DidSaveTextDocumentParams(TextDocumentIdentifier(uri("application.yml"))))
-        Thread.sleep(400)
+        sync(server)
+        clock.advance(10_000)
         assertEquals(3, loads.get())
     }
 

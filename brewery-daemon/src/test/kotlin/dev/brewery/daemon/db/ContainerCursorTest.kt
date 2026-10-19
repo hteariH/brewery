@@ -78,13 +78,12 @@ class PostgresCursorTest {
 
     @Test
     fun `a huge result is streamed not buffered`() {
-        val started = System.nanoTime()
-        val r = service.execute(id, "SELECT generate_series(1, 50000000) AS g")
-        val elapsedMs = (System.nanoTime() - started) / 1_000_000
-        assertTrue(elapsedMs < 5_000, "execute took $elapsedMs ms: the result set was buffered")
+        // Row 100000 divides by zero: a buffered result would fail in execute, a streamed one only when a
+        // fetch reaches that row.
+        val r = service.execute(id, "SELECT g, 1 / (g - 100000) AS boom FROM generate_series(1, 200000) g")
         assertEquals(false, service.sessions.run(id) { it.autoCommit })
         val page = service.fetch(r.cursorId!!, 0, 3)
-        assertEquals(listOf(listOf("1"), listOf("2"), listOf("3")), page.rows)
+        assertEquals(listOf("1", "2", "3"), page.rows.map { it[0] })
         assertEquals(false, page.done)
         service.closeCursor(r.cursorId!!)
         assertEquals(true, service.sessions.run(id) { it.autoCommit })

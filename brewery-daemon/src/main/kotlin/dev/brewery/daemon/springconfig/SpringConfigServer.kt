@@ -49,8 +49,10 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -94,6 +96,14 @@ class SpringConfigServer(
     private val debounceMs: Long = 300,
     private val reloadDebounceMs: Long = 1000,
     private val onExit: () -> Unit = {},
+    // Resolution can take minutes, so it has its own thread; diagnostics are computed and sent on a single other
+    // thread, which keeps them in order and lets them flow while the classpath is being resolved. Both are
+    // injected so tests can drive the debounce clock and see loads synchronously instead of sleeping.
+    private val loader: ExecutorService =
+        Executors.newSingleThreadExecutor { r -> Thread(r, "spring-config-classpath").apply { isDaemon = true } },
+    private val publisher: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "spring-config-diagnostics").apply { isDaemon = true }
+    },
 ) : LanguageServer, LanguageClientAware {
     private var client: LanguageClient? = null
     private var root: Path? = null
@@ -109,12 +119,6 @@ class SpringConfigServer(
     private val loadStarted = AtomicBoolean(false)
     private val pendingReload = AtomicReference<ScheduledFuture<*>?>()
 
-    // Resolution can take minutes, so it has its own thread; diagnostics are computed and sent on a single other
-    // thread, which keeps them in order and lets them flow while the classpath is being resolved.
-    private val loader = Executors.newSingleThreadExecutor { r -> Thread(r, "spring-config-classpath").apply { isDaemon = true } }
-    private val publisher = Executors.newSingleThreadScheduledExecutor { r ->
-        Thread(r, "spring-config-diagnostics").apply { isDaemon = true }
-    }
     private val resolution = Resolution(warn = ::logWarning)
 
     override fun connect(client: LanguageClient) {

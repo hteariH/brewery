@@ -156,8 +156,8 @@ class ProjectModelTest {
         daemon.close()
     }
 
-    private fun slowDaemon(release: CountDownLatch, debounce: Long = 500) =
-        BreweryDaemon(debounce) { dir ->
+    private fun slowDaemon(release: CountDownLatch) =
+        BreweryDaemon { dir ->
             release.await(10, TimeUnit.SECONDS)
             ProjectModel(BuildTool.none, dir.toString(), emptyList())
         }
@@ -201,25 +201,36 @@ class ProjectModelTest {
         daemon.close()
     }
 
+    /** A daemon whose debounce runs on [clock], with a client that counts projectChanged. */
+    private fun debouncedDaemon(clock: ManualScheduler, count: AtomicInteger, debounce: Long = 200) =
+        BreweryDaemon(debounce, notifier = clock) { dir -> ProjectModel(BuildTool.none, dir.toString(), emptyList()) }
+            .also {
+                it.connect(object : BreweryClient {
+                    override fun springChanged(params: SpringChanged) {}
+                    override fun projectChanged(params: ProjectChanged) {
+                        count.incrementAndGet()
+                    }
+                })
+            }
+
     @Test
     fun `rapid change events coalesce into one projectChanged`() {
         val dir = Files.createTempDirectory("brewery-debounce")
         val count = AtomicInteger()
-        val daemon = slowDaemon(CountDownLatch(0), debounce = 200)
-        daemon.connect(object : BreweryClient {
-            override fun springChanged(params: SpringChanged) {}
-            override fun projectChanged(params: ProjectChanged) {
-                count.incrementAndGet()
-            }
-        })
+        val clock = ManualScheduler()
+        val daemon = debouncedDaemon(clock, count)
         daemon.openProject(OpenProjectParams(dir.toString())).get(10, TimeUnit.SECONDS)
         val normalized = dir.toAbsolutePath().normalize()
         daemon.onBuildFileChanged(normalized)
         daemon.onBuildFileChanged(normalized)
-        Thread.sleep(800)
+        clock.advance(199)
+        assertEquals(0, count.get())
+        clock.advance(1)
+        assertEquals(1, count.get())
+        clock.advance(10_000)
         assertEquals(1, count.get())
         daemon.onBuildFileChanged(normalized)
-        Thread.sleep(800)
+        clock.advance(200)
         assertEquals(2, count.get())
         daemon.close()
     }
@@ -228,23 +239,19 @@ class ProjectModelTest {
     fun `notification waits for the last event of a burst`() {
         val dir = Files.createTempDirectory("brewery-trailing")
         val count = AtomicInteger()
-        val daemon = slowDaemon(CountDownLatch(0), debounce = 1500)
-        daemon.connect(object : BreweryClient {
-            override fun springChanged(params: SpringChanged) {}
-            override fun projectChanged(params: ProjectChanged) {
-                count.incrementAndGet()
-            }
-        })
+        val clock = ManualScheduler()
+        val daemon = debouncedDaemon(clock, count)
         daemon.openProject(OpenProjectParams(dir.toString())).get(10, TimeUnit.SECONDS)
         val normalized = dir.toAbsolutePath().normalize()
         repeat(3) {
             daemon.onBuildFileChanged(normalized)
-            Thread.sleep(250)
+            clock.advance(150)
         }
-        // 750 ms after the first event, but only 250 ms after the last: a leading-edge timer would have fired.
-        // The debounce is generous so a slow CI runner cannot stretch the 250 ms gaps past it.
+        // 450 ms after the first event, but only 150 ms after the last: a leading-edge timer would have fired.
         assertEquals(0, count.get())
-        Thread.sleep(2500)
+        clock.advance(49)
+        assertEquals(0, count.get())
+        clock.advance(1)
         assertEquals(1, count.get())
         daemon.close()
     }
@@ -254,17 +261,12 @@ class ProjectModelTest {
         val first = Files.createTempDirectory("brewery-old")
         val second = Files.createTempDirectory("brewery-new")
         val count = AtomicInteger()
-        val daemon = slowDaemon(CountDownLatch(0), debounce = 1500)
-        daemon.connect(object : BreweryClient {
-            override fun springChanged(params: SpringChanged) {}
-            override fun projectChanged(params: ProjectChanged) {
-                count.incrementAndGet()
-            }
-        })
+        val clock = ManualScheduler()
+        val daemon = debouncedDaemon(clock, count)
         daemon.openProject(OpenProjectParams(first.toString())).get(10, TimeUnit.SECONDS)
         daemon.onBuildFileChanged(first.toAbsolutePath().normalize())
         daemon.openProject(OpenProjectParams(second.toString())).get(10, TimeUnit.SECONDS)
-        Thread.sleep(2500)
+        clock.advance(10_000)
         assertEquals(0, count.get())
         daemon.close()
     }
