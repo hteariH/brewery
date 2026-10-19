@@ -108,6 +108,7 @@ downloads. One target is laid out in `target/bundle/<os>-<arch>/`:
     jre/                          jlinked Temurin 21 for the daemon and jdtls (keeps legal/)
     jdtls/                        Eclipse JDT LS + brewery-jdtls (sh) or brewery-jdtls.cmd
       tools/                      lombok.jar  java-debug.jar  java-lsp-proxy[.exe]
+                                  gradle-lsp-bridge[.exe]  gradle-ls/<version>/lib/
     extensions/java/              the Java extension, seeded into installed/ when absent
     brewery-daemon/brewery-daemon.jar
     licenses/                     one directory per component + README.txt index
@@ -140,9 +141,12 @@ the Gradle check runs in a separate online step) and macOS (allowed to fail), an
 
 Bumping a pin in `script/brewery/bundle-deps.toml`: change `version` and `url`,
 download the file, `sha256sum` it, compare with the checksum the publisher lists
-(Adoptium API, Eclipse `.sha256`, GitHub release asset digest) and set `sha256`. Keep
-jdtls, Lombok, java-debug and java-lsp-proxy at what the pinned Java extension version
-downloads itself (its `src/jdtls.rs`, `debugger.rs`, `proxy.rs`). If a licence changes,
+(Adoptium API, Eclipse `.sha256`, GitHub release asset digest; the Marketplace lists
+none for the Gradle language server VSIX, so compare two downloads) and set `sha256`.
+Keep jdtls, Lombok, java-debug, java-lsp-proxy, gradle-lsp-bridge and the Gradle
+language server at what the pinned Java extension version downloads itself (its
+`src/jdtls.rs`, `debugger.rs`, `proxy.rs`, `gradle_bridge.rs`, `gradle_ls.rs`; the
+Gradle language server's `dest` names its version). If a licence changes,
 update the matching file in `script/brewery/licenses/` (the upstream LICENSE at the new
 tag). The JDK entry also names its GPLv2 corresponding source (`source_code`,
 `source_tag`), which ends up in `licenses/jre/SOURCE.txt`; the EPL components (jdtls,
@@ -199,10 +203,18 @@ names (Dev Drive/ReFS, `fsutil 8dot3name`) and a spaced install path, Brewery se
   every Gradle synchronization fail with "The specified initialization script ... does
   not exist". The launcher keeps a stamp of the jdtls it last ran in
   `<workspace>/.metadata/brewery-jdtls.stamp`.
-- The Gradle language server is not bundled: editing Gradle build files downloads it
-  on first use. With `jdk_auto_download = false` it cannot fall back to an
-  auto-downloaded JDK, so on a machine without a JDK set
-  `lsp.gradle-language-server.settings.java_home` (release checklist item).
+- Gradle build files work offline too: the default
+  `lsp.gradle-language-server.settings.gradle_bridge_path` is the bundled
+  gradle-lsp-bridge, and the bundled Gradle language server (vscode-gradle's `lib/`)
+  is copied in the background at startup into the extension's work dir
+  (`<extensions>/work/java/gradle-ls/<version>/`), where the extension looks before it
+  downloads; the extension has no setting for that path. A copy already there is kept;
+  a version dir without `lib/` (a download that failed) is replaced. Both follow the
+  same installed-version check as `lsp.jdtls`. The language server itself runs on
+  `JAVA_HOME` or `java` on `PATH`, not on the bundled JRE (it would also become the
+  JDK Gradle builds with); with `jdk_auto_download = false` a machine without a JDK
+  needs `lsp.gradle-language-server.settings.java_home` (release checklist item).
+  `smoke_bundle.py` starts it the extension's way, on the bundled JRE, offline.
 - Without `java.configuration.runtimes`, run/debug through java-debug may use jdtls's
   default VM, which can be the bundled jlink JRE (release checklist item).
 

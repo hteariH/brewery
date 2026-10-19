@@ -16,15 +16,16 @@
 #     license_file    file next to this one (upstream LICENSE at the pinned tag)
 #     license_member  file inside the bundled jar
 #     license_dir     directory inside the bundle (the jlinked JRE's legal/java.base)
+#     license_members files inside the downloaded archive (licence and notices)
 #
 # Every SHA-256 below was computed from a download on 2026-10-14 and matches
 # the checksum the publisher lists (Adoptium API, Eclipse .sha256 file, GitHub
-# release asset digest). Bumping a pin: change version/url, download the file,
+# release asset digest; the Gradle LS VSIX has none, see its entry). Bumping a pin: change version/url, download the file,
 # `sha256sum` it, compare with the publisher's checksum, update sha256.
 #
 # The versions follow what the Java extension 6.8.28 (the version Brewery
 # auto-installs from the Zed gallery) downloads at runtime; see its src/
-# debugger.rs, jdtls.rs and proxy.rs at tag v6.8.28.
+# debugger.rs, jdtls.rs, proxy.rs, gradle_bridge.rs and gradle_ls.rs at tag v6.8.28.
 
 schema = 1
 targets = ["windows-x64", "linux-x64", "linux-aarch64", "macos-aarch64", "macos-x64"]
@@ -142,6 +143,60 @@ sha256 = "5326d5e594cf1f9d3794506e9e5c24e5b72c6f2e62e67952feb8226f6534319e"
 [artifacts.java-lsp-proxy.macos-x64]
 url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/java-lsp-proxy-darwin-x86_64.tar.gz"
 sha256 = "0484e94fbfb15b669bae4967c9ee9b7fdcc24c3b3de6cabcd4d1200036db1884"
+
+# gradle-lsp-bridge from the same release (src/gradle_bridge.rs downloads
+# releases/download/<extension tag>/gradle-lsp-bridge-<platform>): the process the
+# extension starts for build.gradle files; it runs the Gradle language server below.
+# Brewery points lsp.gradle-language-server.settings.gradle_bridge_path at it.
+[artifacts.gradle-lsp-bridge]
+version = "v6.8.28"
+license = "Apache-2.0"
+source = "https://github.com/zed-extensions/java/releases/tag/v6.8.28"
+license_file = "licenses/zed-extensions-java-LICENSE.txt"
+dest = "jdtls/tools/gradle-lsp-bridge{exe}"
+member = "gradle-lsp-bridge{exe}"
+executable = true
+
+[artifacts.gradle-lsp-bridge.windows-x64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/gradle-lsp-bridge-windows-x86_64.zip"
+sha256 = "20f5aab0d447cc5718f38b3a3284e8491deb0ebc3c101898a0ec271548bd626d"
+
+[artifacts.gradle-lsp-bridge.linux-x64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/gradle-lsp-bridge-linux-x86_64.tar.gz"
+sha256 = "c72bcf5a8e8226424d35c81dcd51574e688c3eae207c65dd9d77ee3842eb9e31"
+
+[artifacts.gradle-lsp-bridge.linux-aarch64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/gradle-lsp-bridge-linux-aarch64.tar.gz"
+sha256 = "9350e69b7a4736c86605a470935924058541d814579a1b6ef7ffda07daffd774"
+
+[artifacts.gradle-lsp-bridge.macos-aarch64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/gradle-lsp-bridge-darwin-aarch64.tar.gz"
+sha256 = "0a75341a268427933193132f21f7bccdae3cdcbd29a20dd7d48c0462d8fd2d6a"
+
+[artifacts.gradle-lsp-bridge.macos-x64]
+url = "https://github.com/zed-extensions/java/releases/download/v6.8.28/gradle-lsp-bridge-darwin-x86_64.tar.gz"
+sha256 = "240b5e7d0ac5ef38c3736ac13847b8625195617c74274b021e82dd733720473c"
+
+# The Gradle language server: lib/ of Microsoft's vscode-gradle VSIX at exactly the
+# version the extension pins (src/gradle_ls.rs SUPPORTED_VERSION, downloaded from
+# the same Marketplace URL). The extension has no setting for its path; Brewery
+# copies <version>/ into the extension's work dir (gradle-ls/<version>/), where the
+# extension looks first. The Marketplace lists no checksum: the SHA-256 is of two
+# downloads on 2026-10-20 that matched, with the same lib/ the extension installed.
+# The VSIX's NOTICE.txt covers the libraries in lib/.
+[artifacts.gradle-ls]
+version = "3.18.0"
+license = "MIT"
+source = "https://marketplace.visualstudio.com/items?itemName=vscjava.vscode-gradle"
+source_tag = "https://github.com/microsoft/vscode-gradle/tree/3.18.0"
+license_members = ["extension/LICENSE.md", "extension/NOTICE.txt"]
+dest = "jdtls/tools/gradle-ls/3.18.0/lib"
+root = "extension/lib"
+format = "zip"
+
+[artifacts.gradle-ls.any]
+url = "https://vscjava.gallery.vsassets.io/_apis/public/gallery/publisher/vscjava/extension/vscode-gradle/3.18.0/assetbyname/Microsoft.VisualStudio.Services.VSIXPackage"
+sha256 = "c9b31e8c824447d1c7561d73fad6b382f4345086bc78aa0905bec938b5352a9c"
 
 # The Java extension itself, exactly the archive Zed installs: the gallery
 # endpoint extension_host uses for a pinned version
