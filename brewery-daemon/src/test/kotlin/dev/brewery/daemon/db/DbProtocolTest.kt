@@ -175,6 +175,14 @@ class DbProtocolTest {
         assertEquals(-32012, errorCode(server.dbExecute(DbExecuteParams(saved.id, "SELEKT"))))
         assertEquals(-32013, errorCode(server.dbExecute(DbExecuteParams("missing", "SELECT 1"))))
         assertEquals(-32013, errorCode(server.dbCancel(DbCancelParams("missing"))))
+
+        // A console's own session: its cursor ends with it, the shared session goes on.
+        val own = await(server.dbExecute(DbExecuteParams(saved.id, "SELECT id FROM t", sessionId = "console-1")))
+        await(server.dbCancel(DbCancelParams(saved.id, sessionId = "console-1")))
+        await(server.dbSessionsClose(DbCloseSessionParams(saved.id, "console-1")))
+        assertEquals(-32013, errorCode(server.dbFetch(DbFetchParams(own.cursorId!!, 0, 1))))
+        val shared = await(server.dbExecute(DbExecuteParams(saved.id, "SELECT id FROM t")))
+        assertEquals(3, await(server.dbFetch(DbFetchParams(shared.cursorId!!, 0, 5))).rows.size)
     }
 
     @Test

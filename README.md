@@ -126,13 +126,10 @@ Credential Manager, Secret Service on Linux, macOS Keychain).
 
 Limits in this version:
 
-- Consoles on the same data source share one connection, so stopping a statement
-  in one console can stop a statement running in another, and running a
-  statement ends the unread results of the other consoles.
-- The results of a run share one connection: on PostgreSQL a statement that writes
-  ends the streaming of the reads before it, and on MariaDB/MySQL every statement
-  does; those results keep their first page ("Result expired — run again" when you
-  scroll further).
+- Each console has a connection of its own, but the results of one run share it:
+  on PostgreSQL a statement that writes ends the streaming of the reads before it,
+  and on MariaDB/MySQL every statement does; those results keep their first page
+  ("Result expired — run again" when you scroll further).
 - MySQL Connector/J is not bundled because of its GPL licence; MySQL servers are
   reached through MariaDB Connector/J.
 - On macOS the console keys are Cmd+Enter (run) and Cmd+F2 (stop).
@@ -140,8 +137,6 @@ Limits in this version:
   so when you save the data source.
 - PostgreSQL results stop loading more rows after about a minute without
   scrolling ("Result expired — run again").
-- Expanding the tree of a data source waits while a statement runs on it: each
-  data source has one connection.
 
 ## Git
 

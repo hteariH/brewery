@@ -253,7 +253,7 @@ impl FakeState {
                 Ok(json!({ "rows": rows, "done": end >= total }))
             }
             "db/schema" => Ok(self.schema_reply.borrow().clone().unwrap_or_else(schema)),
-            "db/cancel" | "db/close" => Ok(Value::Null),
+            "db/cancel" | "db/close" | "db/sessions/close" => Ok(Value::Null),
             other => anyhow::bail!("unexpected {other}"),
         }
     }

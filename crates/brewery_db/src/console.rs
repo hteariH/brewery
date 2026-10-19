@@ -14,7 +14,8 @@ use crate::{
 };
 use anyhow::Context as _;
 use brewery_daemon_client::{
-    CancelParams, ConnectionInfo, ExecuteParams, ExecuteResult, ProjectDaemon, daemon_error_message,
+    CancelParams, CloseSessionParams, ConnectionInfo, ExecuteParams, ExecuteResult, ProjectDaemon,
+    daemon_error_message,
 };
 use editor::actions::ShowCompletions;
 use editor::{Editor, MultiBufferOffset};
@@ -102,6 +103,9 @@ pub struct QueryConsole {
     save_task: Option<Task<()>>,
     _load_task: Task<()>,
     _buffer_edits: Subscription,
+    /// The daemon session of this console: its statements, results, cancels and transaction do
+    /// not touch other consoles of the data source.
+    session_id: String,
 }
 
 impl QueryConsole {
@@ -213,7 +217,13 @@ impl QueryConsole {
             save_task: None,
             _load_task: load_task,
             _buffer_edits: buffer_edits,
+            session_id: format!("console-{}", cx.entity_id().as_u64()),
         }
+    }
+
+    /// The id of this console's own session in the daemon.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     /// The file that keeps this console's SQL.
@@ -439,6 +449,7 @@ impl QueryConsole {
             ExecuteParams {
                 connection_id: self.connection.id.clone(),
                 sql,
+                session_id: Some(self.session_id.clone()),
             },
             cx,
         );
@@ -568,6 +579,7 @@ impl QueryConsole {
                 CancelParams {
                     connection_id: Some(self.connection.id.clone()),
                     cursor_id: None,
+                    session_id: Some(self.session_id.clone()),
                 },
                 cx,
             )
@@ -596,6 +608,17 @@ impl QueryConsole {
         self.awaiting_page = None;
         self.cancel_timeout = None;
         self.close_cursors(cx);
+        // The session is this console's alone; an open transaction is rolled back with it.
+        self.daemon
+            .read(cx)
+            .db_close_session(
+                CloseSessionParams {
+                    connection_id: self.connection.id.clone(),
+                    session_id: self.session_id.clone(),
+                },
+                cx,
+            )
+            .detach();
         // Closing the tab keeps the SQL: the next console of the data source opens it again.
         if let Some(write) = self.write_file(cx) {
             write.detach();

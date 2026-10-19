@@ -3,6 +3,7 @@ package dev.brewery.daemon
 import dev.brewery.daemon.db.ConnectionInfo
 import dev.brewery.daemon.db.DbCancelParams
 import dev.brewery.daemon.db.DbCloseParams
+import dev.brewery.daemon.db.DbCloseSessionParams
 import dev.brewery.daemon.db.DbConnectionsDeleteParams
 import dev.brewery.daemon.db.DbConnectionsListParams
 import dev.brewery.daemon.db.DbConnectionsSaveParams
@@ -210,16 +211,19 @@ class BreweryDaemon(
         dbCall { it.schema(params.connectionId, params.refresh) }
 
     override fun dbExecute(params: DbExecuteParams): CompletableFuture<DbExecuteResult> =
-        dbCall { it.execute(params.connectionId, params.sql) }
+        dbCall { it.execute(params.connectionId, params.sql, params.sessionId) }
 
     override fun dbFetch(params: DbFetchParams): CompletableFuture<DbFetchResult> =
         dbCall { it.fetch(params.cursorId, params.offset, params.limit) }
 
     override fun dbCancel(params: DbCancelParams): CompletableFuture<Any?> =
-        dbCall { it.cancel(params.connectionId, params.cursorId); null }
+        dbCall { it.cancel(params.connectionId, params.cursorId, params.sessionId); null }
 
     override fun dbClose(params: DbCloseParams): CompletableFuture<Any?> =
         dbCall { it.closeCursor(params.cursorId); null }
+
+    override fun dbSessionsClose(params: DbCloseSessionParams): CompletableFuture<Any?> =
+        dbCall { it.closeSession(params.connectionId, params.sessionId); null }
 
     private fun <T> dbCall(block: (DbService) -> T): CompletableFuture<T> {
         val service = synchronized(lock) {

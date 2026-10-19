@@ -26,6 +26,11 @@ impl Console {
         self.fixture.calls_of("db/execute")
     }
 
+    fn session(&self, cx: &mut VisualTestContext) -> String {
+        self.console
+            .read_with(cx, |console, _| console.session_id().to_string())
+    }
+
     fn fetched_offsets(&self) -> Vec<u64> {
         self.fixture
             .calls_of("db/fetch")
@@ -129,9 +134,10 @@ async fn run_executes_the_statement_at_the_cursor_and_shows_the_rows(cx: &mut Te
     console.type_sql("select 1;\nselect * from| owners;\nselect 'a;b'", cx);
     console.run(cx);
 
+    let session = console.session(cx);
     assert_eq!(
         console.executed(),
-        [json!({ "connectionId": "c1", "sql": "select * from owners" })]
+        [json!({ "connectionId": "c1", "sql": "select * from owners", "sessionId": session })]
     );
     assert_eq!(
         console.fixture.calls_of("db/fetch"),
@@ -168,9 +174,10 @@ async fn a_selection_runs_the_selected_text(cx: &mut TestAppContext) {
         });
     });
     console.run(cx);
+    let session = console.session(cx);
     assert_eq!(
         console.executed(),
-        [json!({ "connectionId": "c1", "sql": "select 1," })]
+        [json!({ "connectionId": "c1", "sql": "select 1,", "sessionId": session })]
     );
 }
 
@@ -281,9 +288,10 @@ async fn cancel_asks_the_daemon_to_cancel_the_running_statement(cx: &mut TestApp
         console.cancel(&CancelStatement, window, cx)
     });
     cx.run_until_parked();
+    let session = console.session(cx);
     assert_eq!(
         console.fixture.calls_of("db/cancel"),
-        [json!({ "connectionId": "c1" })]
+        [json!({ "connectionId": "c1", "sessionId": session })]
     );
     assert_eq!(console.status(cx), "Cancelling…");
 
@@ -329,11 +337,17 @@ async fn closing_the_console_while_running_cancels_the_statement(cx: &mut TestAp
     console.fixture.state.hold("db/execute");
     console.type_sql("select * from owners", cx);
     console.run(cx);
+    let session = console.session(cx);
     let Console { fixture, console } = console;
     close_console(&fixture, console, cx);
     assert_eq!(
         fixture.calls_of("db/cancel"),
-        [json!({ "connectionId": "c1" })]
+        [json!({ "connectionId": "c1", "sessionId": session })]
+    );
+    // The console's own session goes with it.
+    assert_eq!(
+        fixture.calls_of("db/sessions/close"),
+        [json!({ "connectionId": "c1", "sessionId": session })]
     );
 
     // The statement finishes after all: the cursor it opened is closed, nobody shows it.
@@ -388,9 +402,12 @@ async fn double_clicking_a_table_runs_select_star_in_a_new_console(cx: &mut Test
         );
         assert_eq!(console.tab_content_text(0, cx), "Local Postgres console");
     });
+    let session = console.read_with(cx, |console, _| console.session_id().to_string());
     assert_eq!(
         fixture.calls_of("db/execute"),
-        [json!({ "connectionId": "c1", "sql": "SELECT * FROM public.owners" })]
+        [
+            json!({ "connectionId": "c1", "sql": "SELECT * FROM public.owners", "sessionId": session })
+        ]
     );
     // The table was not expanded by the double click.
     let expanded = fixture.panel.read_with(cx, |panel, _| {
@@ -1070,9 +1087,12 @@ async fn a_table_opened_in_a_console_with_saved_sql_goes_below_it(cx: &mut TestA
             "select 42;\n\nSELECT * FROM public.owners"
         );
     });
+    let session = console.read_with(cx, |console, _| console.session_id().to_string());
     assert_eq!(
         fixture.calls_of("db/execute"),
-        [json!({ "connectionId": "c1", "sql": "SELECT * FROM public.owners" })]
+        [
+            json!({ "connectionId": "c1", "sql": "SELECT * FROM public.owners", "sessionId": session })
+        ]
     );
 }
 
@@ -1360,4 +1380,43 @@ async fn saving_another_data_source_does_not_warn(cx: &mut TestAppContext) {
     modal.update(cx, |modal, cx| modal.save(cx));
     cx.run_until_parked();
     assert_eq!(fixture.calls_of("db/connections/save").len(), 1);
+}
+
+#[gpui::test]
+async fn consoles_of_one_data_source_run_in_sessions_of_their_own(cx: &mut TestAppContext) {
+    let (first, cx) = console(cx).await;
+    let fixture = &first.fixture;
+    fixture
+        .panel
+        .update_in(cx, |panel, window, cx| panel.new_query_console(window, cx));
+    cx.run_until_parked();
+    let second = active_console(fixture, cx);
+    let first_session = first.session(cx);
+    let second_session = second.read_with(cx, |console, _| console.session_id().to_string());
+    assert_ne!(first_session, second_session);
+
+    fixture.state.hold("db/execute");
+    first.type_sql("select pg_sleep(60)", cx);
+    first.run(cx);
+    second.update(cx, |console, cx| console.run_sql("select 1".into(), cx));
+    cx.run_until_parked();
+    let sessions: Vec<Value> = fixture
+        .calls_of("db/execute")
+        .iter()
+        .map(|params| params["sessionId"].clone())
+        .collect();
+    assert_eq!(sessions, [json!(first_session), json!(second_session)]);
+
+    // Stop in the first console reaches only the first console's session.
+    first.console.update_in(cx, |console, window, cx| {
+        console.cancel(&CancelStatement, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.calls_of("db/cancel"),
+        [json!({ "connectionId": "c1", "sessionId": first_session })]
+    );
+    fixture.state.release("db/execute");
+    fixture.state.release("db/execute");
+    cx.run_until_parked();
 }

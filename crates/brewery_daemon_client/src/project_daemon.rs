@@ -5,12 +5,13 @@
 //! some panel holds the returned entity; the registry only keeps weak handles.
 
 use crate::protocol::{
-    AddDriverParams, CancelParams, CloseParams, ConnectionInfo, ConnectionsListParams, DbAddDriver,
-    DbCancel, DbClose, DbConnections, DbDeleteConnection, DbDrivers, DbExecute, DbFetch,
-    DbGetSchema, DbIntrospect, DbNode, DbSaveConnection, DbSchema, DbTestConnection,
-    DeleteConnectionParams, DriverInfo, DriversParams, ExecuteParams, ExecuteResult, FetchParams,
-    FetchResult, IntrospectParams, ProjectModel, RunConfiguration, SaveConnectionParams,
-    SchemaParams, SpringModel, TestConnectionParams, TestConnectionResult,
+    AddDriverParams, CancelParams, CloseParams, CloseSessionParams, ConnectionInfo,
+    ConnectionsListParams, DbAddDriver, DbCancel, DbClose, DbCloseSession, DbConnections,
+    DbDeleteConnection, DbDrivers, DbExecute, DbFetch, DbGetSchema, DbIntrospect, DbNode,
+    DbSaveConnection, DbSchema, DbTestConnection, DeleteConnectionParams, DriverInfo,
+    DriversParams, ExecuteParams, ExecuteResult, FetchParams, FetchResult, IntrospectParams,
+    ProjectModel, RunConfiguration, SaveConnectionParams, SchemaParams, SpringModel,
+    TestConnectionParams, TestConnectionResult,
 };
 use crate::{DaemonClient, is_import_error};
 use anyhow::{Context as _, Error, Result, anyhow};
@@ -401,6 +402,11 @@ impl ProjectDaemon {
 
     pub fn db_close(&self, cursor_id: String, cx: &App) -> Task<Result<()>> {
         self.db_call(DbClose::METHOD, CloseParams { cursor_id }, cx)
+    }
+
+    /// Closes a console's own session (see `ExecuteParams::session_id`).
+    pub fn db_close_session(&self, params: CloseSessionParams, cx: &App) -> Task<Result<()>> {
+        self.db_call(DbCloseSession::METHOD, params, cx)
     }
 
     fn project_root(&self, cx: &App) -> Option<PathBuf> {

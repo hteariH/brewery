@@ -46,7 +46,8 @@ data class DbDriversAddJarParams(val driverId: String, val name: String, val cla
 /** [includeSystem] (optional, default false) also lists `pg_catalog`, `information_schema`, `sqlite_*` and the like. */
 data class DbIntrospectParams(val connectionId: String, val path: List<String>?, val includeSystem: Boolean? = null)
 
-data class DbExecuteParams(val connectionId: String, val sql: String)
+/** [sessionId] (optional) runs [sql] in a session of its own, created on first use; without it the connection's shared session. */
+data class DbExecuteParams(val connectionId: String, val sql: String, val sessionId: String? = null)
 data class ColumnInfo(val name: String, val type: String)
 
 /**
@@ -81,6 +82,12 @@ data class DbFetchResult(
     val moreResults: Boolean = false,
 )
 
-/** Cancels the running statement of the session of [connectionId]; [cursorId] may stand in for it when it is blank. */
-data class DbCancelParams(val connectionId: String?, val cursorId: String? = null)
+/**
+ * Cancels the running statement of session [sessionId] of [connectionId] (without one, the shared session); [cursorId]
+ * may stand in for both when [connectionId] is blank.
+ */
+data class DbCancelParams(val connectionId: String?, val cursorId: String? = null, val sessionId: String? = null)
 data class DbCloseParams(val cursorId: String)
+
+/** Closes session [sessionId] of [connectionId] (a closed query console's); what it left uncommitted is rolled back. */
+data class DbCloseSessionParams(val connectionId: String, val sessionId: String)

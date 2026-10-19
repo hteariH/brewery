@@ -356,6 +356,10 @@ pub struct IntrospectParams {
 pub struct ExecuteParams {
     pub connection_id: String,
     pub sql: String,
+    /// Runs in a session of its own (one per query console), created on first use; without one
+    /// in the data source's shared session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,6 +422,17 @@ pub struct CancelParams {
     pub connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_id: Option<String>,
+    /// The session (see `ExecuteParams::session_id`) whose statement to cancel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// Closes a console's session; what it left uncommitted is rolled back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseSessionParams {
+    pub connection_id: String,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +569,13 @@ impl Request for DbClose {
     const METHOD: &'static str = "db/close";
 }
 
+pub enum DbCloseSession {}
+impl Request for DbCloseSession {
+    type Params = CloseSessionParams;
+    type Result = ();
+    const METHOD: &'static str = "db/sessions/close";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,6 +653,7 @@ mod tests {
         assert_eq!(DbFetch::METHOD, "db/fetch");
         assert_eq!(DbCancel::METHOD, "db/cancel");
         assert_eq!(DbClose::METHOD, "db/close");
+        assert_eq!(DbCloseSession::METHOD, "db/sessions/close");
     }
 
     #[test]
@@ -812,10 +835,28 @@ mod tests {
         assert_eq!(
             serde_json::to_value(CancelParams {
                 connection_id: Some("c1".into()),
-                cursor_id: None
+                cursor_id: None,
+                session_id: None,
             })
             .unwrap(),
             serde_json::json!({"connectionId": "c1"})
+        );
+        assert_eq!(
+            serde_json::to_value(CancelParams {
+                connection_id: Some("c1".into()),
+                cursor_id: None,
+                session_id: Some("console-7".into()),
+            })
+            .unwrap(),
+            serde_json::json!({"connectionId": "c1", "sessionId": "console-7"})
+        );
+        assert_eq!(
+            serde_json::to_value(CloseSessionParams {
+                connection_id: "c1".into(),
+                session_id: "console-7".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"connectionId": "c1", "sessionId": "console-7"})
         );
         assert_eq!(
             serde_json::to_value(CloseParams {
@@ -837,10 +878,20 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ExecuteParams {
                 connection_id: "c1".into(),
-                sql: "select 1".into()
+                sql: "select 1".into(),
+                session_id: None,
             })
             .unwrap(),
             serde_json::json!({"connectionId": "c1", "sql": "select 1"})
+        );
+        assert_eq!(
+            serde_json::to_value(ExecuteParams {
+                connection_id: "c1".into(),
+                sql: "select 1".into(),
+                session_id: Some("console-7".into()),
+            })
+            .unwrap(),
+            serde_json::json!({"connectionId": "c1", "sql": "select 1", "sessionId": "console-7"})
         );
         assert_eq!(
             serde_json::to_value(DriversParams {}).unwrap(),
