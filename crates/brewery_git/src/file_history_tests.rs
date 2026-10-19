@@ -110,7 +110,7 @@ async fn open_real<'a>(
     cx: &'a mut TestAppContext,
 ) -> (Fixture, &'a mut VisualTestContext) {
     cx.executor().allow_parking();
-    crate::cli::set_test_env(repo.env.clone());
+    crate::cli::set_test_env(&repo.work, repo.env.clone());
     let project = Project::test(RealFs::new(None, cx.executor()), [repo.work.as_path()], cx).await;
     let tree = project.read_with(cx, |project, cx| {
         project.worktrees(cx).next().expect("worktree")

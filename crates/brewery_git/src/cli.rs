@@ -632,9 +632,7 @@ impl GitRunner {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<HashMap<_, _>>();
         #[cfg(test)]
-        if let Ok(extra) = TEST_ENV.lock() {
-            env.extend(extra.clone());
-        }
+        env.extend(test_env(&work_dir));
         let git_binary = find_git(&env, &work_dir, cx)?;
         Ok(Self {
             git_binary,
@@ -984,15 +982,25 @@ impl GitRunner {
         max_size: u64,
     ) -> Result<ConflictStages> {
         let records = self.conflict_stage_ids(path).await?;
+        self.stages_of(&records, path, max_size).await
+    }
+
+    pub(crate) async fn stages_of(
+        &self,
+        records: &[String],
+        path: &RepoPath,
+        max_size: u64,
+    ) -> Result<ConflictStages> {
         Ok(ConflictStages {
-            base: self.stage(&records, 1, path, max_size).await?,
-            ours: self.stage(&records, 2, path, max_size).await?,
-            theirs: self.stage(&records, 3, path, max_size).await?,
+            base: self.stage(records, 1, path, max_size).await?,
+            ours: self.stage(records, 2, path, max_size).await?,
+            theirs: self.stage(records, 3, path, max_size).await?,
         })
     }
 
     /// One stage of a conflicted file; `records` are its `ls-files -u -s` records, which give
-    /// the stage's mode.
+    /// the stage's mode and object. The object is read by id rather than as `:<stage>:<path>`,
+    /// so every stage comes from the one listing even if the index changes meanwhile (#56).
     async fn stage(
         &self,
         records: &[String],
@@ -1001,18 +1009,22 @@ impl GitRunner {
         max_size: u64,
     ) -> Result<StageBlob> {
         let stage_field = stage.to_string();
-        let mode = records.iter().find_map(|record| {
+        let record = records.iter().find_map(|record| {
             let mut fields = record.split(' ');
             let mode = fields.next()?;
-            (fields.nth(1)? == stage_field).then_some(mode)
+            let oid = fields.next()?;
+            (fields.next()? == stage_field).then_some((mode, oid))
         });
-        match mode {
-            Some(mode) if mode != "100644" && mode != "100755" => {
+        match record {
+            None => Ok(StageBlob::Missing),
+            Some((mode, _)) if mode != "100644" && mode != "100755" => {
                 Ok(StageBlob::NotAFile(mode.to_string()))
             }
-            _ => {
-                let object = format!(":{stage}:{}", path.as_unix_str());
-                self.stage_blob(&object, path, max_size).await
+            Some((_, oid)) => {
+                if oid.is_empty() || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    bail!("unexpected object id {oid:?} for {}", path.as_unix_str());
+                }
+                self.stage_blob(oid, path, max_size).await
             }
         }
     }
@@ -1033,10 +1045,8 @@ impl GitRunner {
             .collect())
     }
 
+    /// A blob the index lists: failing to read it is an error, never a missing side.
     async fn stage_blob(&self, object: &str, path: &RepoPath, max_size: u64) -> Result<StageBlob> {
-        if !self.run(&["cat-file", "-e", object]).await?.success() {
-            return Ok(StageBlob::Missing);
-        }
         let size = self.run(&["cat-file", "-s", object]).await?;
         if !size.success() {
             bail!("{}", size.message());
@@ -1306,15 +1316,36 @@ impl RawOutput {
     }
 }
 
-/// Extra environment for jobs run through `GitCli` in tests (hermetic git config).
+/// Extra environment for jobs run through `GitCli` in tests (hermetic git config), per work
+/// directory: tests run in parallel, and one test's environment points at its own temp dir,
+/// which is deleted when that test ends (#56).
 #[cfg(test)]
-static TEST_ENV: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+static TEST_ENV: std::sync::Mutex<Vec<(PathBuf, Vec<(String, String)>)>> =
+    std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
-pub(crate) fn set_test_env(env: HashMap<String, String>) {
+pub(crate) fn set_test_env(work_dir: &std::path::Path, env: HashMap<String, String>) {
+    let work_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
     if let Ok(mut extra) = TEST_ENV.lock() {
-        *extra = env.into_iter().collect();
+        extra.retain(|(dir, _)| *dir != work_dir);
+        extra.push((work_dir, env.into_iter().collect()));
     }
+}
+
+#[cfg(test)]
+fn test_env(work_dir: &std::path::Path) -> Vec<(String, String)> {
+    let work_dir = std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
+    TEST_ENV
+        .lock()
+        .ok()
+        .and_then(|extra| {
+            extra
+                .iter()
+                .find(|(dir, _)| *dir == work_dir)
+                .or_else(|| extra.last())
+                .map(|(_, env)| env.clone())
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

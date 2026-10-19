@@ -832,7 +832,7 @@ async fn run_through_repository_job_queue(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = TestRepo::new();
     repo.diverged_with_conflict();
-    set_test_env(repo.env.clone());
+    set_test_env(&repo.work, repo.env.clone());
     let (_project, repository) = open_repository(&repo.work, cx).await;
 
     let output = cx
@@ -968,6 +968,39 @@ fn conflict_stage_ids_follow_the_conflict() {
             .expect("ids")
             .is_empty()
     );
+}
+
+/// The stages are read from the one `ls-files -u` listing, not by re-reading the index per
+/// stage, so an index change in between cannot make a side look deleted (#56).
+#[test]
+fn conflict_stages_are_read_from_one_index_listing() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    let runner = repo.runner();
+    block(runner.merge("feature")).expect("merge");
+    let a = RepoPath::new("a.txt").expect("path");
+    let records = block(runner.conflict_stage_ids(&a)).expect("ids");
+
+    repo.git(&["add", "a.txt"]);
+
+    let stages = block(runner.stages_of(&records, &a, 1024)).expect("stages");
+    assert_eq!(stages.base, StageBlob::Bytes(b"base\n".to_vec()));
+    assert_eq!(stages.ours, StageBlob::Bytes(b"main\n".to_vec()));
+    assert_eq!(stages.theirs, StageBlob::Bytes(b"feature\n".to_vec()));
+}
+
+/// A stage the index lists but git cannot read is an error, not a deleted side.
+#[test]
+fn an_unreadable_listed_stage_is_an_error() {
+    let repo = TestRepo::new();
+    repo.diverged_with_conflict();
+    let runner = repo.runner();
+    block(runner.merge("feature")).expect("merge");
+    let a = RepoPath::new("a.txt").expect("path");
+    let mut records = block(runner.conflict_stage_ids(&a)).expect("ids");
+    records[1] = format!("100644 {} 2", "1".repeat(40));
+
+    assert!(block(runner.stages_of(&records, &a, 1024)).is_err());
 }
 
 /// Commits `path` as a symlink to `target` (mode 120000) straight into the index, so the test
