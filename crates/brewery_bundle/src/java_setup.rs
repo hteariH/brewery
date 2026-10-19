@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use gpui::{App, BorrowAppContext as _};
+use gpui::{App, AppContext as _, BorrowAppContext as _};
 use serde_json::{Map, Value};
 use settings::{SettingsStore, merge_from::MergeFrom as _};
 
@@ -29,14 +29,27 @@ fn tools_dir(root: &Path) -> PathBuf {
 /// `lsp.jdtls.settings` defaults for the bundle at `root`; empty without a bundle. Each key
 /// is set only when its piece is present, so a partial bundle gives a partial overlay.
 pub fn java_settings_overlay_for_root(root: Option<&Path>) -> Map<String, Value> {
-    overlay_with(root, &cmd_safe_path)
+    let cache = if cfg!(windows) { launcher_cache_dir() } else { None };
+    overlay_with(root, &cmd_safe_path, cache.as_deref())
+}
+
+/// The Windows launcher's cache: `BREWERY_JDTLS_CACHE_DIR`, else
+/// `%LOCALAPPDATA%\Brewery\jdtls` (brewery-jdtls.cmd uses the same rule).
+fn launcher_cache_dir() -> Option<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    var("BREWERY_JDTLS_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| var("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("Brewery").join("jdtls")))
 }
 
 /// `cmd_safe` gives the form of a path that may cross `cmd /C`, or `None` when there is
-/// none (a spaced path on a volume without 8.3 names).
+/// none (a spaced path on a volume without 8.3 names). `launcher_cache` is the Windows
+/// launcher's cache dir: its workspaces become the extension's `data_directory`, so the
+/// extension passes `-data` and the launcher needs no process to hash the project path.
 fn overlay_with(
     root: Option<&Path>,
     cmd_safe: &dyn Fn(&Path) -> Option<PathBuf>,
+    launcher_cache: Option<&Path>,
 ) -> Map<String, Value> {
     let mut overlay = Map::new();
     let Some(root) = root else {
@@ -79,7 +92,15 @@ fn overlay_with(
         // A spaced launcher path still works as long as no later argument is quoted, so
         // without a short name jdtls starts without the (quoted) Lombok agent.
         lombok_off = safe.is_none() && lombok.is_some();
+        // `-data <dir>` follows the launcher through `cmd /C` too, so both must be cmd-safe.
+        let workspaces = launcher_cache.filter(|_| safe.is_some()).and_then(|cache| {
+            let workspaces = cache.join("workspace");
+            // A short name needs the directory to exist; the launcher would create it anyway.
+            std::fs::create_dir_all(&workspaces).ok();
+            cmd_safe(&workspaces)
+        });
         any |= set_path("jdtls_launcher", Some(safe.unwrap_or_else(|| launcher.clone())));
+        set_path("data_directory", workspaces);
     }
     if !lombok_off && let Some(lombok) = &lombok {
         any |= set_path("lombok_jar", Some(cmd_safe(lombok).unwrap_or_else(|| lombok.clone())));
@@ -105,6 +126,74 @@ fn overlay_with(
     overlay
 }
 
+/// The Java extension's language server for Gradle build files.
+pub const GRADLE_LS_SERVER: &str = "gradle-language-server";
+
+/// Where the bundle keeps the Gradle language server: `<version>/lib/` per version.
+fn gradle_ls_dir(root: &Path) -> PathBuf {
+    tools_dir(root).join("gradle-ls")
+}
+
+/// `lsp.gradle-language-server.settings` defaults for the bundle at `root`: the bundled
+/// gradle-lsp-bridge, which the extension otherwise downloads. Zed starts the bridge
+/// itself (no `cmd /C`), so its path needs no short form.
+pub fn gradle_settings_overlay_for_root(root: Option<&Path>) -> Map<String, Value> {
+    let mut overlay = Map::new();
+    let Some(root) = root else {
+        return overlay;
+    };
+    let bridge = tools_dir(root).join(if cfg!(windows) {
+        "gradle-lsp-bridge.exe"
+    } else {
+        "gradle-lsp-bridge"
+    });
+    if !bridge.is_file() {
+        return overlay;
+    }
+    match bridge.to_str() {
+        Some(path) => {
+            overlay.insert("gradle_bridge_path".to_string(), Value::String(path.to_string()));
+        }
+        None => log::warn!("brewery: bundled gradle-lsp-bridge path is not UTF-8: {bridge:?}"),
+    }
+    overlay
+}
+
+/// Copies the bundled Gradle language server (`jdtls/tools/gradle-ls/<version>/`) into the
+/// Java extension's work dir (`<extensions_dir>/work/java/gradle-ls/<version>/`), where the
+/// extension looks before downloading it: no setting names its path. A version dir
+/// without `lib/` (a download that failed offline) is replaced. Returns the versions copied.
+pub fn seed_gradle_ls(root: &Path, extensions_dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut seeded = Vec::new();
+    let Ok(entries) = std::fs::read_dir(gradle_ls_dir(root)) else {
+        return Ok(seeded);
+    };
+    let installed_dir = extensions_dir
+        .join("work")
+        .join(JAVA_EXTENSION)
+        .join("gradle-ls");
+    for entry in entries.flatten() {
+        let bundled = entry.path();
+        let Some(version) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !bundled.join("lib").is_dir() {
+            continue;
+        }
+        let target = installed_dir.join(&version);
+        if target.join("lib").is_dir() {
+            continue;
+        }
+        if target.is_dir() {
+            std::fs::remove_dir_all(&target)?;
+        }
+        if seed_extension(&bundled, &installed_dir, &version)? {
+            seeded.push(version);
+        }
+    }
+    Ok(seeded)
+}
+
 /// `java.import.gradle.java.home` with the bundled launcher: jdtls expands `${...}` in it
 /// from its system properties, and the launcher sets `brewery.gradle.java.home` to the
 /// user's JAVA_HOME when the project's Gradle wrapper can run on it, else to "" (then
@@ -128,6 +217,36 @@ pub fn java_initialization_options_for(overlay: &Map<String, Value>) -> Map<Stri
     options
 }
 
+/// The variable the Windows launcher names its configuration area after.
+pub const CONFIG_KEY_ENV: &str = "BREWERY_JDTLS_CONFIG_KEY";
+
+/// `lsp.jdtls.binary.env` defaults for a jdtls overlay. On Windows, with the bundled
+/// launcher: [`CONFIG_KEY_ENV`], a hash of the launcher's directory as the launcher sees
+/// it, so it finds its configuration area without starting a process to hash the path.
+pub fn java_launcher_env_for(overlay: &Map<String, Value>) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    if !cfg!(windows) {
+        return env;
+    }
+    let Some(launcher) = overlay.get("jdtls_launcher").and_then(Value::as_str) else {
+        return env;
+    };
+    // brewery-jdtls.cmd's JDTLS_HOME: %~dp0 without the trailing backslash.
+    let Some((jdtls_home, _)) = launcher.rsplit_once(['\\', '/']) else {
+        return env;
+    };
+    env.insert(CONFIG_KEY_ENV.to_string(), path_key(jdtls_home));
+    env
+}
+
+/// 40 hex digits of the SHA-256 of `path`, short enough to keep jdtls's deep
+/// configuration paths under MAX_PATH.
+fn path_key(path: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(path.as_bytes());
+    digest[..20].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Defaults a bundle contributes on top of `assets/settings/default.json`.
 #[derive(Debug, Default, PartialEq)]
 pub struct BundleDefaults {
@@ -135,6 +254,10 @@ pub struct BundleDefaults {
     pub jdtls: Map<String, Value>,
     /// Merged into the default `lsp.jdtls.initialization_options`.
     pub jdtls_initialization_options: Map<String, Value>,
+    /// Added to the default `lsp.jdtls.binary.env`.
+    pub jdtls_env: BTreeMap<String, String>,
+    /// Merged into the default `lsp.gradle-language-server.settings`.
+    pub gradle_ls: Map<String, Value>,
     /// Bundled extensions that default to `auto_update_extensions: false`, so the
     /// extension stays at the version the bundled helpers were pinned and tested with.
     pub pinned_extensions: Vec<String>,
@@ -148,8 +271,8 @@ pub fn extension_version(extension_dir: &Path) -> Option<String> {
 }
 
 /// [`BundleDefaults`] for the bundle at `root`, given Zed's `installed/` extensions dir.
-/// The jdtls overlay is only used while the installed Java extension is the bundled
-/// version: the proxy and the setting names belong to that release.
+/// The jdtls and Gradle overlays are only used while the installed Java extension is the
+/// bundled version: the proxy, the bridge and the setting names belong to that release.
 pub fn bundle_defaults_for(root: Option<&Path>, installed_dir: &Path) -> BundleDefaults {
     let Some(root) = root else {
         return BundleDefaults::default();
@@ -165,23 +288,26 @@ pub fn bundle_defaults_for(root: Option<&Path>, installed_dir: &Path) -> BundleD
         .collect();
     let bundled = bundled_dir(JAVA_EXTENSION).and_then(|dir| extension_version(&dir));
     let installed = extension_version(&installed_dir.join(JAVA_EXTENSION));
-    let jdtls = match (&bundled, &installed) {
-        (Some(bundled), Some(installed)) if bundled == installed => {
-            java_settings_overlay_for_root(Some(root))
-        }
+    let (jdtls, gradle_ls) = match (&bundled, &installed) {
+        (Some(bundled), Some(installed)) if bundled == installed => (
+            java_settings_overlay_for_root(Some(root)),
+            gradle_settings_overlay_for_root(Some(root)),
+        ),
         (Some(bundled), installed) => {
             log::warn!(
                 "brewery: the installed Java extension ({}) is not the bundled {bundled}; \
                  not pointing it at the bundled Java tools",
                 installed.as_deref().unwrap_or("none")
             );
-            Map::new()
+            (Map::new(), Map::new())
         }
-        (None, _) => Map::new(),
+        (None, _) => (Map::new(), Map::new()),
     };
     BundleDefaults {
         jdtls_initialization_options: java_initialization_options_for(&jdtls),
+        jdtls_env: java_launcher_env_for(&jdtls),
         jdtls,
+        gradle_ls,
         pinned_extensions,
     }
 }
@@ -192,9 +318,16 @@ pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
     let BundleDefaults {
         jdtls,
         jdtls_initialization_options,
+        jdtls_env,
+        gradle_ls,
         pinned_extensions,
     } = defaults;
-    if jdtls.is_empty() && jdtls_initialization_options.is_empty() && pinned_extensions.is_empty() {
+    if jdtls.is_empty()
+        && jdtls_initialization_options.is_empty()
+        && jdtls_env.is_empty()
+        && gradle_ls.is_empty()
+        && pinned_extensions.is_empty()
+    {
         return;
     }
     if !jdtls.is_empty() {
@@ -204,6 +337,7 @@ pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
         );
     }
     let jdtls = (!jdtls.is_empty()).then(|| Value::Object(jdtls));
+    let gradle_ls = (!gradle_ls.is_empty()).then(|| Value::Object(gradle_ls));
     let options = (!jdtls_initialization_options.is_empty())
         .then(|| Value::Object(jdtls_initialization_options));
     let merge = |target: &mut Option<Value>, value: &Value| match target {
@@ -219,7 +353,7 @@ pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
                     .entry(id.as_str().into())
                     .or_insert(false);
             }
-            if jdtls.is_some() || options.is_some() {
+            if jdtls.is_some() || options.is_some() || !jdtls_env.is_empty() {
                 let server = defaults.project.lsp.0.entry(JDTLS_SERVER.into()).or_default();
                 if let Some(jdtls) = &jdtls {
                     merge(&mut server.settings, jdtls);
@@ -227,6 +361,15 @@ pub fn apply_bundle_defaults(defaults: BundleDefaults, cx: &mut App) {
                 if let Some(options) = &options {
                     merge(&mut server.initialization_options, options);
                 }
+                if !jdtls_env.is_empty() {
+                    let binary = server.binary.get_or_insert_default();
+                    let vars = binary.env.get_or_insert_default();
+                    vars.extend(jdtls_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
+            }
+            if let Some(gradle_ls) = &gradle_ls {
+                let server = defaults.project.lsp.0.entry(GRADLE_LS_SERVER.into()).or_default();
+                merge(&mut server.settings, gradle_ls);
             }
         });
     });
@@ -242,9 +385,28 @@ pub fn setup_bundled_java(extensions_dir: &Path, cx: &mut App) {
         &extensions_dir.join("installed"),
     );
     let launcher = defaults.jdtls.contains_key("jdtls_launcher");
+    // The bundled bridge runs the bundled Gradle language server: both belong to the
+    // installed extension's version, as the overlay checked.
+    let gradle_ls = !defaults.gradle_ls.is_empty();
     apply_bundle_defaults(defaults, cx);
     if launcher {
         track_jdtls_memory(cx);
+    }
+    if gradle_ls && let Some(root) = crate::bundle_root() {
+        // About 35 MB, needed only once a Gradle build file is open: off the main thread.
+        let extensions_dir = extensions_dir.to_path_buf();
+        cx.background_spawn(async move {
+            match seed_gradle_ls(&root, &extensions_dir) {
+                Ok(seeded) if !seeded.is_empty() => {
+                    log::info!("brewery: seeded the Gradle language server {}", seeded.join(", "))
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::error!("brewery: could not seed the Gradle language server: {error}")
+                }
+            }
+        })
+        .detach();
     }
 }
 
@@ -505,7 +667,78 @@ mod tests {
         touch(&tools(root).join("lombok.jar"));
         touch(&tools(root).join("java-debug.jar"));
         touch(&tools(root).join(proxy_name()));
+        touch(&tools(root).join(bridge_name()));
+        touch(&gradle_ls_dir(root).join("3.18.0").join("lib").join("gradle-language-server.jar"));
         write_extension_toml(&root.join("extensions").join("java"), "6.8.28");
+    }
+
+    fn bridge_name() -> &'static str {
+        if cfg!(windows) {
+            "gradle-lsp-bridge.exe"
+        } else {
+            "gradle-lsp-bridge"
+        }
+    }
+
+    #[test]
+    fn gradle_overlay_points_at_the_bundled_bridge() {
+        assert!(gradle_settings_overlay_for_root(None).is_empty());
+        let temp = TempDir::new("gradle-overlay");
+        assert!(gradle_settings_overlay_for_root(Some(&temp.0)).is_empty());
+        populate(&temp.0);
+        let overlay = gradle_settings_overlay_for_root(Some(&temp.0));
+        assert_eq!(
+            Value::Object(overlay),
+            serde_json::json!({"gradle_bridge_path": string(tools(&temp.0).join(bridge_name()))})
+        );
+    }
+
+    fn gradle_ls_work_dir(extensions: &Path) -> PathBuf {
+        extensions.join("work").join("java").join("gradle-ls")
+    }
+
+    #[test]
+    fn gradle_ls_is_seeded_into_the_extension_work_dir() {
+        let temp = TempDir::new("gradle-ls-seed");
+        let root = temp.0.join("bundle");
+        populate(&root);
+        let extensions = temp.0.join("extensions");
+        assert_eq!(seed_gradle_ls(&root, &extensions).unwrap(), vec!["3.18.0".to_string()]);
+        // Where the extension's gradle_ls.rs looks before it downloads anything.
+        let jar = gradle_ls_work_dir(&extensions).join("3.18.0/lib/gradle-language-server.jar");
+        assert!(jar.is_file());
+        // Once there it is left alone, whoever put it there.
+        std::fs::write(&jar, b"downloaded").unwrap();
+        assert!(seed_gradle_ls(&root, &extensions).unwrap().is_empty());
+        assert_eq!(std::fs::read(&jar).unwrap(), b"downloaded");
+        let names: Vec<_> = std::fs::read_dir(gradle_ls_work_dir(&extensions))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["3.18.0"]);
+    }
+
+    #[test]
+    fn gradle_ls_replaces_a_download_that_failed_offline() {
+        // The extension creates gradle-ls/<version>/ before it downloads into it.
+        let temp = TempDir::new("gradle-ls-partial");
+        let root = temp.0.join("bundle");
+        populate(&root);
+        let extensions = temp.0.join("extensions");
+        std::fs::create_dir_all(gradle_ls_work_dir(&extensions).join("3.18.0")).unwrap();
+        assert_eq!(seed_gradle_ls(&root, &extensions).unwrap(), vec!["3.18.0".to_string()]);
+        assert!(gradle_ls_work_dir(&extensions).join("3.18.0/lib").is_dir());
+    }
+
+    #[test]
+    fn gradle_ls_without_a_bundled_copy_seeds_nothing() {
+        let temp = TempDir::new("gradle-ls-none");
+        let extensions = temp.0.join("extensions");
+        assert!(seed_gradle_ls(&temp.0, &extensions).unwrap().is_empty());
+        // A version dir without lib/ is not a Gradle language server.
+        std::fs::create_dir_all(gradle_ls_dir(&temp.0).join("3.18.0")).unwrap();
+        assert!(seed_gradle_ls(&temp.0, &extensions).unwrap().is_empty());
+        assert!(!extensions.exists());
     }
 
     fn string(path: PathBuf) -> Value {
@@ -542,7 +775,53 @@ mod tests {
         // The launcher runs on the bundled JRE by itself; `java_home` would also become
         // jdtls's JAVA_HOME and so the default project runtime, so it is left to the user.
         assert!(!overlay.contains_key("java_home"), "{overlay:?}");
-        assert_eq!(overlay.len(), 6, "{overlay:?}");
+        // Windows also gets `data_directory` (see the launcher workspace test below).
+        let expected = if cfg!(windows) { 7 } else { 6 };
+        assert_eq!(overlay.len(), expected, "{overlay:?}");
+    }
+
+    #[test]
+    fn launcher_workspaces_become_the_data_directory() {
+        // The extension then passes `-data <dir>/jdtls-<sha1 of the project>`, so the
+        // Windows launcher starts no process to hash the project path (#40).
+        let temp = TempDir::new("data-directory");
+        populate(&temp.0);
+        let cache = temp.0.join("cache");
+        let overlay = overlay_with(Some(&temp.0), &cmd_safe_path, Some(&cache));
+        assert_eq!(overlay["data_directory"], string(cache.join("workspace")));
+        assert!(cache.join("workspace").is_dir());
+        assert!(!overlay_with(Some(&temp.0), &cmd_safe_path, None).contains_key("data_directory"));
+        // `-data` crosses `cmd /C` after the launcher: not without cmd-safe paths.
+        let no_short_names = |_: &Path| None;
+        let overlay = overlay_with(Some(&temp.0), &no_short_names, Some(&cache));
+        assert!(!overlay.contains_key("data_directory"), "{overlay:?}");
+        // Nor without the bundled launcher.
+        let partial = TempDir::new("data-directory-partial");
+        touch(&tools(&partial.0).join("lombok.jar"));
+        let overlay = overlay_with(Some(&partial.0), &cmd_safe_path, Some(&cache));
+        assert!(!overlay.contains_key("data_directory"), "{overlay:?}");
+    }
+
+    #[test]
+    fn windows_launcher_gets_its_config_key_in_the_env() {
+        let temp = TempDir::new("config-key");
+        populate(&temp.0);
+        let overlay = overlay_with(Some(&temp.0), &cmd_safe_path, None);
+        let env = java_launcher_env_for(&overlay);
+        if cfg!(windows) {
+            let jdtls = temp.0.join("jdtls");
+            let key = &env[CONFIG_KEY_ENV];
+            assert_eq!(key, &path_key(jdtls.to_str().unwrap()));
+            assert_eq!(key.len(), 40);
+            assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()), "{key}");
+            let other = path_key(temp.0.join("other").join("jdtls").to_str().unwrap());
+            assert_ne!(key, &other);
+        } else {
+            assert!(env.is_empty(), "{env:?}");
+        }
+        let mut no_launcher = overlay;
+        no_launcher.remove("jdtls_launcher");
+        assert!(java_launcher_env_for(&no_launcher).is_empty());
     }
 
     #[test]
@@ -595,7 +874,7 @@ mod tests {
         let temp = TempDir::new("no-8dot3");
         populate(&temp.0);
         let no_short_names = |_: &Path| None;
-        let overlay = overlay_with(Some(&temp.0), &no_short_names);
+        let overlay = overlay_with(Some(&temp.0), &no_short_names, None);
         assert_eq!(
             overlay["jdtls_launcher"],
             string(temp.0.join("jdtls").join(launcher_name()))
@@ -659,12 +938,17 @@ mod tests {
             java_initialization_options_for(&defaults.jdtls)
         );
         assert!(!defaults.jdtls_initialization_options.is_empty());
+        assert_eq!(defaults.jdtls_env, java_launcher_env_for(&defaults.jdtls));
+        assert_eq!(defaults.gradle_ls, gradle_settings_overlay_for_root(Some(&root)));
+        assert!(!defaults.gradle_ls.is_empty());
 
         // The user updated the extension: its own proxy and downloads, not ours.
         write_extension_toml(&installed.join("java"), "6.9.0");
         let defaults = bundle_defaults_for(Some(&root), &installed);
         assert!(defaults.jdtls.is_empty());
         assert!(defaults.jdtls_initialization_options.is_empty());
+        assert!(defaults.jdtls_env.is_empty());
+        assert!(defaults.gradle_ls.is_empty());
         assert_eq!(defaults.pinned_extensions, vec!["java".to_string()]);
     }
 
@@ -701,7 +985,9 @@ mod tests {
         let jdtls = java_settings_overlay_for_root(Some(root));
         BundleDefaults {
             jdtls_initialization_options: java_initialization_options_for(&jdtls),
+            jdtls_env: env(&[(CONFIG_KEY_ENV, "abc")]),
             jdtls,
+            gradle_ls: gradle_settings_overlay_for_root(Some(root)),
             pinned_extensions: vec!["java".to_string()],
         }
     }
@@ -838,6 +1124,7 @@ mod tests {
             cx.set_global(store);
             apply_bundle_defaults(full_defaults(&temp.0), cx);
 
+            assert_eq!(jdtls_binary_env(cx), Some(env(&[(CONFIG_KEY_ENV, "abc")])));
             let settings = jdtls_settings(cx);
             // The overlay beats default.json's `jdk_auto_download: true`.
             assert_eq!(settings["jdk_auto_download"], Value::Bool(false));
@@ -861,6 +1148,40 @@ mod tests {
                 string(tools(&temp.0).join("java-debug.jar"))
             );
             assert_eq!(settings["check_updates"], Value::String("once".into()));
+        });
+    }
+
+    fn gradle_ls_settings(cx: &App) -> Value {
+        cx.global::<SettingsStore>().merged_settings().project.lsp.0[GRADLE_LS_SERVER]
+            .settings
+            .clone()
+            .unwrap()
+    }
+
+    #[gpui::test]
+    fn gradle_ls_uses_the_bundled_bridge_unless_the_user_says_so(cx: &mut TestAppContext) {
+        let temp = TempDir::new("gradle-user-wins");
+        populate(&temp.0);
+        cx.update(|cx| {
+            let store = SettingsStore::new(cx, &settings::default_settings());
+            cx.set_global(store);
+            apply_bundle_defaults(full_defaults(&temp.0), cx);
+            let bridge = string(tools(&temp.0).join(bridge_name()));
+            assert_eq!(gradle_ls_settings(cx)["gradle_bridge_path"], bridge);
+
+            set_user_settings(
+                cx,
+                r#"{"lsp": {"gradle-language-server": {"settings": {"java_home": "/my/jdk"}}}}"#,
+            );
+            let settings = gradle_ls_settings(cx);
+            assert_eq!(settings["gradle_bridge_path"], bridge);
+            assert_eq!(settings["java_home"], Value::String("/my/jdk".into()));
+
+            set_user_settings(
+                cx,
+                r#"{"lsp": {"gradle-language-server": {"settings": {"gradle_bridge_path": "/mine"}}}}"#,
+            );
+            assert_eq!(gradle_ls_settings(cx)["gradle_bridge_path"], Value::String("/mine".into()));
         });
     }
 

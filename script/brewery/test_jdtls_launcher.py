@@ -73,6 +73,24 @@ def norm(path) -> str:
     return os.path.normcase(os.path.realpath(str(path)))
 
 
+def sanitized(path) -> str:
+    """The Windows launcher's fallback key for a path: no ':', '\\' and ' ' become '_'."""
+    return str(path).replace(":", "").replace("\\", "_").replace(" ", "_")
+
+
+class WindowsLauncherScriptTest(unittest.TestCase):
+    def test_starts_no_process_besides_java(self):
+        # Starting PowerShell for the SHA-1 keys added 0.3-1 s to every jdtls start (#40).
+        script = (fbd.SCRIPT_DIR / "jdtls" / "brewery-jdtls.cmd").read_text(encoding="utf-8")
+        code = [
+            line for line in script.splitlines()
+            if line.strip() and not line.lstrip().lower().startswith("rem")
+        ]
+        for line in code:
+            self.assertNotIn("powershell", line.lower(), line)
+            self.assertNotIn("in (`", line, line)  # for /f over a command's output
+
+
 @unittest.skipUnless(JDK, "needs a JDK 21 in BREWERY_TEST_JDK or JAVA_HOME")
 class LauncherTest(unittest.TestCase):
     @classmethod
@@ -197,12 +215,17 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(norm(props["osgi.sharedConfiguration.area"]), norm(jdtls / config))
         area = Path(props["osgi.configuration.area"])
         self.assertEqual(norm(area.parent), norm(self.cache / "config"))
-        self.assertRegex(area.name, r"^[0-9a-f]{40}$")
         # Without -data the workspace is per project directory, in the user cache.
         self.assertEqual(args[0], "-data")
         data = Path(args[1])
         self.assertEqual(norm(data.parent), norm(self.cache / "workspace"))
-        self.assertRegex(data.name, r"^jdtls-[0-9a-f]{40}$")
+        if WINDOWS:
+            # Without Brewery's key and -data: the sanitized paths, no hashing process.
+            self.assertEqual(area.name, sanitized(jdtls))
+            self.assertEqual(data.name, f"jdtls-{sanitized(self.project)}")
+        else:
+            self.assertRegex(area.name, r"^[0-9a-f]{40}$")
+            self.assertRegex(data.name, r"^jdtls-[0-9a-f]{40}$")
         self.assertEqual(len(args), 2)
         self.assertEqual(norm(props["user.dir"]), norm(self.project))
         self.assertEqual(props["brewery.agent"], "null")
@@ -221,6 +244,15 @@ class LauncherTest(unittest.TestCase):
         a = self.parse(self.run_launcher(self.make_bundle(self.tmp / "a")).stdout)[1]
         b = self.parse(self.run_launcher(self.make_bundle(self.tmp / "b")).stdout)[1]
         self.assertNotEqual(a["osgi.configuration.area"], b["osgi.configuration.area"])
+
+    @unittest.skipUnless(WINDOWS, "the Windows launcher")
+    def test_config_key_from_brewery(self):
+        # Brewery sets BREWERY_JDTLS_CONFIG_KEY in lsp.jdtls.binary.env (java_setup.rs).
+        launcher = self.make_bundle(self.tmp / "bundle")
+        key = "0123456789abcdef0123456789abcdef01234567"
+        env = self.env(BREWERY_JDTLS_CONFIG_KEY=key)
+        _, props, _ = self.parse(self.run_launcher(launcher, env=env).stdout)
+        self.assertEqual(norm(props["osgi.configuration.area"]), norm(self.cache / "config" / key))
 
     def test_jvm_arg_and_data_from_the_extension(self):
         # What jdtls_server.rs appends: --jvm-arg=-javaagent:<lombok> and -data <dir>.

@@ -45,6 +45,9 @@ need_exec jre/bin/java
 need_file brewery-daemon/brewery-daemon.jar
 need_exec jdtls/brewery-jdtls
 need_exec jdtls/tools/java-lsp-proxy
+need_exec jdtls/tools/gradle-lsp-bridge
+gradle_ls=$(cd "$root" && ls -d jdtls/tools/gradle-ls/*/lib 2>/dev/null | head -n 1)
+need_dir "${gradle_ls:-jdtls/tools/gradle-ls/<version>/lib}"
 need_file jdtls/tools/lombok.jar
 need_file jdtls/tools/java-debug.jar
 need_file extensions/java/extension.toml
@@ -53,7 +56,8 @@ need_file share/icons/hicolor/512x512/apps/brewery.png
 need_file share/icons/hicolor/1024x1024/apps/brewery.png
 for licence in README.txt brewery/LICENSE-GPL brewery/LICENSE-APACHE brewery-daemon/LICENSE \
     brewery-daemon/THIRD-PARTY-NOTICES.txt intellij-icons/NOTICE jre/LICENSE jre/SOURCE.txt \
-    jdtls/LICENSE lombok/LICENSE java-debug/LICENSE java-extension/LICENSE java-lsp-proxy/LICENSE; do
+    jdtls/LICENSE lombok/LICENSE java-debug/LICENSE java-extension/LICENSE java-lsp-proxy/LICENSE \
+    gradle-lsp-bridge/LICENSE gradle-ls/LICENSE.md gradle-ls/NOTICE.txt; do
     need_file "licenses/$licence"
 done
 # Every embedded font's licence text (OFL, IBM Plex), as assets/fonts/<font>/*.txt has it.
