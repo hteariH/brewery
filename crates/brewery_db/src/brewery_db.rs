@@ -33,8 +33,34 @@ actions!(
         RunStatement,
         /// Cancels the statement running in the query console.
         CancelStatement,
-        /// Copies the value of the selected result cell.
+        /// Copies the selected result cells: one value, or a range as tab-separated rows.
         CopyResultCell,
+        /// Selects the result cell above.
+        MoveCellUp,
+        /// Selects the result cell below.
+        MoveCellDown,
+        /// Selects the result cell to the left.
+        MoveCellLeft,
+        /// Selects the result cell to the right.
+        MoveCellRight,
+        /// Extends the selected result cells up by a row.
+        ExtendCellsUp,
+        /// Extends the selected result cells down by a row.
+        ExtendCellsDown,
+        /// Extends the selected result cells left by a column.
+        ExtendCellsLeft,
+        /// Extends the selected result cells right by a column.
+        ExtendCellsRight,
+        /// Selects the first result cell of the row.
+        MoveCellToRowStart,
+        /// Selects the last result cell of the row.
+        MoveCellToRowEnd,
+        /// Selects the first result cell.
+        MoveCellToFirst,
+        /// Selects the last fetched result cell.
+        MoveCellToLast,
+        /// Selects every fetched result cell.
+        SelectAllCells,
     ]
 );
 

@@ -102,6 +102,8 @@ browse schemas, tables, views, columns, indexes and foreign keys.
 New Query Console opens a SQL editor for the selected data source. Ctrl+Enter
 runs the selected text or the statement under the cursor, and Ctrl+F2 stops it.
 Results appear in a grid under the editor, and more rows load as you scroll.
+Click a cell or move with the arrow keys; Shift+click, Shift+arrows or a drag
+select a range, and Ctrl+C copies it as tab-separated rows.
 Double-click a table to open a console with `SELECT * FROM` that table.
 
 While you type in a console, Brewery suggests SQL keywords, the data source's schemas

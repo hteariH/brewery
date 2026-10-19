@@ -1,6 +1,6 @@
 use super::*;
 use crate::NewQueryConsole;
-use crate::result_grid::RESULT_EXPIRED;
+use crate::result_grid::{GridSelection, RESULT_EXPIRED};
 use crate::test_support::*;
 use crate::tree::RowKey;
 use brewery_daemon_client::{DB_NOT_FOUND, DB_QUERY_FAILED};
@@ -11,7 +11,7 @@ use gpui::{
 };
 use language::{Language, LanguageConfig};
 use serde_json::{Value, json};
-use settings::{BaseKeymap, DEFAULT_KEYMAP_PATH, KeymapFile, SPECIFIC_OVERRIDES_KEYMAP_PATH};
+use settings::{BaseKeymap, DEFAULT_KEYMAP_PATH, KeymapFile};
 use std::sync::Arc;
 use std::time::Duration;
 use workspace::item::ItemHandle as _;
@@ -404,15 +404,7 @@ async fn double_clicking_a_table_runs_select_star_in_a_new_console(cx: &mut Test
 #[gpui::test]
 async fn keystrokes_run_cancel_and_copy(cx: &mut TestAppContext) {
     let (console, cx) = console(cx).await;
-    cx.update(|_, cx| {
-        let base = BaseKeymap::JetBrains
-            .asset_path()
-            .expect("JetBrains has a keymap file");
-        // Other crates' actions are not linked into this binary; only ours matter here.
-        for path in [DEFAULT_KEYMAP_PATH, base, SPECIFIC_OVERRIDES_KEYMAP_PATH] {
-            cx.bind_keys(KeymapFile::load_asset_allow_partial_failure(path, cx).unwrap());
-        }
-    });
+    bind_brewery_keys(cx);
     let (run, cancel, copy) = if cfg!(target_os = "macos") {
         ("cmd-enter", "cmd-f2", "cmd-c")
     } else {
@@ -464,6 +456,105 @@ async fn keystrokes_run_cancel_and_copy(cx: &mut TestAppContext) {
     cx.simulate_keystrokes(run);
     cx.run_until_parked();
     assert_eq!(console.executed().len(), 2, "{run} from the grid runs too");
+}
+
+/// The default and JetBrains keymaps, then this checkout's overrides. Dev builds read assets from
+/// the checkout the test binary sits in, which is another one when the target directory is
+/// shared, so the overrides are compiled in from next to this file.
+fn bind_brewery_keys(cx: &mut VisualTestContext) {
+    let overrides = if cfg!(target_os = "macos") {
+        include_str!("../../../assets/keymaps/specific-overrides-macos.json")
+    } else {
+        include_str!("../../../assets/keymaps/specific-overrides.json")
+    };
+    cx.update(|_, cx| {
+        let base = BaseKeymap::JetBrains
+            .asset_path()
+            .expect("JetBrains has a keymap file");
+        for path in [DEFAULT_KEYMAP_PATH, base] {
+            cx.bind_keys(KeymapFile::load_asset_allow_partial_failure(path, cx).unwrap());
+        }
+        match KeymapFile::load(overrides, cx) {
+            settings::KeymapFileLoadResult::Success { key_bindings }
+            | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => {
+                cx.bind_keys(key_bindings)
+            }
+            settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+                panic!("the overrides keymap does not parse: {error}")
+            }
+        }
+    });
+}
+
+#[gpui::test]
+async fn arrow_keys_move_the_selected_cell_and_shift_extends_a_range(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    bind_brewery_keys(cx);
+    let (copy, select_all, last) = if cfg!(target_os = "macos") {
+        ("cmd-c", "cmd-a", "cmd-down")
+    } else {
+        ("ctrl-c", "ctrl-a", "ctrl-end")
+    };
+    console.type_sql("select * from owners", cx);
+    console.run(cx);
+    let grid = console.grid(cx);
+    let selected = |cx: &mut VisualTestContext| grid.read_with(cx, |grid, _| grid.selected_cell());
+    grid.update_in(cx, |grid, window, cx| {
+        window.focus(&grid.focus_handle(cx), cx);
+    });
+
+    // With nothing selected, the first move selects the first cell.
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(cx), Some((0, 0)));
+    cx.simulate_keystrokes("down down right");
+    assert_eq!(selected(cx), Some((2, 1)));
+    cx.simulate_keystrokes("right left up");
+    assert_eq!(selected(cx), Some((1, 0)));
+    cx.simulate_keystrokes("end");
+    assert_eq!(selected(cx), Some((1, 1)));
+    cx.simulate_keystrokes("home");
+    assert_eq!(selected(cx), Some((1, 0)));
+
+    // Shift extends from where the selection started; copying gives TSV rows.
+    cx.simulate_keystrokes("shift-down shift-right");
+    cx.simulate_keystrokes(copy);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("1\tname 1\n2\tname 2".to_string())
+    );
+    // A plain move collapses the range again.
+    cx.simulate_keystrokes("up");
+    let selection = grid.read_with(cx, |grid, _| grid.selection());
+    assert_eq!(selection, Some(GridSelection::cell(1, 1)));
+
+    // Moving to the last fetched row scrolls it into view, which fetches the next page.
+    cx.simulate_keystrokes(last);
+    cx.run_until_parked();
+    assert_eq!(selected(cx), Some((499, 1)));
+    let visible = grid.read_with(cx, |grid, _| grid.last_visible_rows());
+    assert!(visible.is_some_and(|rows| rows.contains(&499)));
+    assert_eq!(console.fetched_offsets(), [0, 500]);
+
+    cx.simulate_keystrokes(select_all);
+    let selection = grid.read_with(cx, |grid, _| grid.selection());
+    assert_eq!(
+        selection,
+        Some(GridSelection {
+            anchor: (0, 0),
+            head: (999, 1)
+        })
+    );
+
+    // Shift-click extends from the selected cell, as a drag does.
+    grid.update(cx, |grid, cx| {
+        grid.select_cell(4, 0, cx);
+        grid.extend_selection_to(5, 1, cx);
+    });
+    cx.simulate_keystrokes(copy);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("4\tname 4\n5\tname 5".to_string())
+    );
 }
 
 #[gpui::test]

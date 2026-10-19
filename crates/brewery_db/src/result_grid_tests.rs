@@ -124,7 +124,7 @@ fn a_truncated_result_says_so() {
 }
 
 #[test]
-fn column_widths_come_from_the_first_page() {
+fn column_widths_grow_with_later_pages() {
     let mut pages = GridPages::new(columns());
     pages.start_fetch();
     let mut first = page(0, 3);
@@ -136,7 +136,110 @@ fn column_widths_come_from_the_first_page() {
     let mut second = page(3, 1);
     second[0][1] = Some("y".repeat(300));
     pages.page_loaded(second, true);
-    assert_eq!(pages.column_chars(), &[7, 30], "later pages do not resize");
+    assert_eq!(
+        pages.column_chars(),
+        &[7, 300],
+        "a later page widens its column"
+    );
+}
+
+fn grid_with(rows: Vec<Vec<Option<String>>>) -> GridPages {
+    let mut pages = GridPages::new(columns());
+    pages.start_fetch();
+    pages.page_loaded(rows, true);
+    pages
+}
+
+#[test]
+fn one_cell_copies_as_its_value_and_a_range_as_tsv() {
+    let pages = grid_with(page(0, 4));
+    assert_eq!(pages.copy_text(&GridSelection::cell(2, 1)), "row 2");
+    // NULL copies as an empty value.
+    assert_eq!(pages.copy_text(&GridSelection::cell(1, 1)), "");
+    let range = GridSelection {
+        anchor: (2, 1),
+        head: (0, 0),
+    };
+    assert_eq!(pages.copy_text(&range), "0\trow 0\n1\t\n2\trow 2");
+}
+
+#[test]
+fn tsv_quotes_values_with_tabs_breaks_or_quotes() {
+    let pages = grid_with(vec![
+        vec![Some("a\tb".into()), Some("say \"hi\"".into())],
+        vec![Some("line\nbreak".into()), Some("plain".into())],
+    ]);
+    let all = GridSelection {
+        anchor: (0, 0),
+        head: (1, 1),
+    };
+    assert_eq!(
+        pages.copy_text(&all),
+        "\"a\tb\"\t\"say \"\"hi\"\"\"\n\"line\nbreak\"\tplain"
+    );
+    // A single cell copies raw.
+    assert_eq!(pages.copy_text(&GridSelection::cell(0, 1)), "say \"hi\"");
+}
+
+#[test]
+fn a_selection_covers_the_rectangle_between_anchor_and_head() {
+    let selection = GridSelection {
+        anchor: (5, 2),
+        head: (3, 0),
+    };
+    assert_eq!(selection.ranges(), (3..6, 0..3));
+    assert!(selection.contains(4, 1));
+    assert!(!selection.contains(6, 1));
+    assert_eq!(
+        selection.moved_to((7, 1), true),
+        GridSelection {
+            anchor: (5, 2),
+            head: (7, 1)
+        }
+    );
+    assert_eq!(selection.moved_to((7, 1), false), GridSelection::cell(7, 1));
+}
+
+#[test]
+fn moves_stay_inside_the_grid() {
+    let (rows, columns) = (10, 3);
+    assert_eq!(moved_cell((0, 0), CellMove::Up, rows, columns), (0, 0));
+    assert_eq!(moved_cell((0, 0), CellMove::Left, rows, columns), (0, 0));
+    assert_eq!(moved_cell((0, 0), CellMove::Down, rows, columns), (1, 0));
+    assert_eq!(moved_cell((9, 2), CellMove::Down, rows, columns), (9, 2));
+    assert_eq!(moved_cell((9, 2), CellMove::Right, rows, columns), (9, 2));
+    assert_eq!(
+        moved_cell((4, 1), CellMove::RowStart, rows, columns),
+        (4, 0)
+    );
+    assert_eq!(moved_cell((4, 1), CellMove::RowEnd, rows, columns), (4, 2));
+    assert_eq!(moved_cell((4, 1), CellMove::First, rows, columns), (0, 0));
+    assert_eq!(moved_cell((4, 1), CellMove::Last, rows, columns), (9, 2));
+}
+
+#[test]
+fn revealing_a_column_scrolls_as_little_as_possible() {
+    // A 300 px view scrolled 100 px to the right shows 100..400.
+    assert_eq!(
+        offset_to_reveal(-100., 300., 150., 100.),
+        -100.,
+        "already visible"
+    );
+    assert_eq!(
+        offset_to_reveal(-100., 300., 50., 100.),
+        -50.,
+        "left of the view"
+    );
+    assert_eq!(
+        offset_to_reveal(-100., 300., 380., 100.),
+        -180.,
+        "right of the view"
+    );
+    assert_eq!(
+        offset_to_reveal(0., 300., 500., 400.),
+        -500.,
+        "wider than the view"
+    );
 }
 
 #[test]
