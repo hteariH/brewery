@@ -4,6 +4,7 @@
 
 pub mod completion;
 pub mod console;
+pub mod console_store;
 pub mod data_source_modal;
 pub mod panel;
 pub mod result_grid;
@@ -65,6 +66,7 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
+    workspace::register_serializable_item::<QueryConsole>(cx);
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleDatabasePanel, window, cx| {
             workspace.toggle_panel_focus::<DatabasePanel>(window, cx);

@@ -105,6 +105,9 @@ Results appear in a grid under the editor, and more rows load as you scroll.
 Click a cell or move with the arrow keys; Shift+click, Shift+arrows or a drag
 select a range, and Ctrl+C copies it as tab-separated rows.
 Double-click a table to open a console with `SELECT * FROM` that table.
+A console's SQL is saved as you type (in Brewery's data directory, one file per
+console of a data source); closing the tab keeps it for the next console of that data
+source, and open consoles come back when the project is reopened.
 
 While you type in a console, Brewery suggests SQL keywords, the data source's schemas
 and tables after `FROM` or `JOIN`, and columns of the tables in the statement,

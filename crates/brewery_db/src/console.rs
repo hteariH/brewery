@@ -2,30 +2,36 @@
 //! the result of the last statement (a paged grid, an update count or the daemon's error).
 
 use crate::completion::{Dialect, SqlCompletionProvider};
+use crate::console_store::{self, QueryConsoleDb, SAVE_DELAY, SavedConsole};
 use crate::panel::WAITING_FOR_DAEMON;
 use crate::result_grid::ResultGrid;
 use crate::schema_cache::SchemaCache;
 use crate::sql_context::is_schema_change;
 use crate::statements::statements_to_run;
 use crate::{CancelStatement, RunStatement};
+use anyhow::Context as _;
 use brewery_daemon_client::{
     CancelParams, ConnectionInfo, ExecuteParams, ExecuteResult, ProjectDaemon, daemon_error_message,
 };
 use editor::actions::ShowCompletions;
 use editor::{Editor, MultiBufferOffset};
+use fs::Fs;
 use futures::StreamExt as _;
 use gpui::{
     AnyEntity, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
-    Subscription, Task, Window, px, relative,
+    Subscription, Task, WeakEntity, Window, px, relative,
 };
-use language::Buffer;
+use language::{Buffer, BufferEvent};
 use project::Project;
 use std::any::TypeId;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use ui::{Tooltip, prelude::*};
-use workspace::Workspace;
 use workspace::item::{Item, ItemEvent};
 use workspace::searchable::SearchableItemHandle;
+use util::ResultExt as _;
+use workspace::{ItemId, SerializableItem, Workspace, WorkspaceId, delete_unloaded_items};
 
 pub const NOTHING_TO_RUN: &str = "Nothing to run";
 /// How long a cancelled statement may keep the console busy before it is left to finish alone.
@@ -72,16 +78,37 @@ pub struct QueryConsole {
     /// What SQL completion knows about the data source's schema.
     schema_cache: Entity<SchemaCache>,
     _schema_arrived: Subscription,
+    /// The file that keeps the console's SQL (see `console_store`).
+    file: PathBuf,
+    fs: Arc<dyn Fs>,
+    /// The file has been read; until then nothing is written, so it cannot be overwritten.
+    loaded: bool,
+    /// Edits not written to the file yet.
+    unsaved: bool,
+    save_task: Option<Task<()>>,
+    _load_task: Task<()>,
+    _buffer_edits: Subscription,
 }
 
 impl QueryConsole {
+    /// A console backed by `file`, or by the first console file of the data source that no open
+    /// console uses. What the file holds is put before any text the console already has.
     pub fn new(
         connection: ConnectionInfo,
         daemon: Entity<ProjectDaemon>,
         project: Entity<Project>,
+        file: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let file = match file {
+            Some(file) => {
+                console_store::claim_file(&file, cx);
+                file
+            }
+            None => console_store::claim_free_file(&connection.id, cx),
+        };
+        let fs = project.read(cx).fs().clone();
         let languages = project.read(cx).languages().clone();
         let buffer = cx.new(|cx| {
             let buffer = Buffer::local("", cx);
@@ -107,6 +134,20 @@ impl QueryConsole {
             })
             .detach();
         });
+        let buffer_edits = cx.subscribe(&buffer, |this, _, event: &BufferEvent, cx| {
+            if matches!(event, BufferEvent::Edited { .. }) {
+                this.schedule_save(cx);
+            }
+        });
+        let load_task = {
+            let fs = fs.clone();
+            let file = file.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let text = fs.load(&file).await.ok();
+                this.update_in(cx, |this, window, cx| this.file_loaded(text, window, cx))
+                    .ok();
+            })
+        };
         let schema_cache = SchemaCache::for_connection(&daemon, &connection.id, cx);
         let completion =
             SqlCompletionProvider::new(schema_cache.clone(), Dialect::for_connection(&connection));
@@ -146,7 +187,76 @@ impl QueryConsole {
             cancel_timeout: None,
             schema_cache,
             _schema_arrived: schema_arrived,
+            file,
+            fs,
+            loaded: false,
+            unsaved: false,
+            save_task: None,
+            _load_task: load_task,
+            _buffer_edits: buffer_edits,
         }
+    }
+
+    /// The file that keeps this console's SQL.
+    pub fn file(&self) -> &Path {
+        &self.file
+    }
+
+    fn file_loaded(&mut self, text: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.loaded = true;
+        let Some(text) = text.filter(|text| !text.is_empty()) else {
+            if self.unsaved {
+                self.schedule_save(cx);
+            }
+            return;
+        };
+        self.editor.update(cx, |editor, cx| {
+            if editor.text(cx).is_empty() {
+                editor.set_text(text, window, cx);
+                // That is what the file holds already.
+                self.unsaved = false;
+                self.save_task = None;
+            } else {
+                // Opened to run a statement (a double-clicked table): it stays below the old SQL.
+                let text = format!("{text}\n\n");
+                editor.buffer().update(cx, |buffer, cx| {
+                    buffer.edit([(MultiBufferOffset(0)..MultiBufferOffset(0), text)], None, cx)
+                });
+            }
+        });
+    }
+
+    /// Writes the SQL to the file shortly after the last edit.
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        self.unsaved = true;
+        if !self.loaded {
+            return;
+        }
+        self.save_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DELAY).await;
+            let Some(write) = this.update(cx, |this, cx| this.write_file(cx)).ok().flatten() else {
+                return;
+            };
+            write.await;
+        }));
+    }
+
+    /// Starts writing the SQL to the file if there are unsaved edits.
+    fn write_file(&mut self, cx: &mut App) -> Option<Task<()>> {
+        if !self.loaded || !self.unsaved {
+            return None;
+        }
+        // A pending `save_task` (maybe the caller) finds nothing to write any more.
+        self.unsaved = false;
+        let text = self.editor.read(cx).text(cx);
+        let fs = self.fs.clone();
+        let file = self.file.clone();
+        Some(cx.background_spawn(async move {
+            if let Some(dir) = file.parent() {
+                fs.create_dir(dir).await.log_err();
+            }
+            fs.atomic_write(file, text).await.log_err();
+        }))
     }
 
     pub fn connection(&self) -> &ConnectionInfo {
@@ -355,6 +465,11 @@ impl QueryConsole {
         self.running = None;
         self.cancel_timeout = None;
         self.close_cursor(cx);
+        // Closing the tab keeps the SQL: the next console of the data source opens it again.
+        if let Some(write) = self.write_file(cx) {
+            write.detach();
+        }
+        console_store::release_file(&self.file, cx);
     }
 
     /// The text of the status line and its colour.
@@ -474,7 +589,7 @@ pub fn open_console(
 ) -> Entity<QueryConsole> {
     let project = workspace.project().clone();
     let daemon = daemon.unwrap_or_else(|| ProjectDaemon::for_project(&project, cx));
-    let console = cx.new(|cx| QueryConsole::new(connection, daemon, project, window, cx));
+    let console = cx.new(|cx| QueryConsole::new(connection, daemon, project, None, window, cx));
     workspace.add_item_to_active_pane(Box::new(console.clone()), None, true, window, cx);
     if let Some(sql) = run {
         console.update(cx, |console, cx| {
@@ -528,6 +643,86 @@ impl Render for QueryConsole {
 impl Focusable for QueryConsole {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.editor.focus_handle(cx)
+    }
+}
+
+/// Reopens a console a workspace remembered, on its file.
+pub fn restore_console(
+    saved: SavedConsole,
+    project: Entity<Project>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<QueryConsole> {
+    let daemon = ProjectDaemon::for_project(&project, cx);
+    cx.new(|cx| {
+        QueryConsole::new(
+            saved.connection,
+            daemon,
+            project,
+            Some(saved.file),
+            window,
+            cx,
+        )
+    })
+}
+
+impl SerializableItem for QueryConsole {
+    fn serialized_item_kind() -> &'static str {
+        "BreweryQueryConsole"
+    }
+
+    fn cleanup(
+        workspace_id: WorkspaceId,
+        alive_items: Vec<ItemId>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<()>> {
+        let db = QueryConsoleDb::global(cx);
+        delete_unloaded_items(alive_items, workspace_id, "brewery_query_consoles", &db, cx)
+    }
+
+    fn deserialize(
+        project: Entity<Project>,
+        _workspace: WeakEntity<Workspace>,
+        workspace_id: WorkspaceId,
+        item_id: ItemId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Entity<Self>>> {
+        let db = QueryConsoleDb::global(cx);
+        window.spawn(cx, async move |cx| {
+            let saved = db
+                .get_console(item_id, workspace_id)?
+                .context("no saved query console")?;
+            cx.update(|window, cx| restore_console(saved, project, window, cx))
+        })
+    }
+
+    fn serialize(
+        &mut self,
+        workspace: &mut Workspace,
+        item_id: ItemId,
+        _closing: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<anyhow::Result<()>>> {
+        // The app may be quitting: write what was typed in the last moments as well.
+        if let Some(write) = self.write_file(cx) {
+            write.detach();
+        }
+        let workspace_id = workspace.database_id()?;
+        let saved = SavedConsole {
+            connection: self.connection.clone(),
+            file: self.file.clone(),
+        };
+        let db = QueryConsoleDb::global(cx);
+        Some(cx.background_spawn(async move {
+            db.save_console(item_id, workspace_id, saved).await
+        }))
+    }
+
+    fn should_serialize(&self, event: &Self::Event) -> bool {
+        // A renamed data source is reopened under its new name.
+        matches!(event, ConsoleEvent::TitleChanged)
     }
 }
 

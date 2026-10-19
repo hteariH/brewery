@@ -962,3 +962,158 @@ async fn tables_of_other_schemas_are_inserted_with_their_schema(cx: &mut TestApp
     console.accept(cx);
     assert_eq!(console.text(cx), "SELECT * FROM billing.invoices");
 }
+
+fn fake_fs(fixture: &Fixture, cx: &mut VisualTestContext) -> Arc<dyn fs::Fs> {
+    fixture
+        .workspace
+        .read_with(cx, |workspace, cx| workspace.project().read(cx).fs().clone())
+}
+
+fn file_text(fs: &Arc<dyn fs::Fs>, path: &std::path::Path) -> Option<String> {
+    let bytes = fs.as_fake().read_file_sync(path).ok()?;
+    Some(String::from_utf8(bytes).unwrap())
+}
+
+fn active_console(fixture: &Fixture, cx: &mut VisualTestContext) -> Entity<QueryConsole> {
+    fixture
+        .workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.active_item_as::<QueryConsole>(cx)
+        })
+        .expect("a console should be the active item")
+}
+
+#[gpui::test]
+async fn the_sql_is_kept_in_a_file_and_comes_back_after_the_tab_is_closed(
+    cx: &mut TestAppContext,
+) {
+    let (console, cx) = console(cx).await;
+    let fs = fake_fs(&console.fixture, cx);
+    let file = console
+        .console
+        .read_with(cx, |console, _| console.file().to_path_buf());
+    assert_eq!(file, crate::console_store::console_file("c1", 1));
+    assert_eq!(file_text(&fs, &file), None, "nothing written before an edit");
+
+    console.type_sql("select * from owners;\n", cx);
+    cx.executor()
+        .advance_clock(crate::console_store::SAVE_DELAY + Duration::from_millis(1));
+    cx.run_until_parked();
+    assert_eq!(
+        file_text(&fs, &file).as_deref(),
+        Some("select * from owners;\n")
+    );
+
+    // Typed just before closing: still written.
+    console.type_sql("select 1;\n", cx);
+    let Console { fixture, console } = console;
+    close_console(&fixture, console, cx);
+    assert_eq!(file_text(&fs, &file).as_deref(), Some("select 1;\n"));
+
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select(Some(RowKey::data_source("c1")), cx);
+        panel.new_query_console(window, cx)
+    });
+    cx.run_until_parked();
+    let reopened = active_console(&fixture, cx);
+    reopened.read_with(cx, |console, cx| {
+        assert_eq!(console.file(), file);
+        assert_eq!(console.editor().read(cx).text(cx), "select 1;\n");
+    });
+}
+
+#[gpui::test]
+async fn a_second_console_of_a_data_source_gets_its_own_file(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let fixture = &console.fixture;
+    fixture
+        .panel
+        .update_in(cx, |panel, window, cx| panel.new_query_console(window, cx));
+    cx.run_until_parked();
+    let second = active_console(fixture, cx);
+    assert_ne!(second.entity_id(), console.console.entity_id());
+    second.read_with(cx, |second, _| {
+        assert_eq!(second.file(), crate::console_store::console_file("c1", 2));
+    });
+}
+
+#[gpui::test]
+async fn a_table_opened_in_a_console_with_saved_sql_goes_below_it(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    let fs = fake_fs(&fixture, cx);
+    fs.atomic_write(
+        crate::console_store::console_file("c1", 1),
+        "select 42;".into(),
+    )
+    .await
+    .unwrap();
+    let connection = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.tree().sources()[0].clone());
+    fixture.workspace.update_in(cx, |workspace, window, cx| {
+        open_console(
+            workspace,
+            connection,
+            None,
+            Some("SELECT * FROM public.owners".into()),
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let console = active_console(&fixture, cx);
+    console.read_with(cx, |console, cx| {
+        assert_eq!(
+            console.editor().read(cx).text(cx),
+            "select 42;\n\nSELECT * FROM public.owners"
+        );
+    });
+    assert_eq!(
+        fixture.calls_of("db/execute"),
+        [json!({ "connectionId": "c1", "sql": "SELECT * FROM public.owners" })]
+    );
+}
+
+#[gpui::test]
+async fn a_restored_console_reopens_its_data_source_and_file(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    let fs = fake_fs(&fixture, cx);
+    let file = crate::console_store::console_file("c2", 3);
+    fs.atomic_write(file.clone(), "select * from reports;".into())
+        .await
+        .unwrap();
+    let connection = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.tree().sources()[1].clone());
+    let saved = crate::console_store::SavedConsole {
+        connection,
+        file: file.clone(),
+    };
+    let project = fixture
+        .workspace
+        .read_with(cx, |workspace, _| workspace.project().clone());
+    let console = cx.update(|window, cx| restore_console(saved, project, window, cx));
+    cx.run_until_parked();
+    console.read_with(cx, |console, cx| {
+        assert_eq!(console.connection().id, "c2");
+        assert_eq!(console.tab_content_text(0, cx), "Reports console");
+        assert_eq!(console.editor().read(cx).text(cx), "select * from reports;");
+    });
+    // A new console of that data source does not take the restored console's file.
+    let next = cx.update(|_, cx| crate::console_store::claim_free_file("c2", cx));
+    assert_eq!(next, crate::console_store::console_file("c2", 1));
+    let next = cx.update(|_, cx| crate::console_store::claim_free_file("c2", cx));
+    assert_eq!(next, crate::console_store::console_file("c2", 2));
+    let next = cx.update(|_, cx| crate::console_store::claim_free_file("c2", cx));
+    assert_eq!(next, crate::console_store::console_file("c2", 4));
+}
+
+#[test]
+fn console_files_are_named_per_data_source() {
+    let first = crate::console_store::console_file("4f1c-9a", 1);
+    assert!(first.ends_with("db_consoles/4f1c-9a/console.sql"));
+    let third = crate::console_store::console_file("4f1c-9a", 3);
+    assert!(third.ends_with("db_consoles/4f1c-9a/console_3.sql"));
+    let odd = crate::console_store::consoles_dir("../x:y");
+    assert!(odd.ends_with("db_consoles/___x_y"));
+}
