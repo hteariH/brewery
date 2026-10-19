@@ -29,6 +29,8 @@ class DbService(
     private val snapshotOnSeparateConnection: (ConnectionInfo) -> Boolean = { isMariaDbUrl(it.url) },
     /** Most rows of a result the driver buffers in the heap instead of streaming; tests inject a small value. */
     private val maxBufferedRows: Long = CursorManager.DEFAULT_MAX_BUFFERED_ROWS,
+    /** How long any other unfinished cursor may sit without a fetch before it is closed. */
+    private val idleCursorTtlMs: Long = CursorManager.DEFAULT_IDLE_CURSOR_TTL_MS,
 ) : AutoCloseable {
     private val projectKey: String = try {
         root.toRealPath().toString()
@@ -331,7 +333,7 @@ class DbService(
 
     private fun cursorsOf(key: String, session: Session): CursorManager =
         cursorManagers.compute(key) { _, old ->
-            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions, clock, streamingTtlMs, expireUnfinishedBeforeCommands, maxBufferedRows).also { manager ->
+            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions, clock, streamingTtlMs, expireUnfinishedBeforeCommands, maxBufferedRows, idleCursorTtlMs).also { manager ->
                 // A manager of a closed session would otherwise stay in the map (and keep the session alive).
                 session.onClose { if (session.closed) cursorManagers.remove(key, manager) }
             }

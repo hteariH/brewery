@@ -140,6 +140,29 @@ class StreamingTransactionTest {
     }
 
     @Test
+    fun `by default a streaming result survives minutes of reading its first page`() {
+        val defaults = DbService(
+            Files.createTempDirectory("brewery-stream-ttl"),
+            InMemorySecretStore(),
+            clock = { now },
+            manageTransactions = { true },
+        )
+        try {
+            val lite = defaults.save(ConnectionInfo("", "lite", "sqlite", "jdbc:sqlite:$db", null, false, emptyMap()), null).id
+            val cursor = defaults.execute(lite, "SELECT id FROM t").cursorId!!
+            assertEquals(1, defaults.fetch(cursor, 0, 1).rows.size)
+            now = 4 * 60_000L
+            defaults.sessions.sweep()
+            assertEquals(1, defaults.fetch(cursor, 1, 1).rows.size, "still there after four minutes")
+            now += 5 * 60_000L
+            defaults.sessions.sweep()
+            assertEquals(-32013, assertFailsWith<DbException> { defaults.fetch(cursor, 2, 1) }.code)
+        } finally {
+            defaults.close()
+        }
+    }
+
+    @Test
     fun `a failing fetch rolls back and drops every streaming cursor`() {
         val a = service.execute(id, "SELECT id FROM t").cursorId!!
         val bad = service.execute(id, "SELECT 1 AS v UNION ALL SELECT abs(-9223372036854775808)").cursorId!!

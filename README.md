@@ -135,8 +135,10 @@ Limits in this version:
 - On macOS the console keys are Cmd+Enter (run) and Cmd+F2 (stop).
 - Without a secret store on the system the password is not saved; a warning says
   so when you save the data source.
-- PostgreSQL results stop loading more rows after about a minute without
-  scrolling ("Result expired — run again").
+- Results stop loading more rows when you leave them without scrolling for a while
+  ("Result expired — run again"): five minutes on PostgreSQL, a minute on other
+  databases, where an unfinished result can lock the table (SQLite) or its metadata
+  (MariaDB/MySQL).
 
 ## Git
 
