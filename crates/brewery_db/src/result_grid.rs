@@ -34,6 +34,9 @@ pub const RESULT_EXPIRED: &str = "Result expired — run again";
 /// Shown when the daemon cut a result off: it caps results it cannot stream (inside a
 /// PostgreSQL transaction, `... RETURNING`, `FOR UPDATE`) at 100 000 rows.
 pub const RESULT_TRUNCATED: &str = "first rows only, the rest was cut off";
+/// Shown when the daemon dropped further results of the same SQL text (several statements the
+/// splitter took for one).
+pub const MORE_RESULTS_DROPPED: &str = "further results of this SQL were not shown";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FetchFailure {
@@ -59,6 +62,8 @@ pub struct GridPages {
     column_chars: Vec<usize>,
     /// The daemon cut the result off after these rows.
     truncated: bool,
+    /// The daemon dropped results that followed this one.
+    more_results: bool,
 }
 
 impl GridPages {
@@ -70,6 +75,7 @@ impl GridPages {
             state: PageState::Idle,
             column_chars,
             truncated: false,
+            more_results: false,
         }
     }
 
@@ -131,12 +137,18 @@ impl GridPages {
         self.truncated = true;
     }
 
+    /// The last page said further results of the SQL were dropped (`moreResults`).
+    pub fn mark_more_results(&mut self) {
+        self.more_results = true;
+    }
+
     /// Why paging stopped early, if it did.
     pub fn problem(&self) -> Option<&str> {
         match &self.state {
             PageState::Stopped(FetchFailure::Expired) => Some(RESULT_EXPIRED),
             PageState::Stopped(FetchFailure::Error(message)) => Some(message),
             PageState::Done if self.truncated => Some(RESULT_TRUNCATED),
+            PageState::Done if self.more_results => Some(MORE_RESULTS_DROPPED),
             _ => None,
         }
     }
@@ -420,6 +432,9 @@ impl ResultGrid {
                         this.pages.page_loaded(page.rows, page.done);
                         if page.truncated {
                             this.pages.mark_truncated();
+                        }
+                        if page.more_results {
+                            this.pages.mark_more_results();
                         }
                     }
                     Err(error) => {

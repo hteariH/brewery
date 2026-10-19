@@ -30,8 +30,11 @@ actions!(
         ToggleDatabasePanel,
         /// Opens an SQL console for the data source selected in the Database tool window.
         NewQueryConsole,
-        /// Runs the selection, or the statement at the cursor, in the query console.
+        /// Runs the statements of the selection, or the statement at the cursor, in the query
+        /// console.
         RunStatement,
+        /// Runs every statement of the query console, one result tab each.
+        RunAllStatements,
         /// Cancels the statement running in the query console.
         CancelStatement,
         /// Copies the selected result cells: one value, or a range as tab-separated rows.

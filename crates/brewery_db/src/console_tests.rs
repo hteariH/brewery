@@ -964,9 +964,9 @@ async fn tables_of_other_schemas_are_inserted_with_their_schema(cx: &mut TestApp
 }
 
 fn fake_fs(fixture: &Fixture, cx: &mut VisualTestContext) -> Arc<dyn fs::Fs> {
-    fixture
-        .workspace
-        .read_with(cx, |workspace, cx| workspace.project().read(cx).fs().clone())
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).fs().clone()
+    })
 }
 
 fn file_text(fs: &Arc<dyn fs::Fs>, path: &std::path::Path) -> Option<String> {
@@ -984,16 +984,18 @@ fn active_console(fixture: &Fixture, cx: &mut VisualTestContext) -> Entity<Query
 }
 
 #[gpui::test]
-async fn the_sql_is_kept_in_a_file_and_comes_back_after_the_tab_is_closed(
-    cx: &mut TestAppContext,
-) {
+async fn the_sql_is_kept_in_a_file_and_comes_back_after_the_tab_is_closed(cx: &mut TestAppContext) {
     let (console, cx) = console(cx).await;
     let fs = fake_fs(&console.fixture, cx);
     let file = console
         .console
         .read_with(cx, |console, _| console.file().to_path_buf());
     assert_eq!(file, crate::console_store::console_file("c1", 1));
-    assert_eq!(file_text(&fs, &file), None, "nothing written before an edit");
+    assert_eq!(
+        file_text(&fs, &file),
+        None,
+        "nothing written before an edit"
+    );
 
     console.type_sql("select * from owners;\n", cx);
     cx.executor()
@@ -1116,4 +1118,154 @@ fn console_files_are_named_per_data_source() {
     assert!(third.ends_with("db_consoles/4f1c-9a/console_3.sql"));
     let odd = crate::console_store::consoles_dir("../x:y");
     assert!(odd.ends_with("db_consoles/___x_y"));
+}
+
+fn executed_sql(console: &Console) -> Vec<String> {
+    console
+        .executed()
+        .iter()
+        .map(|params| params["sql"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[gpui::test]
+async fn a_selection_of_several_statements_runs_them_all_with_a_tab_each(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let text = "select * from owners;\nupdate owners set name = 'x';\nselect * from pets;";
+    console.type_sql(text, cx);
+    console.editor(cx).update_in(cx, |editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([MultiBufferOffset(0)..MultiBufferOffset(text.len())])
+        });
+    });
+    console.run(cx);
+    assert_eq!(
+        executed_sql(&console),
+        [
+            "select * from owners",
+            "update owners set name = 'x'",
+            "select * from pets"
+        ]
+    );
+    console.console.read_with(cx, |console, _| {
+        assert_eq!(console.result_count(), 3);
+        assert_eq!(console.active_result(), 2, "the last result is shown");
+        assert!(!console.is_running());
+    });
+    assert_eq!(console.status(cx), "500 rows fetched+ in 12 ms");
+    let cursor = console
+        .grid(cx)
+        .read_with(cx, |grid, _| grid.cursor_id().map(str::to_string));
+    assert_eq!(cursor.as_deref(), Some("k2"));
+
+    console
+        .console
+        .update(cx, |console, cx| console.show_result(1, cx));
+    assert_eq!(console.status(cx), "3 rows affected in 4 ms");
+    console
+        .console
+        .read_with(cx, |console, _| assert!(console.grid().is_none()));
+    console
+        .console
+        .update(cx, |console, cx| console.show_result(0, cx));
+    let cursor = console
+        .grid(cx)
+        .read_with(cx, |grid, _| grid.cursor_id().map(str::to_string));
+    assert_eq!(cursor.as_deref(), Some("k1"));
+
+    // The next run closes every cursor of the last one.
+    console.type_sql("select 1", cx);
+    console.run(cx);
+    assert_eq!(
+        console.fixture.calls_of("db/close"),
+        [json!({ "cursorId": "k1" }), json!({ "cursorId": "k2" })]
+    );
+    console
+        .console
+        .read_with(cx, |console, _| assert_eq!(console.result_count(), 1));
+}
+
+#[gpui::test]
+async fn run_all_waits_for_the_first_page_before_the_next_statement(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("select * from owners;| select * from pets", cx);
+    console.fixture.state.hold("db/fetch");
+    console.console.update_in(cx, |console, window, cx| {
+        console.run_all(&RunAllStatements, window, cx)
+    });
+    cx.run_until_parked();
+    // Running the second statement now could end the first result before it showed anything.
+    assert_eq!(executed_sql(&console), ["select * from owners"]);
+    console
+        .console
+        .read_with(cx, |console, _| assert!(console.is_running()));
+    assert_eq!(console.status(cx), "0 rows fetched+ in 12 ms");
+
+    console.fixture.state.release("db/fetch");
+    cx.run_until_parked();
+    assert_eq!(
+        executed_sql(&console),
+        ["select * from owners", "select * from pets"]
+    );
+    console.fixture.state.release("db/fetch");
+    cx.run_until_parked();
+    console.console.read_with(cx, |console, _| {
+        assert!(!console.is_running());
+        assert_eq!(console.result_count(), 2);
+    });
+}
+
+#[gpui::test]
+async fn a_failing_statement_ends_the_run(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("update owners set name = 'x'; fail; select 1", cx);
+    console.console.update_in(cx, |console, window, cx| {
+        console.run_all(&RunAllStatements, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        executed_sql(&console),
+        ["update owners set name = 'x'", "fail"]
+    );
+    console.console.read_with(cx, |console, cx| {
+        assert_eq!(console.result_count(), 2);
+        assert_eq!(console.status_line(cx).1, Color::Error);
+        assert!(!console.is_running());
+    });
+}
+
+#[gpui::test]
+async fn cancel_drops_the_statements_not_started_yet(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.fixture.state.hold("db/execute");
+    console.type_sql("select pg_sleep(60); select 1; select 2", cx);
+    console.console.update_in(cx, |console, window, cx| {
+        console.run_all(&RunAllStatements, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(console.status(cx), "Running 1 of 3…");
+    console.console.update_in(cx, |console, window, cx| {
+        console.cancel(&CancelStatement, window, cx)
+    });
+    console.fixture.state.release("db/execute");
+    cx.run_until_parked();
+    assert_eq!(executed_sql(&console), ["select pg_sleep(60)"]);
+    console.console.read_with(cx, |console, _| {
+        assert!(!console.is_running());
+        assert_eq!(console.result_count(), 1);
+    });
+}
+
+#[gpui::test]
+async fn results_the_daemon_dropped_are_mentioned(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("update owners /*more*/ set name = 'x'", cx);
+    console.run(cx);
+    assert_eq!(
+        console.status(cx),
+        format!("3 rows affected in 4 ms · {MORE_RESULTS_DROPPED}")
+    );
+    console.console.read_with(cx, |console, cx| {
+        assert_eq!(console.status_line(cx).1, Color::Warning)
+    });
 }

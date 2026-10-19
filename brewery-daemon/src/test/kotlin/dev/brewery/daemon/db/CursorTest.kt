@@ -65,6 +65,14 @@ class CursorTest {
         val p4 = service.fetch(r.cursorId!!, 5, 2)
         assertEquals(emptyList(), p4.rows)
         assertEquals(true, p4.done)
+        assertEquals(false, p3.moreResults, "one statement has no further results")
+    }
+
+    @Test
+    fun `an update of one statement has no further results`() {
+        val r = service.execute(id, "UPDATE t SET name = name WHERE id = 1")
+        assertEquals(1L, r.updateCount)
+        assertEquals(false, r.moreResults)
     }
 
     @Test

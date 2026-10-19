@@ -124,6 +124,16 @@ fn a_truncated_result_says_so() {
 }
 
 #[test]
+fn dropped_results_are_mentioned_once_the_rows_are_in() {
+    let mut pages = GridPages::new(columns());
+    pages.start_fetch();
+    pages.page_loaded(page(0, 2), true);
+    assert_eq!(pages.problem(), None);
+    pages.mark_more_results();
+    assert_eq!(pages.problem(), Some(MORE_RESULTS_DROPPED));
+}
+
+#[test]
 fn column_widths_grow_with_later_pages() {
     let mut pages = GridPages::new(columns());
     pages.start_fetch();

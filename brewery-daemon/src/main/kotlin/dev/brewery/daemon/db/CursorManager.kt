@@ -20,6 +20,8 @@ private class Cursor(
     /** Rows read from the result set so far. */
     var read = 0L
     var truncated = false
+    /** The SQL produced another result after this one (seen once this one is exhausted). */
+    var moreResults = false
     val columnCount: Int get() = kinds.size
     /** True while this cursor relies on the autocommit-off transaction [CursorManager] opened for streaming. */
     var ownsTx = false
@@ -235,7 +237,7 @@ class CursorManager(
                 // SQLite reports the previous statement's change count for one that changes no rows (DDL).
                 val unchanged = changesBefore != null && sqliteTotalChanges(connection) == changesBefore
                 val count = if (unchanged) 0L else statement.updateCount.toLong().coerceAtLeast(0)
-                return DbExecuteResult(null, emptyList(), count, elapsedMs)
+                return DbExecuteResult(null, emptyList(), count, elapsedMs, moreResults = hasMoreResults(statement))
             }
             val rs = statement.resultSet
             val meta = rs.metaData
@@ -264,6 +266,11 @@ class CursorManager(
             if (!kept) runCatching { statement.close() }
         }
     }
+
+    /** Whether [statement] has another result after the current one, which this call discards. */
+    private fun hasMoreResults(statement: Statement): Boolean = runCatching {
+        statement.moreResults || statement.updateCount != -1
+    }.getOrDefault(false)
 
     /** `sqlite3_total_changes()` of a bundled-driver SQLite connection (no query), or null for anything else. */
     private fun sqliteTotalChanges(c: Connection): Long? = runCatching {
@@ -300,7 +307,7 @@ class CursorManager(
             }
             if (!cursor.done && rows.size == max) cursor.pending = step(cursor, render = true)
             val done = cursor.done && cursor.pending == null
-            return DbFetchResult(rows, done, done && cursor.truncated)
+            return DbFetchResult(rows, done, done && cursor.truncated, done && cursor.moreResults)
         } catch (e: Throwable) {
             // A failed or cancelled result set cannot be resumed; inside our streaming transaction the failure
             // also aborts every other streaming cursor.
@@ -436,6 +443,7 @@ class CursorManager(
         if (atLimit) cursor.truncated = cursor.resultSet.next()
         if (atLimit || !cursor.resultSet.next()) {
             cursor.done = true
+            if (!atLimit) cursor.moreResults = hasMoreResults(cursor.statement)
             runCatching { cursor.resultSet.close() }
             runCatching { cursor.statement.close() }
             release(cursor)

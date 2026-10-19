@@ -366,7 +366,9 @@ pub struct ColumnInfo {
     pub type_name: String,
 }
 
-/// `cursor_id` is `None` for statements without a result set; `update_count` is set then.
+/// `cursor_id` is `None` for statements without a result set; `update_count` is set then. Only
+/// the first result of the SQL comes back: `more_results` says an update count was followed by
+/// further results, which the daemon dropped (for rows, the last page says so).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecuteResult {
@@ -374,6 +376,8 @@ pub struct ExecuteResult {
     pub columns: Vec<ColumnInfo>,
     pub update_count: Option<i64>,
     pub elapsed_ms: u64,
+    #[serde(default)]
+    pub more_results: bool,
 }
 
 /// Rows `[offset, offset + limit)` of a cursor. Cursors are forward-only: an offset behind what
@@ -396,6 +400,10 @@ pub struct FetchResult {
     /// buffer, at 100 000 rows).
     #[serde(default)]
     pub truncated: bool,
+    /// Set with the last page when the SQL produced further results after this one; the daemon
+    /// dropped them.
+    #[serde(default)]
+    pub more_results: bool,
 }
 
 /// Cancels the running statement of a connection's session; `cursor_id` may stand in for the
@@ -712,6 +720,7 @@ mod tests {
                 .unwrap();
         assert_eq!(update.cursor_id, None);
         assert_eq!(update.update_count, Some(3));
+        assert!(!update.more_results, "older daemons do not send it");
     }
 
     #[test]

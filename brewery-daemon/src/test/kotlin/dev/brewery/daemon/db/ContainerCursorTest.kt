@@ -206,4 +206,22 @@ class PostgresCursorTest {
         assertEquals(listOf(listOf("7")), service.fetch(r.cursorId!!, 0, 5).rows)
         assertEquals(true, service.sessions.run(id) { it.autoCommit })
     }
+
+    @Test
+    fun `results after the first are reported, not silently dropped`() {
+        val update = service.execute(id, "SET application_name = 'brewery'; SELECT 1")
+        assertEquals(null, update.cursorId)
+        assertEquals(true, update.moreResults)
+
+        val first = service.execute(id, "SELECT 1; SELECT 2")
+        val page = service.fetch(first.cursorId!!, 0, 10)
+        assertEquals(listOf(listOf("1")), page.rows)
+        assertEquals(true, page.done)
+        assertEquals(true, page.moreResults)
+
+        val single = service.execute(id, "SELECT 1")
+        assertEquals(false, single.moreResults)
+        assertEquals(false, service.fetch(single.cursorId!!, 0, 10).moreResults)
+        assertEquals(false, service.execute(id, "SET application_name = 'brewery'").moreResults)
+    }
 }

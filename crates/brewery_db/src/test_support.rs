@@ -209,9 +209,14 @@ impl FakeState {
                     || sql.starts_with("insert")
                     || sql.starts_with("delete")
                 {
+                    // `/*more*/` stands for SQL the daemon found further results in.
                     return Ok(json!({
-                        "cursorId": null, "columns": [], "updateCount": 3, "elapsedMs": 4
+                        "cursorId": null, "columns": [], "updateCount": 3, "elapsedMs": 4,
+                        "moreResults": sql.contains("/*more*/")
                     }));
+                }
+                if sql.starts_with("fail") {
+                    anyhow::bail!("syntax error at or near \"fail\"");
                 }
                 let cursor = self.cursors_opened.get() + 1;
                 self.cursors_opened.set(cursor);

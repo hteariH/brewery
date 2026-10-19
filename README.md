@@ -100,7 +100,9 @@ Connection checks the settings before you save them. Expand a data source to
 browse schemas, tables, views, columns, indexes and foreign keys.
 
 New Query Console opens a SQL editor for the selected data source. Ctrl+Enter
-runs the selected text or the statement under the cursor, and Ctrl+F2 stops it.
+runs the statement under the cursor, or every statement of the selection one after
+another, and Ctrl+F2 stops it; Run All in the console toolbar runs the whole console.
+Each statement of a run gets a result tab, and a failing statement ends the run.
 Results appear in a grid under the editor, and more rows load as you scroll.
 Click a cell or move with the arrow keys; Shift+click, Shift+arrows or a drag
 select a range, and Ctrl+C copies it as tab-separated rows.
@@ -124,7 +126,10 @@ Limits in this version:
 - Consoles on the same data source share one connection, so stopping a statement
   in one console can stop a statement running in another, and running a
   statement ends the unread results of the other consoles.
-- Only one statement runs at a time; there is no "run all".
+- The results of a run share one connection: on PostgreSQL a statement that writes
+  ends the streaming of the reads before it, and on MariaDB/MySQL every statement
+  does; those results keep their first page ("Result expired — run again" when you
+  scroll further).
 - MySQL Connector/J is not bundled because of its GPL licence; MySQL servers are
   reached through MariaDB Connector/J.
 - On macOS the console keys are Cmd+Enter (run) and Cmd+F2 (stop).

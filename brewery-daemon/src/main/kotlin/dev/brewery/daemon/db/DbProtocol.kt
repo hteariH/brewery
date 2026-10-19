@@ -49,8 +49,18 @@ data class DbIntrospectParams(val connectionId: String, val path: List<String>?,
 data class DbExecuteParams(val connectionId: String, val sql: String)
 data class ColumnInfo(val name: String, val type: String)
 
-/** [cursorId] is null for statements that produce no result set; then [updateCount] is set instead. */
-data class DbExecuteResult(val cursorId: String?, val columns: List<ColumnInfo>, val updateCount: Long?, val elapsedMs: Long)
+/**
+ * [cursorId] is null for statements that produce no result set; then [updateCount] is set instead. Only the first
+ * result of the SQL is returned: [moreResults] says that an update count was followed by further results, which were
+ * dropped (for a result set the last page says so, see [DbFetchResult.moreResults]).
+ */
+data class DbExecuteResult(
+    val cursorId: String?,
+    val columns: List<ColumnInfo>,
+    val updateCount: Long?,
+    val elapsedMs: Long,
+    val moreResults: Boolean = false,
+)
 
 /**
  * Rows [offset, offset + limit) of a cursor; limit is capped at 1000. Results are forward-only: an offset behind
@@ -60,8 +70,14 @@ data class DbFetchParams(val cursorId: String, val offset: Int, val limit: Int)
 /**
  * [truncated] comes with the last page ([done]) of a result that was cut off: one the driver has to hold in memory
  * (PostgreSQL inside a user transaction, DML ... RETURNING, SELECT ... FOR UPDATE) stops after 100 000 rows.
+ * [moreResults] comes with the last page when the SQL produced further results after this one; they were dropped.
  */
-data class DbFetchResult(val rows: List<List<String?>>, val done: Boolean, val truncated: Boolean = false)
+data class DbFetchResult(
+    val rows: List<List<String?>>,
+    val done: Boolean,
+    val truncated: Boolean = false,
+    val moreResults: Boolean = false,
+)
 
 /** Cancels the running statement of the session of [connectionId]; [cursorId] may stand in for it when it is blank. */
 data class DbCancelParams(val connectionId: String?, val cursorId: String? = null)
