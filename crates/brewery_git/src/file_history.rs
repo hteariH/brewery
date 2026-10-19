@@ -9,9 +9,11 @@
 //! falls back to `git_ui`.
 //!
 //! Renames: the history follows the file (`git log --follow`), so at an older commit the file
-//! may have had another path. Each action asks git for the file's path at the selected commit
-//! and at its first parent (`git log --follow --name-status -z` over the same history the tab
-//! shows) and compares those paths.
+//! may have had another path. Each action needs the file's path at the selected commit and at
+//! its first parent. When the file exists under its current path at both, that is the answer
+//! (two `cat-file -e`); otherwise (a rename or the commit that added it) git walks the history
+//! (`git log --follow --name-status -z`, the same history the tab shows), once per HEAD: the
+//! tab keeps the parsed walk until HEAD moves.
 
 use crate::cli::{GitCli, Oid, RepoPath};
 use crate::log_panel::LogPanel;
@@ -28,6 +30,7 @@ use gpui::{
 use language::LineEnding;
 use project::ProjectPath;
 use project::git_store::{GitStore, Repository, RepositoryId};
+use std::sync::Arc;
 use std::time::Duration;
 use ui::{Tooltip, prelude::*};
 use workspace::notifications::NotificationId;
@@ -238,13 +241,102 @@ pub(crate) fn parse_follow_log(output: &str, path: &RepoPath) -> Vec<FollowedCom
     commits
 }
 
-/// The paths of `path` (a path in the working tree) at `sha` and its first parent.
-pub fn revision_paths(
+/// The rename-following walk of a file's history, for the HEAD it was read at.
+struct FollowLog {
+    head: Option<SharedString>,
+    commits: Arc<Vec<FollowedCommit>>,
+}
+
+/// Whether `<rev>:<path>` exists.
+fn exists_at(
+    repo: &Entity<Repository>,
+    rev: &str,
+    path: &RepoPath,
+    cx: &mut App,
+) -> Task<Result<bool>> {
+    let object = format!("{rev}:{}", path.as_unix_str());
+    let check = GitCli::run(
+        repo,
+        vec!["cat-file".into(), "-e".into(), object],
+        Some(FOLLOW_LOG_TIMEOUT),
+        cx,
+    );
+    cx.background_spawn(async move { Ok(check.await?.success()) })
+}
+
+/// The paths of `path` (a path in the working tree) at `sha` and its first parent, without
+/// walking the history when the file has its current path at both.
+pub async fn revision_paths(
+    this: &WeakEntity<FileHistoryView>,
     repo: &Entity<Repository>,
     path: &RepoPath,
     sha: Oid,
+    cx: &mut AsyncWindowContext,
+) -> Result<RevisionPaths> {
+    let parent = cx
+        .update(|_, cx| GitCli::resolve_commit(repo, &format!("{sha}^"), cx))?
+        .await?;
+    let at_commit = cx
+        .update(|_, cx| exists_at(repo, &sha.to_string(), path, cx))?
+        .await?;
+    let at_parent = match parent {
+        Some(parent) if at_commit => {
+            cx.update(|_, cx| exists_at(repo, &parent.to_string(), path, cx))?
+                .await?
+        }
+        _ => true,
+    };
+    if at_commit && at_parent {
+        return Ok(RevisionPaths {
+            path: path.clone(),
+            parent: parent.map(|parent| (parent, path.clone())),
+        });
+    }
+
+    let head = repo.read_with(cx, |repo, _| {
+        repo.head_commit.as_ref().map(|commit| commit.sha.clone())
+    });
+    let cached = this.read_with(cx, |this, _| {
+        this.follow_log
+            .as_ref()
+            .filter(|log| log.head == head)
+            .map(|log| log.commits.clone())
+    })?;
+    let commits = match cached {
+        Some(commits) => commits,
+        None => {
+            let commits = Arc::new(cx.update(|_, cx| follow_log(repo, path, cx))?.await?);
+            this.update(cx, |this, _| {
+                this.follow_log = Some(FollowLog {
+                    head,
+                    commits: commits.clone(),
+                })
+            })?;
+            commits
+        }
+    };
+    if let Some(commit) = commits.iter().find(|commit| commit.sha == sha) {
+        return Ok(RevisionPaths {
+            path: commit.path.clone(),
+            parent: commit
+                .parents
+                .first()
+                .map(|parent| (*parent, commit.parent_path.clone())),
+        });
+    }
+    // Not in the followed history (it changed since the tab loaded): same path.
+    Ok(RevisionPaths {
+        parent: parent.map(|parent| (parent, path.clone())),
+        path: path.clone(),
+    })
+}
+
+/// `git log --follow` of `path`, parsed.
+fn follow_log(
+    repo: &Entity<Repository>,
+    path: &RepoPath,
     cx: &mut App,
-) -> Task<Result<RevisionPaths>> {
+) -> Task<Result<Vec<FollowedCommit>>> {
     let log = GitCli::run(
         repo,
         vec![
@@ -261,31 +353,22 @@ pub fn revision_paths(
         Some(FOLLOW_LOG_TIMEOUT),
         cx,
     );
-    let parent = GitCli::resolve_commit(repo, &format!("{sha}^"), cx);
     let path = path.clone();
     cx.background_spawn(async move {
         let output = log.await?;
         if !output.success() {
             bail!("git log failed: {}", output.message());
         }
-        if let Some(commit) = parse_follow_log(&output.stdout, &path)
-            .into_iter()
-            .find(|commit| commit.sha == sha)
-        {
-            return Ok(RevisionPaths {
-                path: commit.path,
-                parent: commit
-                    .parents
-                    .first()
-                    .map(|parent| (*parent, commit.parent_path)),
-            });
-        }
-        // Not in the followed history (it changed since the tab loaded): same path.
-        Ok(RevisionPaths {
-            parent: parent.await?.map(|parent| (parent, path.clone())),
-            path,
-        })
+        #[cfg(test)]
+        FOLLOW_LOGS_RUN.with(|runs| runs.set(runs.get() + 1));
+        Ok(parse_follow_log(&output.stdout, &path))
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times the follow walk ran on this (test) thread.
+    pub(crate) static FOLLOW_LOGS_RUN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A file-history tab of the Log panel: the toolbar and the file's graph.
@@ -295,6 +378,8 @@ pub struct FileHistoryView {
     repo_id: RepositoryId,
     path: RepoPath,
     graph: Entity<GitGraph>,
+    /// Read by the first action that needs it, kept until HEAD moves.
+    follow_log: Option<FollowLog>,
     _graph_changes: Subscription,
 }
 
@@ -325,6 +410,7 @@ impl FileHistoryView {
             repo_id,
             path,
             graph,
+            follow_log: None,
             _graph_changes: graph_changes,
         }
     }
@@ -391,9 +477,7 @@ impl FileHistoryView {
             async |this, repo, sha, cx| {
                 let (workspace, path) =
                     this.read_with(cx, |this, _| (this.workspace.clone(), this.path.clone()))?;
-                let paths = cx
-                    .update(|_, cx| revision_paths(&repo, &path, sha, cx))?
-                    .await?;
+                let paths = revision_paths(&this, &repo, &path, sha, cx).await?;
                 cx.update(|window, cx| {
                     RevisionDiffView::open_paths(
                         workspace,
@@ -417,9 +501,7 @@ impl FileHistoryView {
         self.run(SHOW_DIFF, window, cx, async |this, repo, sha, cx| {
             let (workspace, path) =
                 this.read_with(cx, |this, _| (this.workspace.clone(), this.path.clone()))?;
-            let paths = cx
-                .update(|_, cx| revision_paths(&repo, &path, sha, cx))?
-                .await?;
+            let paths = revision_paths(&this, &repo, &path, sha, cx).await?;
             let (old, old_path) = match paths.parent {
                 Some((parent, parent_path)) => (OldSide::Revision(parent.to_string()), parent_path),
                 None => (OldSide::Empty, paths.path.clone()),
@@ -462,9 +544,7 @@ impl FileHistoryView {
             if answer.await.ok() != Some(0) {
                 return Ok(());
             }
-            let paths = cx
-                .update(|_, cx| revision_paths(&repo, &path, sha, cx))?
-                .await?;
+            let paths = revision_paths(&this, &repo, &path, sha, cx).await?;
             // In its checked-out form (eol and smudge filters, with the current path's
             // attributes), even across a rename.
             let content = cx

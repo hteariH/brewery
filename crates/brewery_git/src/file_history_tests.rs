@@ -491,6 +491,8 @@ async fn actions_follow_renames(cx: &mut TestAppContext) {
     open_history(&fixture, "new.txt", cx);
     let history = active_history(&fixture, cx);
     wait_for_commits(&history, 2, cx);
+    let walks = || FOLLOW_LOGS_RUN.with(|runs| runs.get());
+    let walks_before = walks();
 
     select(&history, &first, cx);
     history
@@ -499,6 +501,11 @@ async fn actions_follow_renames(cx: &mut TestAppContext) {
         })
         .await
         .expect("compare with local");
+    assert_eq!(
+        walks() - walks_before,
+        1,
+        "new.txt is not at the first commit"
+    );
     select(&history, &renamed, cx);
     history
         .update_in(cx, |history, window, cx| history.show_diff(window, cx))
@@ -532,6 +539,74 @@ async fn actions_follow_renames(cx: &mut TestAppContext) {
     get.await.expect("get");
     assert_eq!(repo.read("new.txt"), "one\ntwo\nthree\nfour\n");
     assert!(!repo.work.join("old.txt").exists());
+    assert_eq!(
+        walks() - walks_before,
+        1,
+        "the tab reuses the walk while HEAD stays"
+    );
+
+    // A new commit moves HEAD: the walk is read again.
+    repo.git(&["commit", "--quiet", "-am", "get the first version"]);
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let repository = fixture.repository.clone();
+    wait_until(cx, "the new HEAD", |cx| {
+        repository.read_with(cx, |repository, _| {
+            repository
+                .head_commit
+                .as_ref()
+                .is_some_and(|commit| commit.sha.as_ref() == head)
+        })
+    });
+    // The history reloads with the new commit.
+    wait_for_commits(&history, 3, cx);
+    select(&history, &first, cx);
+    history
+        .update_in(cx, |history, window, cx| {
+            history.compare_with_local(window, cx)
+        })
+        .await
+        .expect("compare with local");
+    assert_eq!(walks() - walks_before, 2);
+}
+
+#[gpui::test]
+async fn actions_without_a_rename_skip_the_history_walk(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    let first = repo.commit("a.txt", "one\n", "first");
+    let second = repo.commit("a.txt", "two\n", "second");
+    let (fixture, cx) = open_real(&repo, cx).await;
+    open_history(&fixture, "a.txt", cx);
+    let history = active_history(&fixture, cx);
+    wait_for_commits(&history, 2, cx);
+    let walks_before = FOLLOW_LOGS_RUN.with(|runs| runs.get());
+
+    select(&history, &second, cx);
+    history
+        .update_in(cx, |history, window, cx| history.show_diff(window, cx))
+        .await
+        .expect("show diff");
+    history
+        .update_in(cx, |history, window, cx| {
+            history.compare_with_local(window, cx)
+        })
+        .await
+        .expect("compare with local");
+    // The root commit has no parent to look at.
+    select(&history, &first, cx);
+    history
+        .update_in(cx, |history, window, cx| history.show_diff(window, cx))
+        .await
+        .expect("show diff of the root commit");
+    cx.run_until_parked();
+    assert_eq!(FOLLOW_LOGS_RUN.with(|runs| runs.get()), walks_before);
+    let views = diff_views(&fixture, cx);
+    assert_eq!(views.len(), 3);
+    views[0].read_with(cx, |view, _| {
+        assert_eq!(view.old_side(), &revision(&first));
+        assert_eq!(view.new_side(), &revision(&second));
+        assert_eq!(view.old_path(), &repo_path("a.txt"));
+    });
 }
 
 #[gpui::test]
