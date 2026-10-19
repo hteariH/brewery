@@ -1,0 +1,36 @@
+name: Save the Gradle cache
+description: >
+  Saves ~/.gradle/caches and ~/.gradle/wrapper under the given key (the paths the "Restore the
+  Gradle cache" steps of brewery_ci.yml restore), from main and tags only (SAVE_CACHE).
+  Gradle daemons the tests and smoke tests started (Tooling API, jdtls Gradle imports) still hold
+  their caches' lock files, which Windows tar can't read ("tar.exe exit code 2", nothing saved):
+  they are stopped first, and the lock files are left out. The path list must stay identical to
+  the restore steps' (it is part of the cache version).
+inputs:
+  key:
+    description: The cache key (the restore step's cache-primary-key)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Stop Gradle daemons
+      if: env.SAVE_CACHE == 'true'
+      shell: pwsh
+      run: |
+        if ($IsWindows) {
+          Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" |
+            Where-Object { $_.CommandLine -match 'GradleDaemon|GradleWrapperMain' } |
+            ForEach-Object { Write-Host "stopping $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        } else {
+          pkill -f 'GradleDaemon|GradleWrapperMain'
+        }
+        $global:LASTEXITCODE = 0
+    - if: env.SAVE_CACHE == 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+          !~/.gradle/caches/**/*.lock
+          !~/.gradle/caches/**/gc.properties
+        key: ${{ inputs.key }}
