@@ -139,6 +139,8 @@ pub struct DataSourceModal {
     /// Shown after a first Save while consoles of the data source have a transaction open; the
     /// next Save goes ahead.
     rollback_warning: Option<SharedString>,
+    /// Opened because the daemon could not sign in; the password field takes the focus.
+    asking_for_password: bool,
     saving: bool,
     show_add_driver: bool,
     new_driver_name: Entity<InputField>,
@@ -273,6 +275,7 @@ impl DataSourceModal {
             test_state: TestState::Idle,
             error: None,
             rollback_warning: None,
+            asking_for_password: false,
             saving: false,
             show_add_driver: false,
             new_driver_name,
@@ -307,6 +310,18 @@ impl DataSourceModal {
 
     pub fn rollback_warning(&self) -> Option<&SharedString> {
         self.rollback_warning.as_ref()
+    }
+
+    /// Opened because the daemon could not sign in: says so and starts at the password.
+    pub fn ask_for_password(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.asking_for_password = true;
+        self.error = Some(SharedString::from(message.to_string()));
+        window.focus(&self.password.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    pub fn is_asking_for_password(&self) -> bool {
+        self.asking_for_password
     }
 
     /// The consoles of the data source being edited that have a transaction open: saving closes
@@ -776,7 +791,11 @@ impl ModalView for DataSourceModal {}
 
 impl Focusable for DataSourceModal {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.name.focus_handle(cx)
+        if self.asking_for_password {
+            self.password.focus_handle(cx)
+        } else {
+            self.name.focus_handle(cx)
+        }
     }
 }
 

@@ -209,6 +209,25 @@ fn select_all_from_a_table_path() {
 }
 
 #[test]
+fn select_top_and_the_qualified_name_of_a_table() {
+    let owners: Vec<String> = vec!["public".into(), "Owners".into()];
+    assert_eq!(qualified_name("postgresql", &owners), "public.\"Owners\"");
+    assert_eq!(
+        select_top_from("postgresql", &owners, 500),
+        "SELECT * FROM public.\"Owners\" LIMIT 500"
+    );
+    assert_eq!(
+        select_top_from("mariadb", &["shop".into(), "items".into()], 500),
+        "SELECT * FROM shop.items LIMIT 500"
+    );
+    assert_eq!(
+        select_top_from("h2", &["public".into(), "t".into()], 500),
+        "SELECT * FROM public.t",
+        "no LIMIT where the driver's dialect is unknown"
+    );
+}
+
+#[test]
 fn common_non_reserved_keywords_are_quoted_too() {
     for word in [
         "rank", "row", "interval", "window", "level", "comment", "range",

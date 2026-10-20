@@ -321,14 +321,27 @@ pub fn quote_identifier(driver_id: &str, name: &str) -> String {
     format!("{quote}{escaped}{quote}")
 }
 
-/// `SELECT * FROM` the table at `path` (namespace, if any, then the table name).
-pub fn select_all_from(driver_id: &str, path: &[String]) -> String {
-    let qualified = path
-        .iter()
+/// The name of the table at `path` (namespace, if any, then the table name) as SQL.
+pub fn qualified_name(driver_id: &str, path: &[String]) -> String {
+    path.iter()
         .map(|part| quote_identifier(driver_id, part))
         .collect::<Vec<_>>()
-        .join(".");
-    format!("SELECT * FROM {qualified}")
+        .join(".")
+}
+
+/// `SELECT * FROM` the table at `path` (namespace, if any, then the table name).
+pub fn select_all_from(driver_id: &str, path: &[String]) -> String {
+    format!("SELECT * FROM {}", qualified_name(driver_id, path))
+}
+
+/// The first `limit` rows of the table at `path`. Drivers without a known `LIMIT` get the plain
+/// `SELECT *`, which the result grid pages anyway.
+pub fn select_top_from(driver_id: &str, path: &[String], limit: u32) -> String {
+    let select = select_all_from(driver_id, path);
+    match driver_id {
+        "postgresql" | "mysql" | "mariadb" | "sqlite" => format!("{select} LIMIT {limit}"),
+        _ => select,
+    }
 }
 
 #[cfg(test)]

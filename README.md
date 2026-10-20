@@ -97,7 +97,10 @@ The Database tool window (left stripe) lists the project's data sources. Use `+`
 to add one: PostgreSQL, MySQL, MariaDB and SQLite drivers are bundled, and any
 other database works through a JDBC driver jar you add in the same dialog. Test
 Connection checks the settings before you save them. Expand a data source to
-browse schemas, tables, views, columns, indexes and foreign keys.
+browse schemas, tables, views, columns, indexes and foreign keys. Right-click a
+table or view for Select Top 500 and Copy Qualified Name; Show System Objects in the
+same menu also lists schemas such as `pg_catalog` and `information_schema`. When the
+database rejects the password, the data source dialog opens at the password field.
 
 New Query Console opens a SQL editor for the selected data source. Ctrl+Enter
 runs the statement under the cursor, or every statement of the selection one after
