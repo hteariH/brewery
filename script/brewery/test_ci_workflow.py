@@ -103,6 +103,28 @@ class PathsFilterTests(unittest.TestCase):
         for path in ["crates/editor/src/editor.rs", "docs/src/README.md", "packaging"]:
             self.assertFalse(filter_matches("bundle", path), path)
 
+    def test_lite_filter_covers_the_extension_and_what_is_synced_into_it(self):
+        # sync_brewery_lite.py --check fails when any of these changes without a re-sync.
+        for path in [
+            "extensions/brewery-lite/src/lib.rs",
+            "extensions/brewery-lite/Cargo.lock",
+            "crates/brewery_theme/icons/icon_theme.json",
+            "crates/brewery_theme/icons/dark/fileTypes_java.svg",
+            "assets/themes/brewery/brewery.json",
+            "crates/zed/BREWERY_VERSION",
+            "script/brewery/sync_brewery_lite.py",
+        ]:
+            self.assertTrue(filter_matches("lite", path), path)
+        for path in ["crates/editor/src/editor.rs", "extensions/html/src/html.rs"]:
+            self.assertFalse(filter_matches("lite", path), path)
+
+    def test_lite_job_runs_on_the_lite_output(self):
+        jobs = load(WORKFLOW)["jobs"]
+        self.assertIn("lite", jobs["changes"]["outputs"])
+        self.assertEqual(jobs["brewery-lite"]["if"], "needs.changes.outputs.lite == 'true'")
+        runs = [s.get("run", "") for s in jobs["brewery-lite"]["steps"]]
+        self.assertIn("python3 script/brewery/sync_brewery_lite.py --check", runs)
+
 
 @unittest.skipIf(yaml is None, "PyYAML is not installed")
 class LicenceTests(unittest.TestCase):

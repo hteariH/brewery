@@ -281,6 +281,8 @@ members = [
     "tooling/perf",
     "tooling/xtask",
 ]
+# Brewery Lite builds for wasm32-wasip2 on its own, with its own Cargo.lock.
+exclude = ["extensions/brewery-lite"]
 default-members = ["crates/zed"]
 
 [workspace.package]

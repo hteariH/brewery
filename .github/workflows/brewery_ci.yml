@@ -71,6 +71,7 @@ jobs:
       windows_build: ${{ steps.plan.outputs.windows_build }}
       other_builds: ${{ steps.plan.outputs.other_builds }}
       bundle: ${{ steps.plan.outputs.bundle }}
+      lite: ${{ steps.plan.outputs.lite }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && inputs.release != true
@@ -102,6 +103,15 @@ jobs:
               - 'packaging/**'
               - 'crates/zed/resources/**'
               - '.github/workflows/brewery_ci.yml'
+            # The Brewery Lite extension and what sync_brewery_lite.py copies into it.
+            lite:
+              - 'extensions/brewery-lite/**'
+              - 'crates/brewery_theme/icons/**'
+              - 'assets/themes/brewery/**'
+              - 'crates/zed/BREWERY_VERSION'
+              - 'script/brewery/sync_brewery_lite.py'
+              - 'script/brewery/test_sync_brewery_lite.py'
+              - '.github/workflows/brewery_ci.yml'
       - id: plan
         shell: bash
         env:
@@ -110,6 +120,7 @@ jobs:
           RUST_CHANGED: ${{ steps.filter.outputs.rust }}
           DAEMON_CHANGED: ${{ steps.filter.outputs.daemon }}
           BUNDLE_CHANGED: ${{ steps.filter.outputs.bundle }}
+          LITE_CHANGED: ${{ steps.filter.outputs.lite }}
           INPUT_WINDOWS_BUILD: ${{ inputs.windows_build }}
           INPUT_ALL_PLATFORMS: ${{ inputs.all_platforms }}
           RELEASE: ${{ inputs.release }}
@@ -126,6 +137,8 @@ jobs:
           if [[ $everything == true || "$DAEMON_CHANGED" == true ]]; then daemon=true; fi
           bundle=false
           if [[ $everything == true || "$BUNDLE_CHANGED" == true ]]; then bundle=true; fi
+          lite=false
+          if [[ $everything == true || "$LITE_CHANGED" == true ]]; then lite=true; fi
           # "[win]" in the pushed commit message asks for the Windows check and exe on a branch.
           win_tag=false
           if [[ "$EVENT" == push && "$HEAD_MESSAGE" == *"[win]"* ]]; then win_tag=true; fi
@@ -147,6 +160,7 @@ jobs:
             echo "windows_build=$windows_build"
             echo "other_builds=$other_builds"
             echo "bundle=$bundle"
+            echo "lite=$lite"
           } | tee -a "$GITHUB_OUTPUT"
 
   check-linux:
@@ -419,6 +433,28 @@ jobs:
           name: bundle-${{ matrix.target }}
           path: ${{ runner.os == 'Windows' && env.BUNDLE || format('target/bundle-{0}.tar.gz', matrix.target) }}
           retention-days: 14
+
+  # The Brewery Lite Zed extension: a standalone crate (not a workspace member) for wasm32-wasip2.
+  brewery-lite:
+    name: Brewery Lite extension
+    needs: changes
+    if: needs.changes.outputs.lite == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Theme and icons match the IDE
+        run: python3 script/brewery/sync_brewery_lite.py --check
+      - name: Test the sync script
+        run: python3 -m unittest -v script/brewery/test_sync_brewery_lite.py
+      - name: Add the wasm target
+        run: rustup target add wasm32-wasip2
+      - name: Test
+        working-directory: extensions/brewery-lite
+        run: cargo test --locked
+      - name: Build
+        working-directory: extensions/brewery-lite
+        run: cargo build --locked --release --target wasm32-wasip2
 
   # Zed's licences of the Rust dependencies (cargo-about over every package of Cargo.lock, for
   # all targets, so one file serves every platform). They are embedded in the app (Help > View

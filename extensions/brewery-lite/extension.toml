@@ -1,0 +1,18 @@
+id = "brewery-lite"
+name = "Brewery Lite"
+description = "Spring Boot config completion, an MCP server for Java/Spring projects and databases, and Brewery's IntelliJ-style theme and icons."
+version = "0.1.5"
+schema_version = 1
+authors = ["hteariH <https://github.com/hteariH>"]
+repository = "https://github.com/hteariH/brewery"
+
+[language_servers.brewery-spring-config]
+name = "Brewery Spring Config"
+languages = ["YAML", "Properties"]
+
+[context_servers.brewery]
+
+[[capabilities]]
+kind = "process:exec"
+command = "java"
+args = ["-version"]
