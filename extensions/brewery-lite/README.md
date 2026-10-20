@@ -18,8 +18,15 @@ against the release's `SHA256SUMS` before running it.
 
 ## Requirements
 
-- Java 21 or newer. The extension uses `java` from your `PATH` (or the `java_path`
-  setting) when it is version 21 or newer; otherwise it downloads a Java 21 runtime.
+- Java 21 or newer. The extension picks the first of:
+  1. the `java_path` setting (used as is, see below);
+  2. for the language server, `$JAVA_HOME/bin/java` of your project's shell environment, then
+     `java` on that shell's `PATH`, each only when it is Java 21 or newer;
+  3. `java` on Zed's own `PATH`, when it is Java 21 or newer;
+  4. a Java 21 runtime (Eclipse Temurin JRE from api.adoptium.net), downloaded once into the
+     extension's work directory.
+- `application.properties` support needs an extension that provides the "Properties" language
+  (for example the Java extension); `application.yml` works in stock Zed.
 
 ## Settings
 
