@@ -1,5 +1,6 @@
 package dev.brewery.daemon
 
+import dev.brewery.daemon.mcp.DbTools
 import dev.brewery.daemon.mcp.McpServer
 import dev.brewery.daemon.mcp.McpTool
 import dev.brewery.daemon.mcp.ProjectTools
@@ -47,8 +48,8 @@ fun runMcp(root: Path, input: InputStream, rpcOut: OutputStream, tools: List<Mcp
     exit(0)
 }
 
-/** Every MCP tool for [root]; the tool sets are added by later tasks. */
-fun mcpTools(root: Path): List<McpTool> = ProjectTools(root).tools()
+/** Every MCP tool for [root]: the project tools and the read-only tools on its Spring datasource. */
+fun mcpTools(root: Path): List<McpTool> = ProjectTools(root).tools() + DbTools(root).tools()
 
 private fun daemonVersion(): String = McpServer::class.java.`package`?.implementationVersion ?: "dev"
 
