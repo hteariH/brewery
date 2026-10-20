@@ -46,11 +46,24 @@ data class DbDriversAddJarParams(val driverId: String, val name: String, val cla
 /** [includeSystem] (optional, default false) also lists `pg_catalog`, `information_schema`, `sqlite_*` and the like. */
 data class DbIntrospectParams(val connectionId: String, val path: List<String>?, val includeSystem: Boolean? = null)
 
-data class DbExecuteParams(val connectionId: String, val sql: String)
+/** [sessionId] (optional) runs [sql] in a session of its own, created on first use; without it the connection's shared session. */
+data class DbExecuteParams(val connectionId: String, val sql: String, val sessionId: String? = null)
 data class ColumnInfo(val name: String, val type: String)
 
-/** [cursorId] is null for statements that produce no result set; then [updateCount] is set instead. */
-data class DbExecuteResult(val cursorId: String?, val columns: List<ColumnInfo>, val updateCount: Long?, val elapsedMs: Long)
+/**
+ * [cursorId] is null for statements that produce no result set; then [updateCount] is set instead. Only the first
+ * result of the SQL is returned: [moreResults] says that an update count was followed by further results, which were
+ * dropped (for a result set the last page says so, see [DbFetchResult.moreResults]). [inTransaction] says the
+ * session has a transaction of the user's open afterwards (BEGIN without COMMIT or ROLLBACK yet).
+ */
+data class DbExecuteResult(
+    val cursorId: String?,
+    val columns: List<ColumnInfo>,
+    val updateCount: Long?,
+    val elapsedMs: Long,
+    val moreResults: Boolean = false,
+    val inTransaction: Boolean = false,
+)
 
 /**
  * Rows [offset, offset + limit) of a cursor; limit is capped at 1000. Results are forward-only: an offset behind
@@ -60,9 +73,21 @@ data class DbFetchParams(val cursorId: String, val offset: Int, val limit: Int)
 /**
  * [truncated] comes with the last page ([done]) of a result that was cut off: one the driver has to hold in memory
  * (PostgreSQL inside a user transaction, DML ... RETURNING, SELECT ... FOR UPDATE) stops after 100 000 rows.
+ * [moreResults] comes with the last page when the SQL produced further results after this one; they were dropped.
  */
-data class DbFetchResult(val rows: List<List<String?>>, val done: Boolean, val truncated: Boolean = false)
+data class DbFetchResult(
+    val rows: List<List<String?>>,
+    val done: Boolean,
+    val truncated: Boolean = false,
+    val moreResults: Boolean = false,
+)
 
-/** Cancels the running statement of the session of [connectionId]; [cursorId] may stand in for it when it is blank. */
-data class DbCancelParams(val connectionId: String?, val cursorId: String? = null)
+/**
+ * Cancels the running statement of session [sessionId] of [connectionId] (without one, the shared session); [cursorId]
+ * may stand in for both when [connectionId] is blank.
+ */
+data class DbCancelParams(val connectionId: String?, val cursorId: String? = null, val sessionId: String? = null)
 data class DbCloseParams(val cursorId: String)
+
+/** Closes session [sessionId] of [connectionId] (a closed query console's); what it left uncommitted is rolled back. */
+data class DbCloseSessionParams(val connectionId: String, val sessionId: String)

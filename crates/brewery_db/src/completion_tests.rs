@@ -25,7 +25,8 @@ fn offered_with(marked: &str, schema: Option<&DbSchema>, driver_id: &str) -> Vec
 fn offered_in(marked: &str, schema: Option<&DbSchema>, dialect: &Dialect) -> Vec<SqlCompletion> {
     let offset = marked.find('|').expect("a cursor marker");
     let text = marked.replacen('|', "", 1);
-    completions_for(&context_at(&text, offset), schema, dialect)
+    let flavor = crate::statements::SqlFlavor::for_driver(&dialect.driver_id);
+    completions_for(&context_at(&text, offset, flavor), schema, dialect)
 }
 
 fn offered(marked: &str) -> Vec<String> {

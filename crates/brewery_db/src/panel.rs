@@ -5,20 +5,22 @@ use crate::ToggleDatabasePanel;
 use crate::console::{QueryConsole, open_console};
 use crate::data_source_modal::DataSourceModal;
 use crate::schema_cache::SchemaCache;
-use crate::statements::select_all_from;
+use crate::statements::{qualified_name, quote_identifier, select_all_from, select_top_from};
 use crate::tree::{DbTree, Fetch, Row, RowKey, node_label};
 use anyhow::Result;
 use brewery_daemon_client::{
-    ConnectionInfo, DaemonState, DbNodeKind, IntrospectParams, ProjectDaemon, ProjectDaemonEvent,
-    daemon_error_message,
+    ConnectionInfo, DB_AUTH_FAILED, DaemonState, DbNodeKind, IntrospectParams, ProjectDaemon,
+    ProjectDaemonEvent, daemon_error_code, daemon_error_message,
 };
 use gpui::{
-    Action, App, AsyncWindowContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, Pixels, PromptLevel, Render, ScrollHandle, SharedString, Subscription, Task,
-    WeakEntity, Window, px,
+    Action, AnyWindowHandle, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Entity,
+    EventEmitter, FocusHandle, Focusable, Pixels, PromptLevel, Render, ScrollStrategy,
+    SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, px,
+    uniform_list,
 };
 use project::Project;
 use settings::{RegisterSetting, Settings};
+use std::ops::Range;
 use std::sync::Arc;
 use ui::{
     ContextMenu, Disclosure, ListItem, ListItemSpacing, Tooltip, prelude::*, right_click_menu,
@@ -29,6 +31,10 @@ use workspace::{OpenLog, Workspace};
 const DATABASE_PANEL_KEY: &str = "DatabasePanel";
 
 pub const WAITING_FOR_DAEMON: &str = "Waiting for the Brewery daemon…";
+/// Rows Select Top shows of a table, as IntelliJ's "Select Top 500".
+pub const SELECT_TOP_ROWS: u32 = 500;
+/// Shown in the data source dialog when the daemon could not sign in.
+pub const ENTER_PASSWORD: &str = "Authentication failed: enter the password";
 
 /// `database_panel` in the settings.
 #[derive(Debug, Clone, Copy, PartialEq, RegisterSetting)]
@@ -64,7 +70,9 @@ pub struct DatabasePanel {
     /// being updated, when reading the workspace entity panics.
     project: Entity<Project>,
     focus_handle: FocusHandle,
-    scroll_handle: ScrollHandle,
+    scroll_handle: UniformListScrollHandle,
+    /// The rows the list built last.
+    last_rendered: Option<Range<usize>>,
     daemon: Option<Entity<ProjectDaemon>>,
     _daemon_events: Option<Subscription>,
     status: Status,
@@ -77,6 +85,10 @@ pub struct DatabasePanel {
     selected: Option<RowKey>,
     /// Selected once the list that contains it arrives (after a save).
     select_after_list: Option<String>,
+    /// Also list system schemas and tables (`pg_catalog`, `information_schema`, `sqlite_*`).
+    show_system_objects: bool,
+    /// The panel's window, for dialogs the panel opens by itself (the password prompt).
+    window: AnyWindowHandle,
 }
 
 impl DatabasePanel {
@@ -94,14 +106,16 @@ impl DatabasePanel {
     pub fn new(
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            window: window.window_handle(),
             workspace,
             project,
             focus_handle: cx.focus_handle(),
-            scroll_handle: ScrollHandle::new(),
+            scroll_handle: UniformListScrollHandle::new(),
+            last_rendered: None,
             daemon: None,
             _daemon_events: None,
             status: Status::Waiting,
@@ -111,7 +125,28 @@ impl DatabasePanel {
             notice: None,
             selected: None,
             select_after_list: None,
+            show_system_objects: false,
         }
+    }
+
+    pub fn show_system_objects(&self) -> bool {
+        self.show_system_objects
+    }
+
+    /// Lists the open parts of every data source again, with or without the system objects.
+    pub fn set_show_system_objects(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.show_system_objects == show {
+            return;
+        }
+        self.show_system_objects = show;
+        for fetch in self.tree.refresh_all() {
+            self.introspect(fetch, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn last_rendered_rows(&self) -> Option<Range<usize>> {
+        self.last_rendered.clone()
     }
 
     pub fn tree(&self) -> &DbTree {
@@ -254,23 +289,61 @@ impl DatabasePanel {
             IntrospectParams {
                 connection_id: key.connection_id.clone(),
                 path: key.path.clone(),
-                include_system: None,
+                include_system: self.show_system_objects.then_some(true),
             },
             cx,
         );
         cx.spawn(async move |this, cx| {
             let children = children.await;
+            let auth_failed = children
+                .as_ref()
+                .err()
+                .is_some_and(|error| daemon_error_code(error) == Some(DB_AUTH_FAILED.into()));
             this.update(cx, |this, cx| {
                 this.tree.set_children(
                     &key,
                     generation,
                     children.map_err(|error| daemon_error_message(&error)),
                 );
+                if auth_failed {
+                    this.ask_for_password(&key.connection_id, cx);
+                }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The daemon could not sign in to the data source: opens its dialog at the password, as
+    /// IntelliJ asks for it, unless a data source dialog is open already.
+    fn ask_for_password(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+        let Some(source) = self.tree.source(connection_id).cloned() else {
+            return;
+        };
+        let panel = cx.weak_entity();
+        // Opening a modal needs the window, and the workspace must not be in an update.
+        let workspace = self.workspace.clone();
+        let window = self.window;
+        cx.defer(move |cx| {
+            let dialog_open = workspace
+                .read_with(cx, |workspace, cx| {
+                    workspace.active_modal::<DataSourceModal>(cx).is_some()
+                })
+                .unwrap_or(true);
+            if dialog_open {
+                return;
+            }
+            window
+                .update(cx, |_, window, cx| {
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel.open_modal_asking(Some(source), Some(ENTER_PASSWORD), window, cx)
+                        })
+                        .ok();
+                })
+                .ok();
+        });
     }
 
     pub fn toggle(&mut self, key: RowKey, cx: &mut Context<Self>) {
@@ -327,6 +400,17 @@ impl DatabasePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_modal_asking(editing, None, window, cx);
+    }
+
+    /// With `password_prompt`, the dialog opens at the password field, saying why.
+    fn open_modal_asking(
+        &mut self,
+        editing: Option<ConnectionInfo>,
+        password_prompt: Option<&'static str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(daemon) = self.ready_daemon(cx) else {
             return;
         };
@@ -337,7 +421,19 @@ impl DatabasePanel {
             .update(cx, |workspace, cx| {
                 let weak = workspace.weak_handle();
                 workspace.toggle_modal(window, cx, move |window, cx| {
-                    DataSourceModal::new(weak, panel, daemon, project_root, editing, window, cx)
+                    let mut modal = DataSourceModal::new(
+                        weak,
+                        panel,
+                        daemon,
+                        project_root,
+                        editing,
+                        window,
+                        cx,
+                    );
+                    if let Some(prompt) = password_prompt {
+                        modal.ask_for_password(prompt, window, cx);
+                    }
+                    modal
                 });
             })
             .ok();
@@ -452,6 +548,53 @@ impl DatabasePanel {
         });
     }
 
+    /// The selected table or view node: its data source and path.
+    fn selected_table(&self) -> Option<(ConnectionInfo, Vec<String>)> {
+        let key = self.selected.as_ref()?;
+        let table = self.rows().into_iter().any(|row| match row {
+            Row::Node {
+                connection_id,
+                node,
+                ..
+            } => {
+                connection_id == key.connection_id
+                    && node.path == key.path
+                    && matches!(node.kind, DbNodeKind::Table | DbNodeKind::View)
+            }
+            _ => false,
+        });
+        let connection = self.tree.source(&key.connection_id)?.clone();
+        table.then(|| (connection, key.path.clone()))
+    }
+
+    /// Opens a console running `SELECT * ... LIMIT 500` on the selected table or view.
+    pub fn select_top(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((connection, path)) = self.selected_table() {
+            let sql = select_top_from(&connection.driver_id, &path, SELECT_TOP_ROWS);
+            self.open_console(connection, Some(sql), window, cx);
+        }
+    }
+
+    /// Copies the selected node's name: tables and views with their schema, quoted as SQL needs.
+    pub fn copy_name(&mut self, cx: &mut Context<Self>) {
+        let text = match self.selected_table() {
+            Some((connection, path)) => qualified_name(&connection.driver_id, &path),
+            None => {
+                let Some(key) = self.selected.as_ref() else {
+                    return;
+                };
+                let Some(connection) = self.tree.source(&key.connection_id) else {
+                    return;
+                };
+                match key.path.last() {
+                    Some(name) => quote_identifier(&connection.driver_id, name),
+                    None => connection.name.clone(),
+                }
+            }
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
     /// A double click: tables and views open a console showing their rows, other rows expand or
     /// collapse.
     pub fn open_row(&mut self, key: RowKey, window: &mut Window, cx: &mut Context<Self>) {
@@ -521,7 +664,8 @@ impl DatabasePanel {
                 .iter()
                 .position(|row| row.key() == Some(next.clone()))
             {
-                self.scroll_handle.scroll_to_item(ix);
+                self.scroll_handle
+                    .scroll_to_item(ix, ScrollStrategy::Nearest);
             }
             self.selected = Some(next);
             cx.notify();
@@ -669,7 +813,7 @@ impl DatabasePanel {
         cx: &mut App,
         panel: WeakEntity<Self>,
     ) -> Entity<ContextMenu> {
-        ContextMenu::build(window, cx, move |menu, _, _| {
+        ContextMenu::build(window, cx, move |menu, _, cx| {
             let entry =
                 |menu: ContextMenu,
                  label: &'static str,
@@ -683,10 +827,62 @@ impl DatabasePanel {
             let menu = entry(menu.separator(), "Add Data Source…", Self::add_data_source);
             let menu = entry(menu, "Edit Data Source…", Self::edit_selected);
             let menu = entry(menu, "Delete Data Source", Self::delete_selected);
-            entry(menu.separator(), "Refresh", |panel, _, cx| {
+            let menu = entry(menu.separator(), "Refresh", |panel, _, cx| {
                 panel.refresh(cx)
-            })
+            });
+            Self::system_objects_entry(menu, &panel, cx)
         })
+    }
+
+    /// The menu of a schema node; tables and views also get Select Top and the qualified name.
+    fn node_menu(
+        window: &mut Window,
+        cx: &mut App,
+        panel: WeakEntity<Self>,
+        table: bool,
+    ) -> Entity<ContextMenu> {
+        ContextMenu::build(window, cx, move |menu, _, cx| {
+            let entry =
+                |menu: ContextMenu,
+                 label: &'static str,
+                 action: fn(&mut Self, &mut Window, &mut Context<Self>)| {
+                    let panel = panel.clone();
+                    menu.entry(label, None, move |window, cx| {
+                        panel.update(cx, |panel, cx| action(panel, window, cx)).ok();
+                    })
+                };
+            let menu = entry(menu, "New Query Console", Self::new_query_console);
+            let menu = if table {
+                let menu = entry(menu, "Select Top 500", Self::select_top);
+                entry(menu, "Copy Qualified Name", |panel, _, cx| {
+                    panel.copy_name(cx)
+                })
+            } else {
+                entry(menu, "Copy Name", |panel, _, cx| panel.copy_name(cx))
+            };
+            let menu = entry(menu.separator(), "Refresh", |panel, _, cx| {
+                panel.refresh(cx)
+            });
+            Self::system_objects_entry(menu, &panel, cx)
+        })
+    }
+
+    fn system_objects_entry(menu: ContextMenu, panel: &WeakEntity<Self>, cx: &App) -> ContextMenu {
+        let shown = panel
+            .read_with(cx, |panel, _| panel.show_system_objects)
+            .unwrap_or(false);
+        let panel = panel.clone();
+        menu.separator().toggleable_entry(
+            "Show System Objects",
+            shown,
+            IconPosition::Start,
+            None,
+            move |_, cx| {
+                panel
+                    .update(cx, |panel, cx| panel.set_show_system_objects(!shown, cx))
+                    .ok();
+            },
+        )
     }
 
     fn row_icon(row: &Row) -> IconName {
@@ -707,11 +903,19 @@ impl DatabasePanel {
         }
     }
 
-    pub(crate) fn render_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The tree rows in `range` (clamped to the rows there are); the list renders only those
+    /// that are on screen.
+    pub(crate) fn render_rows(
+        &self,
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let panel = cx.weak_entity();
         self.rows()
             .into_iter()
             .enumerate()
+            .skip(range.start)
+            .take(range.len())
             .map(|(ix, row)| {
                 let icon = Self::row_icon(&row);
                 match &row {
@@ -764,7 +968,16 @@ impl DatabasePanel {
                     } => {
                         let key = RowKey::new(connection_id.clone(), node.path.clone());
                         let selected = self.selected.as_ref() == Some(&key);
-                        self.tree_item(ix, key, *depth, row_chevron(&row), icon, selected, cx)
+                        let item = self
+                            .tree_item(
+                                ix,
+                                key.clone(),
+                                *depth,
+                                row_chevron(&row),
+                                icon,
+                                selected,
+                                cx,
+                            )
                             .child(
                                 h_flex()
                                     .gap_1()
@@ -774,7 +987,19 @@ impl DatabasePanel {
                                             .size(LabelSize::Small)
                                             .color(Color::Muted)
                                     })),
-                            )
+                            );
+                        let panel = panel.clone();
+                        let table = matches!(node.kind, DbNodeKind::Table | DbNodeKind::View);
+                        right_click_menu(("db-node-menu", ix))
+                            .trigger(move |_, _, _| item)
+                            .menu(move |window, cx| {
+                                // The menu acts on the row it was opened on.
+                                let key = key.clone();
+                                panel
+                                    .update(cx, |panel, cx| panel.select(Some(key), cx))
+                                    .ok();
+                                Self::node_menu(window, cx, panel.clone(), table)
+                            })
                             .into_any_element()
                     }
                     Row::Loading { depth, .. } => {
@@ -890,13 +1115,22 @@ impl Render for DatabasePanel {
                         cx.listener(|this, _, window, cx| this.add_data_source(window, cx)),
                     ))
                     .into_any_element(),
-                None => v_flex()
-                    .id("db-panel-rows")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_handle)
-                    .children(self.render_rows(cx))
-                    .into_any_element(),
+                // Uniform `ListItem`s: only the rows on screen are built, so a schema with
+                // thousands of tables stays quick.
+                None => uniform_list(
+                    "db-panel-rows",
+                    self.tree.rows().len(),
+                    cx.processor(|this, range: Range<usize>, _window, cx| {
+                        // `uniform_list` first renders row 0 alone to measure it.
+                        if range != (0..1) || this.tree.rows().len() == 1 {
+                            this.last_rendered = Some(range.clone());
+                        }
+                        this.render_rows(range, cx)
+                    }),
+                )
+                .flex_1()
+                .track_scroll(&self.scroll_handle)
+                .into_any_element(),
             };
         v_flex()
             .key_context("DatabasePanel")

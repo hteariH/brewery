@@ -2470,7 +2470,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "brewery_daemon_client",
+ "collections",
+ "db",
  "editor",
+ "fs",
  "futures 0.3.34",
  "gpui",
  "language",

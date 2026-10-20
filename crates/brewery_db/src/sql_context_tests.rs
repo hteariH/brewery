@@ -4,7 +4,7 @@ use super::*;
 fn at(marked: &str) -> SqlContext {
     let offset = marked.find('|').expect("a cursor marker");
     let text = marked.replacen('|', "", 1);
-    context_at(&text, offset)
+    context_at(&text, offset, SqlFlavor::Standard)
 }
 
 fn kind(marked: &str) -> ContextKind {
@@ -425,4 +425,49 @@ fn a_star_in_the_select_list_is_a_finished_item() {
         assert_eq!(kind(marked), ContextKind::Keywords, "{marked}");
     }
     assert_eq!(kind("SELECT 2 * |"), ContextKind::Columns);
+}
+
+fn at_in(driver_id: &str, marked: &str) -> SqlContext {
+    let offset = marked.find('|').expect("a cursor marker");
+    let text = marked.replacen('|', "", 1);
+    context_at(&text, offset, SqlFlavor::for_driver(driver_id))
+}
+
+#[test]
+fn mysql_hash_comments_and_escaped_quotes_are_read_as_such() {
+    // Inside a `#` comment nothing is completed; after it, the statement goes on.
+    assert_eq!(
+        at_in("mysql", "SELECT * FROM t # see |").kind,
+        ContextKind::Nothing
+    );
+    assert_eq!(at_in("mysql", "SELECT 1 # note\nFROM |").kind, tables());
+    // Elsewhere `#` is not a comment.
+    assert_ne!(
+        at_in("postgresql", "SELECT * FROM t # see |").kind,
+        ContextKind::Nothing
+    );
+    // The escaped quote does not end the string, so the cursor after it is still in code.
+    let context = at_in(
+        "mysql",
+        "SELECT * FROM owners o WHERE o.name = 'it\\'s' AND o.|",
+    );
+    assert_eq!(context.kind, columns_of(&["o"]));
+    assert_eq!(
+        context.resolve(&["o".to_string()]).cloned(),
+        Some(table(None, "owners", Some("o")))
+    );
+}
+
+#[test]
+fn postgresql_e_strings_take_backslash_escapes() {
+    let context = at_in(
+        "postgresql",
+        "SELECT * FROM owners o WHERE o.name = E'it\\'s' AND o.|",
+    );
+    assert_eq!(context.kind, columns_of(&["o"]));
+    // Inside the E-string nothing is completed.
+    assert_eq!(
+        at_in("postgresql", "SELECT E'it\\'s fr|' FROM t").kind,
+        ContextKind::Nothing
+    );
 }

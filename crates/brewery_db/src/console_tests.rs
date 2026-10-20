@@ -1,8 +1,8 @@
 use super::*;
-use crate::NewQueryConsole;
-use crate::result_grid::RESULT_EXPIRED;
+use crate::result_grid::{GridSelection, RESULT_EXPIRED};
 use crate::test_support::*;
 use crate::tree::RowKey;
+use crate::{CommitTransaction, NewQueryConsole, RollbackTransaction};
 use brewery_daemon_client::{DB_NOT_FOUND, DB_QUERY_FAILED};
 use editor::SelectionEffects;
 use gpui::{
@@ -11,7 +11,7 @@ use gpui::{
 };
 use language::{Language, LanguageConfig};
 use serde_json::{Value, json};
-use settings::{BaseKeymap, DEFAULT_KEYMAP_PATH, KeymapFile, SPECIFIC_OVERRIDES_KEYMAP_PATH};
+use settings::{BaseKeymap, DEFAULT_KEYMAP_PATH, KeymapFile};
 use std::sync::Arc;
 use std::time::Duration;
 use workspace::item::ItemHandle as _;
@@ -24,6 +24,11 @@ struct Console {
 impl Console {
     fn executed(&self) -> Vec<Value> {
         self.fixture.calls_of("db/execute")
+    }
+
+    fn session(&self, cx: &mut VisualTestContext) -> String {
+        self.console
+            .read_with(cx, |console, _| console.session_id().to_string())
     }
 
     fn fetched_offsets(&self) -> Vec<u64> {
@@ -129,9 +134,10 @@ async fn run_executes_the_statement_at_the_cursor_and_shows_the_rows(cx: &mut Te
     console.type_sql("select 1;\nselect * from| owners;\nselect 'a;b'", cx);
     console.run(cx);
 
+    let session = console.session(cx);
     assert_eq!(
         console.executed(),
-        [json!({ "connectionId": "c1", "sql": "select * from owners" })]
+        [json!({ "connectionId": "c1", "sql": "select * from owners", "sessionId": session })]
     );
     assert_eq!(
         console.fixture.calls_of("db/fetch"),
@@ -168,9 +174,10 @@ async fn a_selection_runs_the_selected_text(cx: &mut TestAppContext) {
         });
     });
     console.run(cx);
+    let session = console.session(cx);
     assert_eq!(
         console.executed(),
-        [json!({ "connectionId": "c1", "sql": "select 1," })]
+        [json!({ "connectionId": "c1", "sql": "select 1,", "sessionId": session })]
     );
 }
 
@@ -281,9 +288,10 @@ async fn cancel_asks_the_daemon_to_cancel_the_running_statement(cx: &mut TestApp
         console.cancel(&CancelStatement, window, cx)
     });
     cx.run_until_parked();
+    let session = console.session(cx);
     assert_eq!(
         console.fixture.calls_of("db/cancel"),
-        [json!({ "connectionId": "c1" })]
+        [json!({ "connectionId": "c1", "sessionId": session })]
     );
     assert_eq!(console.status(cx), "Cancelling…");
 
@@ -329,11 +337,17 @@ async fn closing_the_console_while_running_cancels_the_statement(cx: &mut TestAp
     console.fixture.state.hold("db/execute");
     console.type_sql("select * from owners", cx);
     console.run(cx);
+    let session = console.session(cx);
     let Console { fixture, console } = console;
     close_console(&fixture, console, cx);
     assert_eq!(
         fixture.calls_of("db/cancel"),
-        [json!({ "connectionId": "c1" })]
+        [json!({ "connectionId": "c1", "sessionId": session })]
+    );
+    // The console's own session goes with it.
+    assert_eq!(
+        fixture.calls_of("db/sessions/close"),
+        [json!({ "connectionId": "c1", "sessionId": session })]
     );
 
     // The statement finishes after all: the cursor it opened is closed, nobody shows it.
@@ -388,9 +402,12 @@ async fn double_clicking_a_table_runs_select_star_in_a_new_console(cx: &mut Test
         );
         assert_eq!(console.tab_content_text(0, cx), "Local Postgres console");
     });
+    let session = console.read_with(cx, |console, _| console.session_id().to_string());
     assert_eq!(
         fixture.calls_of("db/execute"),
-        [json!({ "connectionId": "c1", "sql": "SELECT * FROM public.owners" })]
+        [
+            json!({ "connectionId": "c1", "sql": "SELECT * FROM public.owners", "sessionId": session })
+        ]
     );
     // The table was not expanded by the double click.
     let expanded = fixture.panel.read_with(cx, |panel, _| {
@@ -404,15 +421,7 @@ async fn double_clicking_a_table_runs_select_star_in_a_new_console(cx: &mut Test
 #[gpui::test]
 async fn keystrokes_run_cancel_and_copy(cx: &mut TestAppContext) {
     let (console, cx) = console(cx).await;
-    cx.update(|_, cx| {
-        let base = BaseKeymap::JetBrains
-            .asset_path()
-            .expect("JetBrains has a keymap file");
-        // Other crates' actions are not linked into this binary; only ours matter here.
-        for path in [DEFAULT_KEYMAP_PATH, base, SPECIFIC_OVERRIDES_KEYMAP_PATH] {
-            cx.bind_keys(KeymapFile::load_asset_allow_partial_failure(path, cx).unwrap());
-        }
-    });
+    bind_brewery_keys(cx);
     let (run, cancel, copy) = if cfg!(target_os = "macos") {
         ("cmd-enter", "cmd-f2", "cmd-c")
     } else {
@@ -464,6 +473,105 @@ async fn keystrokes_run_cancel_and_copy(cx: &mut TestAppContext) {
     cx.simulate_keystrokes(run);
     cx.run_until_parked();
     assert_eq!(console.executed().len(), 2, "{run} from the grid runs too");
+}
+
+/// The default and JetBrains keymaps, then this checkout's overrides. Dev builds read assets from
+/// the checkout the test binary sits in, which is another one when the target directory is
+/// shared, so the overrides are compiled in from next to this file.
+fn bind_brewery_keys(cx: &mut VisualTestContext) {
+    let overrides = if cfg!(target_os = "macos") {
+        include_str!("../../../assets/keymaps/specific-overrides-macos.json")
+    } else {
+        include_str!("../../../assets/keymaps/specific-overrides.json")
+    };
+    cx.update(|_, cx| {
+        let base = BaseKeymap::JetBrains
+            .asset_path()
+            .expect("JetBrains has a keymap file");
+        for path in [DEFAULT_KEYMAP_PATH, base] {
+            cx.bind_keys(KeymapFile::load_asset_allow_partial_failure(path, cx).unwrap());
+        }
+        match KeymapFile::load(overrides, cx) {
+            settings::KeymapFileLoadResult::Success { key_bindings }
+            | settings::KeymapFileLoadResult::SomeFailedToLoad { key_bindings, .. } => {
+                cx.bind_keys(key_bindings)
+            }
+            settings::KeymapFileLoadResult::JsonParseFailure { error } => {
+                panic!("the overrides keymap does not parse: {error}")
+            }
+        }
+    });
+}
+
+#[gpui::test]
+async fn arrow_keys_move_the_selected_cell_and_shift_extends_a_range(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    bind_brewery_keys(cx);
+    let (copy, select_all, last) = if cfg!(target_os = "macos") {
+        ("cmd-c", "cmd-a", "cmd-down")
+    } else {
+        ("ctrl-c", "ctrl-a", "ctrl-end")
+    };
+    console.type_sql("select * from owners", cx);
+    console.run(cx);
+    let grid = console.grid(cx);
+    let selected = |cx: &mut VisualTestContext| grid.read_with(cx, |grid, _| grid.selected_cell());
+    grid.update_in(cx, |grid, window, cx| {
+        window.focus(&grid.focus_handle(cx), cx);
+    });
+
+    // With nothing selected, the first move selects the first cell.
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(cx), Some((0, 0)));
+    cx.simulate_keystrokes("down down right");
+    assert_eq!(selected(cx), Some((2, 1)));
+    cx.simulate_keystrokes("right left up");
+    assert_eq!(selected(cx), Some((1, 0)));
+    cx.simulate_keystrokes("end");
+    assert_eq!(selected(cx), Some((1, 1)));
+    cx.simulate_keystrokes("home");
+    assert_eq!(selected(cx), Some((1, 0)));
+
+    // Shift extends from where the selection started; copying gives TSV rows.
+    cx.simulate_keystrokes("shift-down shift-right");
+    cx.simulate_keystrokes(copy);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("1\tname 1\n2\tname 2".to_string())
+    );
+    // A plain move collapses the range again.
+    cx.simulate_keystrokes("up");
+    let selection = grid.read_with(cx, |grid, _| grid.selection());
+    assert_eq!(selection, Some(GridSelection::cell(1, 1)));
+
+    // Moving to the last fetched row scrolls it into view, which fetches the next page.
+    cx.simulate_keystrokes(last);
+    cx.run_until_parked();
+    assert_eq!(selected(cx), Some((499, 1)));
+    let visible = grid.read_with(cx, |grid, _| grid.last_visible_rows());
+    assert!(visible.is_some_and(|rows| rows.contains(&499)));
+    assert_eq!(console.fetched_offsets(), [0, 500]);
+
+    cx.simulate_keystrokes(select_all);
+    let selection = grid.read_with(cx, |grid, _| grid.selection());
+    assert_eq!(
+        selection,
+        Some(GridSelection {
+            anchor: (0, 0),
+            head: (999, 1)
+        })
+    );
+
+    // Shift-click extends from the selected cell, as a drag does.
+    grid.update(cx, |grid, cx| {
+        grid.select_cell(4, 0, cx);
+        grid.extend_selection_to(5, 1, cx);
+    });
+    cx.simulate_keystrokes(copy);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("4\tname 4\n5\tname 5".to_string())
+    );
 }
 
 #[gpui::test]
@@ -870,4 +978,445 @@ async fn tables_of_other_schemas_are_inserted_with_their_schema(cx: &mut TestApp
     assert_eq!(console.menu(cx), ["invoices table · billing"]);
     console.accept(cx);
     assert_eq!(console.text(cx), "SELECT * FROM billing.invoices");
+}
+
+fn fake_fs(fixture: &Fixture, cx: &mut VisualTestContext) -> Arc<dyn fs::Fs> {
+    fixture.workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).fs().clone()
+    })
+}
+
+fn file_text(fs: &Arc<dyn fs::Fs>, path: &std::path::Path) -> Option<String> {
+    let bytes = fs.as_fake().read_file_sync(path).ok()?;
+    Some(String::from_utf8(bytes).unwrap())
+}
+
+fn active_console(fixture: &Fixture, cx: &mut VisualTestContext) -> Entity<QueryConsole> {
+    fixture
+        .workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.active_item_as::<QueryConsole>(cx)
+        })
+        .expect("a console should be the active item")
+}
+
+#[gpui::test]
+async fn the_sql_is_kept_in_a_file_and_comes_back_after_the_tab_is_closed(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let fs = fake_fs(&console.fixture, cx);
+    let file = console
+        .console
+        .read_with(cx, |console, _| console.file().to_path_buf());
+    assert_eq!(file, crate::console_store::console_file("c1", 1));
+    assert_eq!(
+        file_text(&fs, &file),
+        None,
+        "nothing written before an edit"
+    );
+
+    console.type_sql("select * from owners;\n", cx);
+    cx.executor()
+        .advance_clock(crate::console_store::SAVE_DELAY + Duration::from_millis(1));
+    cx.run_until_parked();
+    assert_eq!(
+        file_text(&fs, &file).as_deref(),
+        Some("select * from owners;\n")
+    );
+
+    // Typed just before closing: still written.
+    console.type_sql("select 1;\n", cx);
+    let Console { fixture, console } = console;
+    close_console(&fixture, console, cx);
+    assert_eq!(file_text(&fs, &file).as_deref(), Some("select 1;\n"));
+
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select(Some(RowKey::data_source("c1")), cx);
+        panel.new_query_console(window, cx)
+    });
+    cx.run_until_parked();
+    let reopened = active_console(&fixture, cx);
+    reopened.read_with(cx, |console, cx| {
+        assert_eq!(console.file(), file);
+        assert_eq!(console.editor().read(cx).text(cx), "select 1;\n");
+    });
+}
+
+#[gpui::test]
+async fn a_second_console_of_a_data_source_gets_its_own_file(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let fixture = &console.fixture;
+    fixture
+        .panel
+        .update_in(cx, |panel, window, cx| panel.new_query_console(window, cx));
+    cx.run_until_parked();
+    let second = active_console(fixture, cx);
+    assert_ne!(second.entity_id(), console.console.entity_id());
+    second.read_with(cx, |second, _| {
+        assert_eq!(second.file(), crate::console_store::console_file("c1", 2));
+    });
+}
+
+#[gpui::test]
+async fn a_table_opened_in_a_console_with_saved_sql_goes_below_it(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    let fs = fake_fs(&fixture, cx);
+    fs.atomic_write(
+        crate::console_store::console_file("c1", 1),
+        "select 42;".into(),
+    )
+    .await
+    .unwrap();
+    let connection = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.tree().sources()[0].clone());
+    fixture.workspace.update_in(cx, |workspace, window, cx| {
+        open_console(
+            workspace,
+            connection,
+            None,
+            Some("SELECT * FROM public.owners".into()),
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let console = active_console(&fixture, cx);
+    console.read_with(cx, |console, cx| {
+        assert_eq!(
+            console.editor().read(cx).text(cx),
+            "select 42;\n\nSELECT * FROM public.owners"
+        );
+    });
+    let session = console.read_with(cx, |console, _| console.session_id().to_string());
+    assert_eq!(
+        fixture.calls_of("db/execute"),
+        [
+            json!({ "connectionId": "c1", "sql": "SELECT * FROM public.owners", "sessionId": session })
+        ]
+    );
+}
+
+#[gpui::test]
+async fn a_restored_console_reopens_its_data_source_and_file(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    let fs = fake_fs(&fixture, cx);
+    let file = crate::console_store::console_file("c2", 3);
+    fs.atomic_write(file.clone(), "select * from reports;".into())
+        .await
+        .unwrap();
+    let connection = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.tree().sources()[1].clone());
+    let saved = crate::console_store::SavedConsole {
+        connection,
+        file: file.clone(),
+    };
+    let project = fixture
+        .workspace
+        .read_with(cx, |workspace, _| workspace.project().clone());
+    let console = cx.update(|window, cx| restore_console(saved, project, window, cx));
+    cx.run_until_parked();
+    console.read_with(cx, |console, cx| {
+        assert_eq!(console.connection().id, "c2");
+        assert_eq!(console.tab_content_text(0, cx), "Reports console");
+        assert_eq!(console.editor().read(cx).text(cx), "select * from reports;");
+    });
+    // A new console of that data source does not take the restored console's file.
+    let next = cx.update(|_, cx| crate::console_store::claim_free_file("c2", cx));
+    assert_eq!(next, crate::console_store::console_file("c2", 1));
+    let next = cx.update(|_, cx| crate::console_store::claim_free_file("c2", cx));
+    assert_eq!(next, crate::console_store::console_file("c2", 2));
+    let next = cx.update(|_, cx| crate::console_store::claim_free_file("c2", cx));
+    assert_eq!(next, crate::console_store::console_file("c2", 4));
+}
+
+#[test]
+fn console_files_are_named_per_data_source() {
+    let first = crate::console_store::console_file("4f1c-9a", 1);
+    assert!(first.ends_with("db_consoles/4f1c-9a/console.sql"));
+    let third = crate::console_store::console_file("4f1c-9a", 3);
+    assert!(third.ends_with("db_consoles/4f1c-9a/console_3.sql"));
+    let odd = crate::console_store::consoles_dir("../x:y");
+    assert!(odd.ends_with("db_consoles/___x_y"));
+}
+
+fn executed_sql(console: &Console) -> Vec<String> {
+    console
+        .executed()
+        .iter()
+        .map(|params| params["sql"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[gpui::test]
+async fn a_selection_of_several_statements_runs_them_all_with_a_tab_each(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let text = "select * from owners;\nupdate owners set name = 'x';\nselect * from pets;";
+    console.type_sql(text, cx);
+    console.editor(cx).update_in(cx, |editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([MultiBufferOffset(0)..MultiBufferOffset(text.len())])
+        });
+    });
+    console.run(cx);
+    assert_eq!(
+        executed_sql(&console),
+        [
+            "select * from owners",
+            "update owners set name = 'x'",
+            "select * from pets"
+        ]
+    );
+    console.console.read_with(cx, |console, _| {
+        assert_eq!(console.result_count(), 3);
+        assert_eq!(console.active_result(), 2, "the last result is shown");
+        assert!(!console.is_running());
+    });
+    assert_eq!(console.status(cx), "500 rows fetched+ in 12 ms");
+    let cursor = console
+        .grid(cx)
+        .read_with(cx, |grid, _| grid.cursor_id().map(str::to_string));
+    assert_eq!(cursor.as_deref(), Some("k2"));
+
+    console
+        .console
+        .update(cx, |console, cx| console.show_result(1, cx));
+    assert_eq!(console.status(cx), "3 rows affected in 4 ms");
+    console
+        .console
+        .read_with(cx, |console, _| assert!(console.grid().is_none()));
+    console
+        .console
+        .update(cx, |console, cx| console.show_result(0, cx));
+    let cursor = console
+        .grid(cx)
+        .read_with(cx, |grid, _| grid.cursor_id().map(str::to_string));
+    assert_eq!(cursor.as_deref(), Some("k1"));
+
+    // The next run closes every cursor of the last one.
+    console.type_sql("select 1", cx);
+    console.run(cx);
+    assert_eq!(
+        console.fixture.calls_of("db/close"),
+        [json!({ "cursorId": "k1" }), json!({ "cursorId": "k2" })]
+    );
+    console
+        .console
+        .read_with(cx, |console, _| assert_eq!(console.result_count(), 1));
+}
+
+#[gpui::test]
+async fn run_all_waits_for_the_first_page_before_the_next_statement(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("select * from owners;| select * from pets", cx);
+    console.fixture.state.hold("db/fetch");
+    console.console.update_in(cx, |console, window, cx| {
+        console.run_all(&RunAllStatements, window, cx)
+    });
+    cx.run_until_parked();
+    // Running the second statement now could end the first result before it showed anything.
+    assert_eq!(executed_sql(&console), ["select * from owners"]);
+    console
+        .console
+        .read_with(cx, |console, _| assert!(console.is_running()));
+    assert_eq!(console.status(cx), "0 rows fetched+ in 12 ms");
+
+    console.fixture.state.release("db/fetch");
+    cx.run_until_parked();
+    assert_eq!(
+        executed_sql(&console),
+        ["select * from owners", "select * from pets"]
+    );
+    console.fixture.state.release("db/fetch");
+    cx.run_until_parked();
+    console.console.read_with(cx, |console, _| {
+        assert!(!console.is_running());
+        assert_eq!(console.result_count(), 2);
+    });
+}
+
+#[gpui::test]
+async fn a_failing_statement_ends_the_run(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("update owners set name = 'x'; fail; select 1", cx);
+    console.console.update_in(cx, |console, window, cx| {
+        console.run_all(&RunAllStatements, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        executed_sql(&console),
+        ["update owners set name = 'x'", "fail"]
+    );
+    console.console.read_with(cx, |console, cx| {
+        assert_eq!(console.result_count(), 2);
+        assert_eq!(console.status_line(cx).1, Color::Error);
+        assert!(!console.is_running());
+    });
+}
+
+#[gpui::test]
+async fn cancel_drops_the_statements_not_started_yet(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.fixture.state.hold("db/execute");
+    console.type_sql("select pg_sleep(60); select 1; select 2", cx);
+    console.console.update_in(cx, |console, window, cx| {
+        console.run_all(&RunAllStatements, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(console.status(cx), "Running 1 of 3…");
+    console.console.update_in(cx, |console, window, cx| {
+        console.cancel(&CancelStatement, window, cx)
+    });
+    console.fixture.state.release("db/execute");
+    cx.run_until_parked();
+    assert_eq!(executed_sql(&console), ["select pg_sleep(60)"]);
+    console.console.read_with(cx, |console, _| {
+        assert!(!console.is_running());
+        assert_eq!(console.result_count(), 1);
+    });
+}
+
+#[gpui::test]
+async fn results_the_daemon_dropped_are_mentioned(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("update owners /*more*/ set name = 'x'", cx);
+    console.run(cx);
+    assert_eq!(
+        console.status(cx),
+        format!("3 rows affected in 4 ms · {MORE_RESULTS_DROPPED}")
+    );
+    console.console.read_with(cx, |console, cx| {
+        assert_eq!(console.status_line(cx).1, Color::Warning)
+    });
+}
+
+#[gpui::test]
+async fn the_console_shows_an_open_transaction_until_commit_or_rollback(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    let in_transaction = |console: &Console, cx: &mut VisualTestContext| {
+        console
+            .console
+            .read_with(cx, |console, _| console.in_transaction())
+    };
+    console.type_sql("begin", cx);
+    console.run(cx);
+    assert!(in_transaction(&console, cx));
+    console.type_sql("update owners set name = 'x'", cx);
+    console.run(cx);
+    assert!(in_transaction(&console, cx), "still open after a statement");
+
+    console.console.update_in(cx, |console, window, cx| {
+        console.commit(&CommitTransaction, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        executed_sql(&console).last().map(String::as_str),
+        Some("COMMIT")
+    );
+    assert!(!in_transaction(&console, cx));
+
+    // Without a transaction, Commit and Rollback do nothing.
+    console.console.update_in(cx, |console, window, cx| {
+        console.rollback(&RollbackTransaction, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(executed_sql(&console).len(), 3);
+
+    console.type_sql("begin", cx);
+    console.run(cx);
+    console.console.update_in(cx, |console, window, cx| {
+        console.rollback(&RollbackTransaction, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        executed_sql(&console).last().map(String::as_str),
+        Some("ROLLBACK")
+    );
+    assert!(!in_transaction(&console, cx));
+}
+
+#[gpui::test]
+async fn saving_a_data_source_with_an_open_transaction_warns_first(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("begin", cx);
+    console.run(cx);
+    let fixture = &console.fixture;
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select(Some(RowKey::data_source("c1")), cx);
+        panel.edit_selected(window, cx)
+    });
+    cx.run_until_parked();
+    let modal = fixture.modal(cx).expect("the dialog should be open");
+    modal.update(cx, |modal, cx| modal.save(cx));
+    cx.run_until_parked();
+    assert!(
+        fixture.calls_of("db/connections/save").is_empty(),
+        "saving reconnects, which would roll the transaction back"
+    );
+    let warning = modal.read_with(cx, |modal, _| modal.rollback_warning().cloned());
+    assert!(
+        warning.is_some_and(|warning| warning.contains("rolls it back")),
+        "the dialog says why"
+    );
+
+    modal.update(cx, |modal, cx| modal.save(cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.calls_of("db/connections/save").len(), 1);
+    assert!(fixture.modal(cx).is_none());
+}
+
+#[gpui::test]
+async fn saving_another_data_source_does_not_warn(cx: &mut TestAppContext) {
+    let (console, cx) = console(cx).await;
+    console.type_sql("begin", cx);
+    console.run(cx);
+    let fixture = &console.fixture;
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select(Some(RowKey::data_source("c2")), cx);
+        panel.edit_selected(window, cx)
+    });
+    cx.run_until_parked();
+    let modal = fixture.modal(cx).expect("the dialog should be open");
+    modal.update(cx, |modal, cx| modal.save(cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.calls_of("db/connections/save").len(), 1);
+}
+
+#[gpui::test]
+async fn consoles_of_one_data_source_run_in_sessions_of_their_own(cx: &mut TestAppContext) {
+    let (first, cx) = console(cx).await;
+    let fixture = &first.fixture;
+    fixture
+        .panel
+        .update_in(cx, |panel, window, cx| panel.new_query_console(window, cx));
+    cx.run_until_parked();
+    let second = active_console(fixture, cx);
+    let first_session = first.session(cx);
+    let second_session = second.read_with(cx, |console, _| console.session_id().to_string());
+    assert_ne!(first_session, second_session);
+
+    fixture.state.hold("db/execute");
+    first.type_sql("select pg_sleep(60)", cx);
+    first.run(cx);
+    second.update(cx, |console, cx| console.run_sql("select 1".into(), cx));
+    cx.run_until_parked();
+    let sessions: Vec<Value> = fixture
+        .calls_of("db/execute")
+        .iter()
+        .map(|params| params["sessionId"].clone())
+        .collect();
+    assert_eq!(sessions, [json!(first_session), json!(second_session)]);
+
+    // Stop in the first console reaches only the first console's session.
+    first.console.update_in(cx, |console, window, cx| {
+        console.cancel(&CancelStatement, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        fixture.calls_of("db/cancel"),
+        [json!({ "connectionId": "c1", "sessionId": first_session })]
+    );
+    fixture.state.release("db/execute");
+    fixture.state.release("db/execute");
+    cx.run_until_parked();
 }

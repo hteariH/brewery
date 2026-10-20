@@ -37,6 +37,10 @@ pub struct FakeState {
     pub held: RefCell<Vec<(String, oneshot::Sender<()>)>>,
     /// Replaces the `db/schema` answer of `schema()`.
     pub schema_reply: RefCell<Option<Value>>,
+    /// When set, `public` lists this many tables instead of the usual two nodes.
+    pub many_tables: Cell<usize>,
+    /// Between a `begin` and a `commit` or `rollback`.
+    pub in_transaction: Cell<bool>,
 }
 
 /// The `db/schema` snapshot of the fake: `public` with two tables and a view, `billing` with one
@@ -196,6 +200,14 @@ impl FakeState {
                     [] => json!([
                         { "name": "public", "kind": "schema", "path": ["public"], "hasChildren": true }
                     ]),
+                    ["public"] if self.many_tables.get() > 0 => Value::Array(
+                        (0..self.many_tables.get())
+                            .map(|ix| {
+                                let name = format!("t{ix:05}");
+                                json!({ "name": name, "kind": "table", "path": ["public", name], "hasChildren": true })
+                            })
+                            .collect(),
+                    ),
                     ["public"] => json!([
                         { "name": "owners", "kind": "table", "path": ["public", "owners"], "hasChildren": true },
                         { "name": "owners_id_seq", "kind": "sequence", "path": ["public", "owners_id_seq"], "hasChildren": false, "detail": "integer" }
@@ -205,13 +217,27 @@ impl FakeState {
             }
             "db/execute" => {
                 let sql = params["sql"].as_str().unwrap_or_default().to_lowercase();
+                let tx_end = sql.starts_with("commit") || sql.starts_with("rollback");
+                if sql.starts_with("begin") || tx_end {
+                    self.in_transaction.set(!tx_end);
+                    return Ok(json!({
+                        "cursorId": null, "columns": [], "updateCount": 0, "elapsedMs": 1,
+                        "inTransaction": !tx_end
+                    }));
+                }
                 if sql.starts_with("update")
                     || sql.starts_with("insert")
                     || sql.starts_with("delete")
                 {
+                    // `/*more*/` stands for SQL the daemon found further results in.
                     return Ok(json!({
-                        "cursorId": null, "columns": [], "updateCount": 3, "elapsedMs": 4
+                        "cursorId": null, "columns": [], "updateCount": 3, "elapsedMs": 4,
+                        "moreResults": sql.contains("/*more*/"),
+                        "inTransaction": self.in_transaction.get()
                     }));
+                }
+                if sql.starts_with("fail") {
+                    anyhow::bail!("syntax error at or near \"fail\"");
                 }
                 let cursor = self.cursors_opened.get() + 1;
                 self.cursors_opened.set(cursor);
@@ -219,7 +245,8 @@ impl FakeState {
                     "cursorId": format!("k{cursor}"),
                     "columns": [{ "name": "id", "type": "int4" }, { "name": "name", "type": "text" }],
                     "updateCount": null,
-                    "elapsedMs": 12
+                    "elapsedMs": 12,
+                    "inTransaction": self.in_transaction.get()
                 }))
             }
             "db/fetch" => {
@@ -236,7 +263,7 @@ impl FakeState {
                 Ok(json!({ "rows": rows, "done": end >= total }))
             }
             "db/schema" => Ok(self.schema_reply.borrow().clone().unwrap_or_else(schema)),
-            "db/cancel" | "db/close" => Ok(Value::Null),
+            "db/cancel" | "db/close" | "db/sessions/close" => Ok(Value::Null),
             other => anyhow::bail!("unexpected {other}"),
         }
     }

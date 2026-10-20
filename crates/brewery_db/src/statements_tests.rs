@@ -5,14 +5,14 @@ fn texts<'a>(text: &'a str, ranges: &[Range<usize>]) -> Vec<&'a str> {
 }
 
 fn at(text: &str, offset: usize) -> Option<&str> {
-    statement_at(text, offset).map(|range| &text[range])
+    statement_at(text, offset, SqlFlavor::Standard).map(|range| &text[range])
 }
 
 /// The text with `|` marking the cursor, and the statement found there.
 fn at_cursor(marked: &str) -> Option<String> {
     let offset = marked.find('|').expect("a cursor marker");
     let text = marked.replacen('|', "", 1);
-    statement_at(&text, offset).map(|range| text[range].to_string())
+    statement_at(&text, offset, SqlFlavor::Standard).map(|range| text[range].to_string())
 }
 
 #[test]
@@ -152,24 +152,33 @@ fn selection_runs_the_selected_statements() {
     // Empty selection: the statement at the cursor.
     let cursor = text.find("2").unwrap();
     assert_eq!(
-        texts(text, &statements_to_run(text, cursor..cursor)),
+        texts(
+            text,
+            &statements_to_run(text, cursor..cursor, SqlFlavor::Standard)
+        ),
         ["select 2"]
     );
     // A selection inside one statement runs just the selected text.
     let start = text.find("select 3").unwrap();
     assert_eq!(
-        texts(text, &statements_to_run(text, start..start + 8)),
+        texts(
+            text,
+            &statements_to_run(text, start..start + 8, SqlFlavor::Standard)
+        ),
         ["select 3"]
     );
     // A selection across statements yields each of them, trimmed, in selection offsets.
     let start = text.find("2").unwrap() - 7;
     let end = text.len();
     assert_eq!(
-        texts(text, &statements_to_run(text, start..end)),
+        texts(
+            text,
+            &statements_to_run(text, start..end, SqlFlavor::Standard)
+        ),
         ["select 2", "select 3"]
     );
     // A selection of only whitespace runs nothing.
-    assert!(statements_to_run(text, 9..10).is_empty());
+    assert!(statements_to_run(text, 9..10, SqlFlavor::Standard).is_empty());
 }
 
 #[test]
@@ -209,6 +218,25 @@ fn select_all_from_a_table_path() {
 }
 
 #[test]
+fn select_top_and_the_qualified_name_of_a_table() {
+    let owners: Vec<String> = vec!["public".into(), "Owners".into()];
+    assert_eq!(qualified_name("postgresql", &owners), "public.\"Owners\"");
+    assert_eq!(
+        select_top_from("postgresql", &owners, 500),
+        "SELECT * FROM public.\"Owners\" LIMIT 500"
+    );
+    assert_eq!(
+        select_top_from("mariadb", &["shop".into(), "items".into()], 500),
+        "SELECT * FROM shop.items LIMIT 500"
+    );
+    assert_eq!(
+        select_top_from("h2", &["public".into(), "t".into()], 500),
+        "SELECT * FROM public.t",
+        "no LIMIT where the driver's dialect is unknown"
+    );
+}
+
+#[test]
 fn common_non_reserved_keywords_are_quoted_too() {
     for word in [
         "rank", "row", "interval", "window", "level", "comment", "range",
@@ -220,4 +248,90 @@ fn common_non_reserved_keywords_are_quoted_too() {
         );
     }
     assert_eq!(quote_identifier("mysql", "rank"), "`rank`");
+}
+
+fn split_as(driver_id: &str, text: &str) -> Vec<String> {
+    split_statements_for(text, SqlFlavor::for_driver(driver_id))
+        .into_iter()
+        .map(|range| text[range].to_string())
+        .collect()
+}
+
+#[test]
+fn mysql_hash_comments_and_backslash_escapes() {
+    let text = "select 'it\\'s; fine' # a note; not code\n;\nselect \"a\\\"; b\"; select 3";
+    assert_eq!(
+        split_as("mysql", text),
+        ["select 'it\\'s; fine'", "select \"a\\\"; b\"", "select 3"]
+    );
+    // Elsewhere `#` is no comment and a backslash escapes nothing.
+    assert_eq!(
+        split_as("postgresql", "select 'a\\'; select 2"),
+        ["select 'a\\'", "select 2"]
+    );
+}
+
+#[test]
+fn postgresql_e_strings_take_backslash_escapes() {
+    let text = "select E'it\\'s; one'; select e'\\\\'; select 3";
+    assert_eq!(
+        split_as("postgresql", text),
+        ["select E'it\\'s; one'", "select e'\\\\'", "select 3"]
+    );
+    // `E` at the end of a longer word starts no E-string.
+    assert_eq!(
+        split_as("postgresql", "select name'x'; select 2"),
+        ["select name'x'", "select 2"]
+    );
+}
+
+#[test]
+fn trigger_and_routine_bodies_stay_whole() {
+    let trigger = "CREATE TRIGGER t AFTER INSERT ON a BEGIN\n  UPDATE b SET n = n + 1;\n  DELETE FROM c;\nEND";
+    let text = format!("{trigger};\nselect 1");
+    assert_eq!(split_as("sqlite", &text), [trigger, "select 1"]);
+
+    let routine = "CREATE PROCEDURE p() BEGIN\n  IF x THEN SELECT 1; END IF;\n  CASE y WHEN 1 THEN SELECT 2; END CASE;\n  SET z = CASE WHEN a THEN 1 ELSE 2 END;\n  BEGIN SELECT 3; END;\n  IF b THEN SELECT 5; END IF;\nEND";
+    let text = format!("{routine}; select 4");
+    assert_eq!(split_as("mysql", &text), [routine, "select 4"]);
+
+    let atomic =
+        "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2; END";
+    let text = format!("{atomic}; select 5");
+    assert_eq!(split_as("postgresql", &text), [atomic, "select 5"]);
+
+    let anonymous = "BEGIN NOT ATOMIC SELECT 1; SELECT 2; END";
+    let text = format!("{anonymous}; select 6");
+    assert_eq!(split_as("mariadb", &text), [anonymous, "select 6"]);
+}
+
+#[test]
+fn begin_as_a_transaction_still_ends_at_its_semicolon() {
+    assert_eq!(
+        split_as("postgresql", "BEGIN; UPDATE a SET b = 1; COMMIT"),
+        ["BEGIN", "UPDATE a SET b = 1", "COMMIT"]
+    );
+    assert_eq!(
+        split_as(
+            "postgresql",
+            "CREATE TABLE begin_log (id int); select case when 1 = 1 then 1 end; select 2"
+        ),
+        [
+            "CREATE TABLE begin_log (id int)",
+            "select case when 1 = 1 then 1 end",
+            "select 2"
+        ]
+    );
+}
+
+#[test]
+fn the_statement_at_the_cursor_inside_a_trigger_is_the_whole_trigger() {
+    let text =
+        "select 0;\nCREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE b SET n = 1; END;\nselect 2";
+    let offset = text.find("UPDATE").unwrap();
+    let found = statement_at(text, offset, SqlFlavor::for_driver("sqlite")).map(|r| &text[r]);
+    assert_eq!(
+        found,
+        Some("CREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE b SET n = 1; END")
+    );
 }

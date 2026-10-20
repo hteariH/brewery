@@ -20,6 +20,8 @@ private class Cursor(
     /** Rows read from the result set so far. */
     var read = 0L
     var truncated = false
+    /** The SQL produced another result after this one (seen once this one is exhausted). */
+    var moreResults = false
     val columnCount: Int get() = kinds.size
     /** True while this cursor relies on the autocommit-off transaction [CursorManager] opened for streaming. */
     var ownsTx = false
@@ -46,8 +48,9 @@ private class Cursor(
  *  - A plain read (SELECT/WITH/VALUES/TABLE/SHOW/EXPLAIN without FOR UPDATE/SHARE, RETURNING, INTO or DML) on a
  *    connection in autocommit mode turns autocommit off. That implicit transaction is owned by the streaming
  *    cursors; when the last one is finished, closed, evicted or dropped, the manager commits and turns autocommit
- *    back on. It is also ended after [streamTtlMs] without a fetch or execute (the owning cursors are dropped,
- *    fetch -> -32013), so an abandoned result tab cannot hold a server transaction open.
+ *    back on. It is also ended after [streamTtlMs] (5 minutes by default) without a fetch or execute (the owning
+ *    cursors are dropped, fetch -> -32013), so an abandoned result tab cannot hold a server transaction open for
+ *    long; until then it holds the session's snapshot (`xmin`), which delays vacuum.
  *  - Every other statement runs unchanged in the driver's current mode (DML ... RETURNING is therefore buffered).
  *    Such buffered results, and reads inside a user transaction, stop after [maxBufferedRows] rows; the last
  *    fetch then reports `truncated`.
@@ -66,9 +69,9 @@ private class Cursor(
  * introspection first cancels and closes the unfinished cursors of the session (fetch -> -32013, "result
  * expired"). Finished cursors are not affected.
  *
- * Every other unfinished cursor (SQLite, MariaDB, a buffered result) is closed after [streamTtlMs] without a fetch
- * as well (fetch -> -32013): an abandoned result tab must not hold a SQLite SHARED lock or a MariaDB metadata lock
- * until the console is closed.
+ * Every other unfinished cursor (SQLite, MariaDB, a buffered result) is closed after [idleCursorTtlMs] (a minute by
+ * default) without a fetch (fetch -> -32013): an abandoned result tab must not hold a SQLite SHARED lock, which
+ * blocks every writer, or a MariaDB metadata lock until the console is closed.
  *
  * [index] maps cursor id to this manager so that `fetch`/`close` can find the right session from an id alone.
  */
@@ -83,6 +86,8 @@ class CursorManager(
     private val expireUnfinishedBeforeCommands: (Connection) -> Boolean = { false },
     /** Most rows of a result the driver buffers instead of streaming (see "Streaming"); the rest is cut off. */
     private val maxBufferedRows: Long = DEFAULT_MAX_BUFFERED_ROWS,
+    /** How long an unfinished cursor outside the streaming transaction may sit without a fetch. */
+    private val idleCursorTtlMs: Long = DEFAULT_IDLE_CURSOR_TTL_MS,
 ) {
     private val cursors = LinkedHashMap<String, Cursor>()
     private var txOwners = 0
@@ -92,23 +97,36 @@ class CursorManager(
     /** True from the moment we turned autocommit off until we turned it back on. */
     private var implicitOpen = false
     @Volatile private var lastStreamActivity = 0L
-    private var userTx = false
+    @Volatile private var userTx = false
 
     init {
         session.onClose { closeAll() }
         session.onSweep(::anyExpired) { expireIdle(it) }
+        // Closing the session would roll the user's work back.
+        session.keepOpenWhile { userTx }
     }
 
     val openCount: Int get() = synchronized(cursors) { cursors.size }
 
     /**
-     * Runs [sql] and returns after the first result: an update count (no cursor) or the column list of a
-     * result set that stays open as a cursor. A driver [java.sql.SQLException] propagates after the statement
-     * has been released, so the caller can classify it.
+     * True while the user has a transaction open on this session (BEGIN ... COMMIT / ROLLBACK). PostgreSQL's own
+     * transaction state decides on pgjdbc; other drivers are judged by the keywords of the statements run, so a
+     * transaction ended by other means (MySQL's implicit commit before DDL, SET autocommit) is not seen. Safe from any
+     * thread.
      */
-    fun execute(connection: Connection, sql: String): DbExecuteResult {
+    val inUserTransaction: Boolean get() = userTx
+
+    /**
+     * Runs [sql] and returns after the first result: an update count (no cursor) or the column list of a
+     * result set that stays open as a cursor, with [DbExecuteResult.inTransaction] as of afterwards. A driver
+     * [java.sql.SQLException] propagates after the statement has been released, so the caller can classify it.
+     */
+    fun execute(connection: Connection, sql: String): DbExecuteResult =
+        executeStatement(connection, sql).copy(inTransaction = userTx)
+
+    private fun executeStatement(connection: Connection, sql: String): DbExecuteResult {
         expireUnfinishedIfNeeded(connection)
-        if (!managesTransactions(connection)) return runStatement(connection, sql, ownsTx = false)
+        if (!managesTransactions(connection)) return runTracking(connection, sql, SqlText.classify(sql))
         val kind = SqlText.classify(sql)
         serverInTransaction(connection)?.let { userTx = it }
         if (userTx) return runTracking(connection, sql, kind)
@@ -235,7 +253,7 @@ class CursorManager(
                 // SQLite reports the previous statement's change count for one that changes no rows (DDL).
                 val unchanged = changesBefore != null && sqliteTotalChanges(connection) == changesBefore
                 val count = if (unchanged) 0L else statement.updateCount.toLong().coerceAtLeast(0)
-                return DbExecuteResult(null, emptyList(), count, elapsedMs)
+                return DbExecuteResult(null, emptyList(), count, elapsedMs, moreResults = hasMoreResults(statement))
             }
             val rs = statement.resultSet
             val meta = rs.metaData
@@ -264,6 +282,11 @@ class CursorManager(
             if (!kept) runCatching { statement.close() }
         }
     }
+
+    /** Whether [statement] has another result after the current one, which this call discards. */
+    private fun hasMoreResults(statement: Statement): Boolean = runCatching {
+        statement.moreResults || statement.updateCount != -1
+    }.getOrDefault(false)
 
     /** `sqlite3_total_changes()` of a bundled-driver SQLite connection (no query), or null for anything else. */
     private fun sqliteTotalChanges(c: Connection): Long? = runCatching {
@@ -300,7 +323,7 @@ class CursorManager(
             }
             if (!cursor.done && rows.size == max) cursor.pending = step(cursor, render = true)
             val done = cursor.done && cursor.pending == null
-            return DbFetchResult(rows, done, done && cursor.truncated)
+            return DbFetchResult(rows, done, done && cursor.truncated, done && cursor.moreResults)
         } catch (e: Throwable) {
             // A failed or cancelled result set cannot be resumed; inside our streaming transaction the failure
             // also aborts every other streaming cursor.
@@ -334,13 +357,13 @@ class CursorManager(
     /** True when the implicit streaming transaction has seen no activity for the TTL. Safe from any thread. */
     fun streamingExpired(): Boolean = synchronized(cursors) { txOwners > 0 } && clock() - lastStreamActivity >= streamTtlMs
 
-    /** True when the streaming transaction or any other unfinished cursor has been idle for the TTL. Safe from any thread. */
+    /** True when the streaming transaction or any other unfinished cursor has been idle for its TTL. Safe from any thread. */
     fun anyExpired(): Boolean = streamingExpired() || synchronized(cursors) { idleUnfinished().isNotEmpty() }
 
-    /** Unfinished cursors outside the streaming transaction idle for the TTL; call with the [cursors] lock held. */
+    /** Unfinished cursors outside the streaming transaction idle for [idleCursorTtlMs]; call with the [cursors] lock held. */
     private fun idleUnfinished(): List<Cursor> {
         val now = clock()
-        return cursors.values.filter { !it.done && !it.ownsTx && now - it.lastActivity >= streamTtlMs }
+        return cursors.values.filter { !it.done && !it.ownsTx && now - it.lastActivity >= idleCursorTtlMs }
     }
 
     /**
@@ -436,6 +459,7 @@ class CursorManager(
         if (atLimit) cursor.truncated = cursor.resultSet.next()
         if (atLimit || !cursor.resultSet.next()) {
             cursor.done = true
+            if (!atLimit) cursor.moreResults = hasMoreResults(cursor.statement)
             runCatching { cursor.resultSet.close() }
             runCatching { cursor.statement.close() }
             release(cursor)
@@ -450,7 +474,10 @@ class CursorManager(
         const val MAX_CURSORS = 20
         const val MAX_LIMIT = 1000
         const val FETCH_SIZE = 500
-        const val DEFAULT_STREAM_TTL_MS = 60_000L
+        /** Long enough to read a first page before scrolling on, short enough not to hold `xmin` for good. */
+        const val DEFAULT_STREAM_TTL_MS = 5 * 60_000L
+        /** Short: such a cursor can hold a SQLite lock that blocks every writer. */
+        const val DEFAULT_IDLE_CURSOR_TTL_MS = 60_000L
         const val DEFAULT_MAX_BUFFERED_ROWS = 100_000L
     }
 }

@@ -8,7 +8,10 @@ use util::path;
 use workspace::notifications::NotificationId;
 
 fn rendered_rows(panel: &Entity<DatabasePanel>, cx: &mut VisualTestContext) -> usize {
-    panel.update_in(cx, |panel, _, cx| panel.render_rows(cx).len())
+    panel.update_in(cx, |panel, _, cx| {
+        let count = panel.tree().rows().len();
+        panel.render_rows(0..count, cx).len()
+    })
 }
 
 fn select_source(fixture: &Fixture, id: &str, cx: &mut VisualTestContext) {
@@ -713,4 +716,199 @@ async fn the_panel_moves_to_the_right_dock_and_remembers_it(cx: &mut TestAppCont
         .expect("the dock side is saved to the settings file");
     let saved: Value = settings::parse_json_with_comments(&saved).unwrap();
     assert_eq!(saved["database_panel"]["dock"], json!("right"));
+}
+
+fn expand_public(fixture: &Fixture, cx: &mut VisualTestContext) {
+    fixture
+        .panel
+        .update(cx, |panel, cx| panel.toggle(RowKey::data_source("c1"), cx));
+    cx.run_until_parked();
+    fixture.panel.update(cx, |panel, cx| {
+        panel.toggle(RowKey::new("c1", vec!["public".to_string()]), cx)
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn a_table_copies_its_qualified_name_and_selects_its_top_rows(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    expand_public(&fixture, cx);
+    let owners = RowKey::new("c1", vec!["public".to_string(), "owners".to_string()]);
+    fixture
+        .panel
+        .update(cx, |panel, cx| panel.select(Some(owners), cx));
+    fixture.panel.update(cx, |panel, cx| panel.copy_name(cx));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("public.owners".to_string())
+    );
+
+    fixture
+        .panel
+        .update_in(cx, |panel, window, cx| panel.select_top(window, cx));
+    cx.run_until_parked();
+    let sql: Vec<Value> = fixture
+        .calls_of("db/execute")
+        .iter()
+        .map(|params| params["sql"].clone())
+        .collect();
+    assert_eq!(sql, [json!("SELECT * FROM public.owners LIMIT 500")]);
+    let console = fixture.workspace.read_with(cx, |workspace, cx| {
+        workspace.active_item_as::<QueryConsole>(cx)
+    });
+    assert!(console.is_some(), "Select Top opens a console");
+
+    // Other nodes copy their own name; Select Top is only for tables and views.
+    let sequence = RowKey::new(
+        "c1",
+        vec!["public".to_string(), "owners_id_seq".to_string()],
+    );
+    fixture
+        .panel
+        .update(cx, |panel, cx| panel.select(Some(sequence), cx));
+    fixture.panel.update(cx, |panel, cx| panel.copy_name(cx));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("owners_id_seq".to_string())
+    );
+    fixture
+        .panel
+        .update_in(cx, |panel, window, cx| panel.select_top(window, cx));
+    cx.run_until_parked();
+    assert_eq!(fixture.calls_of("db/execute").len(), 1);
+}
+
+#[gpui::test]
+async fn showing_system_objects_lists_the_open_nodes_again_with_them(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    expand_public(&fixture, cx);
+    assert_eq!(
+        fixture.calls_of("db/introspect"),
+        [
+            json!({ "connectionId": "c1", "path": [] }),
+            json!({ "connectionId": "c1", "path": ["public"] }),
+        ]
+    );
+    fixture
+        .panel
+        .update(cx, |panel, cx| panel.set_show_system_objects(true, cx));
+    cx.run_until_parked();
+    let calls = fixture.calls_of("db/introspect");
+    assert_eq!(
+        calls[2..],
+        [
+            json!({ "connectionId": "c1", "path": [], "includeSystem": true }),
+            json!({ "connectionId": "c1", "path": ["public"], "includeSystem": true }),
+        ]
+    );
+    fixture
+        .panel
+        .read_with(cx, |panel, _| assert!(panel.show_system_objects()));
+}
+
+#[gpui::test]
+async fn an_authentication_failure_asks_for_the_password(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture.state.fail_with_code(
+        "db/introspect",
+        brewery_daemon_client::DB_AUTH_FAILED,
+        "password authentication failed for user \"app\"",
+    );
+    fixture
+        .panel
+        .update(cx, |panel, cx| panel.toggle(RowKey::data_source("c1"), cx));
+    cx.run_until_parked();
+    let modal = fixture
+        .modal(cx)
+        .expect("the data source dialog should ask for the password");
+    modal.update_in(cx, |modal, window, cx| {
+        assert!(modal.is_editing());
+        assert!(modal.is_asking_for_password());
+        assert_eq!(modal.error().map(|e| e.as_ref()), Some(ENTER_PASSWORD));
+        assert!(
+            modal
+                .password_field()
+                .focus_handle(cx)
+                .contains_focused(window, cx),
+            "the password field has the focus"
+        );
+    });
+
+    // Typing the password and saving lists the data source again.
+    set_field(
+        &modal.read_with(cx, |modal, _| modal.password_field().clone()),
+        "secret",
+        cx,
+    );
+    fixture.state.succeed("db/introspect");
+    modal.update(cx, |modal, cx| modal.save(cx));
+    cx.run_until_parked();
+    let saves = fixture.calls_of("db/connections/save");
+    assert_eq!(saves.len(), 1);
+    assert_eq!(saves[0]["password"], "secret");
+    assert!(fixture.modal(cx).is_none());
+    let rows = fixture.panel.read_with(cx, |panel, _| panel.tree().rows());
+    assert!(rows.iter().any(|row| matches!(row, Row::Node { .. })));
+
+    // Another failure while the dialog is open does not stack a second dialog.
+    fixture.state.fail_with_code(
+        "db/introspect",
+        brewery_daemon_client::DB_AUTH_FAILED,
+        "password authentication failed for user \"app\"",
+    );
+    fixture.panel.update(cx, |panel, cx| panel.refresh(cx));
+    cx.run_until_parked();
+    assert!(fixture.modal(cx).is_some());
+    fixture.panel.update(cx, |panel, cx| panel.refresh(cx));
+    cx.run_until_parked();
+    assert!(fixture.modal(cx).is_some(), "still the one dialog");
+}
+
+#[gpui::test]
+async fn other_failures_do_not_open_a_dialog(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture
+        .panel
+        .update(cx, |panel, cx| panel.toggle(RowKey::data_source("c2"), cx));
+    cx.run_until_parked();
+    assert!(fixture.modal(cx).is_none());
+}
+
+#[gpui::test]
+async fn a_schema_with_thousands_of_tables_builds_only_the_rows_on_screen(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture.state.many_tables.set(5000);
+    expand_public(&fixture, cx);
+    let total = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.tree().rows().len());
+    assert_eq!(
+        total,
+        2 + 1 + 5000,
+        "two data sources, public and its tables"
+    );
+    let shown = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.last_rendered_rows())
+        .expect("the list should have rendered rows");
+    assert_eq!(shown.start, 0);
+    assert!(
+        shown.len() < 200,
+        "only the rows on screen are built, not {}",
+        shown.len()
+    );
+
+    // Selecting the last row scrolls it into view.
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select_previous(&menu::SelectPrevious, window, cx)
+    });
+    cx.run_until_parked();
+    let shown = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.last_rendered_rows())
+        .unwrap();
+    assert!(
+        shown.contains(&(total - 1)),
+        "{shown:?} should show the last row"
+    );
 }

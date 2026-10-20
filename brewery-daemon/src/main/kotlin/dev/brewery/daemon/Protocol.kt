@@ -9,6 +9,7 @@ import org.eclipse.lsp4j.jsonrpc.services.JsonRequest
 import dev.brewery.daemon.db.ConnectionInfo
 import dev.brewery.daemon.db.DbCancelParams
 import dev.brewery.daemon.db.DbCloseParams
+import dev.brewery.daemon.db.DbCloseSessionParams
 import dev.brewery.daemon.db.DbConnectionsDeleteParams
 import dev.brewery.daemon.db.DbConnectionsListParams
 import dev.brewery.daemon.db.DbConnectionsSaveParams
@@ -92,6 +93,7 @@ interface BreweryServer {
     @JsonRequest("db/fetch") fun dbFetch(params: DbFetchParams): CompletableFuture<DbFetchResult>
     @JsonRequest("db/cancel") fun dbCancel(params: DbCancelParams): CompletableFuture<Any?>
     @JsonRequest("db/close") fun dbClose(params: DbCloseParams): CompletableFuture<Any?>
+    @JsonRequest("db/sessions/close") fun dbSessionsClose(params: DbCloseSessionParams): CompletableFuture<Any?>
 }
 
 interface BreweryClient {
