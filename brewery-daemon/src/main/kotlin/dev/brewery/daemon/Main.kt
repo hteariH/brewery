@@ -1,10 +1,13 @@
 package dev.brewery.daemon
 
+import dev.brewery.daemon.mcp.McpServer
+import dev.brewery.daemon.mcp.McpTool
 import dev.brewery.daemon.springconfig.SpringConfigServer
 import org.eclipse.lsp4j.jsonrpc.Launcher
 import org.eclipse.lsp4j.launch.LSPLauncher
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.file.Path
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
@@ -12,7 +15,10 @@ fun main(args: Array<String>) {
     // so it can never corrupt the framed stream.
     val rpcOut = System.out
     System.setOut(System.err)
-    if ("--spring-config-lsp" in args) {
+    if ("--mcp" in args) {
+        val root = java.nio.file.Paths.get("").toAbsolutePath()
+        runMcp(root, System.`in`, rpcOut, mcpTools(root)) { exitProcess(it) }
+    } else if ("--spring-config-lsp" in args) {
         runSpringConfigLsp(System.`in`, rpcOut) { exitProcess(it) }
     } else {
         runDaemon(System.`in`, rpcOut) { exitProcess(it) }
@@ -29,6 +35,21 @@ fun runSpringConfigLsp(input: InputStream, rpcOut: OutputStream, exit: (Int) -> 
     server.shutdown()
     exit(0)
 }
+
+/**
+ * Serves MCP over [input]/[rpcOut] for the project in [root] until EOF. Zed starts context servers in the
+ * project's first worktree and sends no MCP roots, so the working directory is the project.
+ */
+fun runMcp(root: Path, input: InputStream, rpcOut: OutputStream, tools: List<McpTool>, exit: (Int) -> Unit) {
+    System.err.println("brewery mcp: serving $root")
+    McpServer(tools, daemonVersion()).serve(input, rpcOut)
+    exit(0)
+}
+
+/** Every MCP tool for [root]; the tool sets are added by later tasks. */
+fun mcpTools(root: Path): List<McpTool> = emptyList()
+
+private fun daemonVersion(): String = McpServer::class.java.`package`?.implementationVersion ?: "dev"
 
 /**
  * Serves JSON-RPC until [input] reaches EOF, then closes the daemon and calls [exit]. Exiting explicitly
