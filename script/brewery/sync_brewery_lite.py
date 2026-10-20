@@ -5,8 +5,8 @@
 
 Copies assets/themes/brewery/brewery.json and crates/brewery_theme/icons/** into the
 extension, rewriting the icon theme's paths to be relative to the extension root (where
-Zed resolves them), and keeps the `version` of extension.toml and Cargo.toml equal to
-crates/zed/BREWERY_VERSION, so the extension downloads the daemon jar of its own release.
+Zed resolves them), and keeps the `version` of extension.toml, Cargo.toml and the
+extension's own Cargo.lock entry equal to crates/zed/BREWERY_VERSION, so the extension downloads the daemon jar of its own release.
 """
 import argparse
 import json
@@ -16,8 +16,18 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 EXT = Path("extensions/brewery-lite")
-VERSIONED = ("extension.toml", "Cargo.toml")
-VERSION_LINE = re.compile(r'^version = "[^"]*"(?=\r?$)', re.MULTILINE)
+VERSION_LINE = re.compile(r'^(version = )"[^"]*"(?=\r?$)', re.MULTILINE)
+# Cargo.lock starts with its own format `version = 4`; only the extension's package entry
+# follows BREWERY_VERSION, or `cargo --locked` fails after a bump.
+LOCK_VERSION_LINE = re.compile(
+    r'^(\[\[package\]\]\r?\nname = "brewery_lite"\r?\nversion = )"[^"]*"(?=\r?$)', re.MULTILINE
+)
+# File relative to the extension: the line holding the extension's version.
+VERSIONED = {
+    "extension.toml": VERSION_LINE,
+    "Cargo.toml": VERSION_LINE,
+    "Cargo.lock": LOCK_VERSION_LINE,
+}
 
 
 def extension_icon_path(path: str) -> str:
@@ -68,7 +78,8 @@ def _wanted(repo: Path) -> dict:
         version = (repo / "crates/zed/BREWERY_VERSION").read_text(encoding="utf-8").strip()
         for name in manifests:
             text = (ext / name).read_bytes().decode("utf-8")
-            files[name] = VERSION_LINE.sub(f'version = "{version}"', text, count=1).encode("utf-8")
+            line = VERSIONED[name]
+            files[name] = line.sub(rf'\g<1>"{version}"', text, count=1).encode("utf-8")
     return files
 
 

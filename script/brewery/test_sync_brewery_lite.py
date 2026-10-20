@@ -55,6 +55,15 @@ class SyncTest(unittest.TestCase):
             f'[package]\nname = "brewery_lite"\nversion = "{version}"\n\n'
             '[dependencies]\nzed_extension_api = "0.7.0"\n'
         )
+        # Dependencies before and after the extension's own entry, with the same version
+        # line shape, must keep their versions.
+        (ext / "Cargo.lock").write_text(
+            "version = 4\n\n"
+            '[[package]]\nname = "block-buffer"\nversion = "0.10.4"\n\n'
+            f'[[package]]\nname = "brewery_lite"\nversion = "{version}"\n'
+            'dependencies = [\n "zed_extension_api",\n]\n\n'
+            '[[package]]\nname = "zed_extension_api"\nversion = "0.7.0"\n'
+        )
 
     def test_copy_then_check_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,7 +152,9 @@ class SyncTest(unittest.TestCase):
             )
             # Bumping BREWERY_VERSION leaves both manifests out of date.
             (root / "crates/zed/BREWERY_VERSION").write_text("1.3.0\n")
-            self.assertEqual(sync.sync(root, check=True), ["Cargo.toml", "extension.toml"])
+            self.assertEqual(
+                sync.sync(root, check=True), ["Cargo.lock", "Cargo.toml", "extension.toml"]
+            )
             self.assertIn('version = "1.2.3"', (ext / "Cargo.toml").read_text())
             sync.sync(root, check=False)
             cargo = (ext / "Cargo.toml").read_text()
@@ -151,6 +162,11 @@ class SyncTest(unittest.TestCase):
             self.assertIn('zed_extension_api = "0.7.0"', cargo)
             self.assertIn('version = "1.3.0"', (ext / "extension.toml").read_text())
             self.assertIn('schema_version = 1', (ext / "extension.toml").read_text())
+            lock = (ext / "Cargo.lock").read_text()
+            self.assertIn('name = "brewery_lite"\nversion = "1.3.0"\n', lock)
+            self.assertIn('name = "block-buffer"\nversion = "0.10.4"\n', lock)
+            self.assertIn('name = "zed_extension_api"\nversion = "0.7.0"\n', lock)
+            self.assertTrue(lock.startswith("version = 4\n"))
             self.assertEqual(sync.sync(root, check=True), [])
 
     def test_main_check_exit_codes(self):
