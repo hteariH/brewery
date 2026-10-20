@@ -57,7 +57,10 @@ object SpringDatasource {
         return if (file.fileName.toString().endsWith(".properties")) {
             PropertiesDocument(text).entries.associate { it.key to it.value.trim() }
         } else {
-            YamlDocument(text).entries.filter { it.document == 0 && !it.hasChildren }.associate { it.key to cleanYaml(it.value) }
+            // The default profile is the first document with content; a leading `---` opens an empty one.
+            val entries = YamlDocument(text).entries
+            val first = entries.minOfOrNull { it.document }
+            entries.filter { it.document == first && !it.hasChildren }.associate { it.key to cleanYaml(it.value) }
         }
     }
 

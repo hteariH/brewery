@@ -72,6 +72,23 @@ class SpringDatasourceTest {
     }
 
     @Test
+    fun `leading document separator still reads the default profile`() {
+        val root = project("$res/application.yml" to """
+            ---
+            spring.datasource.url: jdbc:sqlite:default.db
+            ---
+            spring:
+              config.activate.on-profile: prod
+              datasource:
+                url: jdbc:sqlite:prod.db
+                username: prod
+        """.trimIndent())
+        val ds = SpringDatasource.find(root) { null }!!
+        assertEquals("jdbc:sqlite:default.db", ds.url)
+        assertNull(ds.username)
+    }
+
+    @Test
     fun `no datasource gives null`() {
         assertNull(SpringDatasource.find(project("$res/application.yml" to "server.port: 8080")) { null })
     }
