@@ -2,7 +2,7 @@ Icons in this directory come from JetBrains/intellij-community
 (commit d0936c36705bdaf87deca0f157a40c651345600c, platform/icons/src/expui),
 licensed under the Apache License, Version 2.0:
 https://www.apache.org/licenses/LICENSE-2.0
-A copy of the Apache License 2.0 is in LICENSE-APACHE at the root of this repository.
+A copy of the Apache License 2.0 is in LICENSE-APACHE, next to this icons directory.
 
 The NOTICE file of JetBrains/intellij-community at that commit follows verbatim.
 
