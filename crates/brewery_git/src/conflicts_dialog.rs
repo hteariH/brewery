@@ -36,6 +36,7 @@ use workspace::{ModalView, Toast, Workspace};
 use crate::branches_popup::{OutcomeToast, show_toast};
 use crate::cli::{ConflictSides, GitCli, MergeOutcome, Operation, RepoPath};
 use crate::merge_view::{MergeApplied, MergeView};
+use crate::revision_diff_view::MAX_FILE_SIZE;
 
 actions!(
     brewery,
@@ -216,21 +217,21 @@ impl ConflictsDialog {
         if unchecked.is_empty() {
             return;
         }
-        let repo = self.repo.clone();
+        // One batched read for all files, not one merge-editor load per file.
+        let check = GitCli::mergeable_conflicts(&self.repo, MAX_FILE_SIZE as u64, cx);
         self.mergeable_task = cx.spawn(async move |this, cx| {
-            for path in unchecked {
-                let check = cx.update(|cx| MergeView::can_merge(&repo, path.clone(), cx));
-                let mergeable = check.await.unwrap_or(false);
-                if this
-                    .update(cx, |this, cx| {
-                        this.mergeable.insert(path, mergeable);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    return;
+            let mergeable = check
+                .await
+                .inspect_err(|error| log::warn!("checking mergeability failed: {error:#}"))
+                .unwrap_or_default();
+            this.update(cx, |this, cx| {
+                for path in unchecked {
+                    let can_merge = mergeable.get(&path).copied().unwrap_or(false);
+                    this.mergeable.insert(path, can_merge);
                 }
-            }
+                cx.notify();
+            })
+            .ok();
         });
     }
 

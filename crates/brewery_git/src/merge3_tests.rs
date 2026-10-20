@@ -411,28 +411,69 @@ fn run_git(dir: &Path, args: &[&str]) -> std::process::Output {
     .expect("run git")
 }
 
-/// `git merge-file -p` on files `ours`, `base` and `theirs` written to `dir`: stdout and the
-/// exit status, which is the number of conflicts.
-fn git_merge_file(dir: &Path, base: &str, ours: &str, theirs: &str) -> (String, i32) {
-    std::fs::write(dir.join("base"), base).expect("write base");
-    std::fs::write(dir.join("ours"), ours).expect("write ours");
-    std::fs::write(dir.join("theirs"), theirs).expect("write theirs");
+/// The two-way diffs merge3 is compared with git under: histogram, which `git merge` (merge-ort)
+/// uses and so decides the conflicts in the working tree, and Myers, `git merge-file`'s
+/// default.
+const ALGORITHMS: [(Algorithm, &str); 2] = [
+    (Algorithm::Histogram, "histogram"),
+    (Algorithm::Myers, "myers"),
+];
+
+/// Whether this git's `merge-file` takes `--diff-algorithm` (git 2.44 and later). Without it
+/// only the Myers comparisons can run.
+fn merge_file_takes_an_algorithm() -> bool {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for name in ["base", "ours", "theirs"] {
+        std::fs::write(dir.path().join(name), "a\n").expect("write");
+    }
     let output = run_git(
-        dir,
+        dir.path(),
         &[
             "merge-file",
             "-p",
-            "-L",
-            "ours",
-            "-L",
-            "base",
-            "-L",
-            "theirs",
+            "--diff-algorithm=histogram",
             "ours",
             "base",
             "theirs",
         ],
     );
+    let supported = output.status.success();
+    if !supported {
+        eprintln!("git merge-file has no --diff-algorithm: skipping the histogram comparisons");
+    }
+    supported
+}
+
+fn algorithms() -> Vec<(Algorithm, &'static str)> {
+    let histogram = merge_file_takes_an_algorithm();
+    ALGORITHMS
+        .into_iter()
+        .filter(|(algorithm, _)| histogram || *algorithm == Algorithm::Myers)
+        .collect()
+}
+
+/// `git merge-file -p` with the `algorithm` two-way diff on files `ours`, `base` and `theirs`
+/// written to `dir`: stdout and the exit status, which is the number of conflicts.
+fn git_merge_file(
+    dir: &Path,
+    algorithm: &str,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+) -> (String, i32) {
+    std::fs::write(dir.join("base"), base).expect("write base");
+    std::fs::write(dir.join("ours"), ours).expect("write ours");
+    std::fs::write(dir.join("theirs"), theirs).expect("write theirs");
+    let algorithm_flag = format!("--diff-algorithm={algorithm}");
+    let mut args = vec!["merge-file", "-p"];
+    // Myers is the default; older gits do not know the flag.
+    if algorithm != "myers" {
+        args.push(&algorithm_flag);
+    }
+    args.extend([
+        "-L", "ours", "-L", "base", "-L", "theirs", "ours", "base", "theirs",
+    ]);
+    let output = run_git(dir, &args);
     let status = output.status.code().expect("git merge-file exit code");
     assert!(status >= 0, "git merge-file failed: {output:?}");
     (
@@ -500,24 +541,73 @@ fn table_cases_match_git_merge_file() {
         ("", "x\n", "y\n"),
         ("a\n", "", "b\n"),
     ];
-    for (base, ours, theirs) in cases {
-        let (expected, status) = git_merge_file(dir.path(), base, ours, theirs);
-        let m = merge(base, ours, theirs);
-        assert_eq!(
-            m.conflict_count() as i32,
-            status,
-            "conflicts for {base:?} {ours:?} {theirs:?}"
-        );
-        if status == 0 {
-            assert_eq!(m.merged_text().as_deref(), Some(expected.as_str()));
-        } else if !base.contains('\r') {
+    for (algorithm, name) in algorithms() {
+        for (base, ours, theirs) in cases {
+            let (expected, status) = git_merge_file(dir.path(), name, base, ours, theirs);
+            let m = merge3_with(algorithm, base, ours, theirs);
+            check_invariants(&m);
             assert_eq!(
-                render_like_git(&m),
-                expected,
-                "{base:?} {ours:?} {theirs:?}"
+                m.conflict_count() as i32,
+                status,
+                "{name}: conflicts for {base:?} {ours:?} {theirs:?}"
             );
+            if status == 0 {
+                assert_eq!(m.merged_text().as_deref(), Some(expected.as_str()));
+            } else if !base.contains('\r') {
+                assert_eq!(
+                    render_like_git(&m),
+                    expected,
+                    "{name}: {base:?} {ours:?} {theirs:?}"
+                );
+            }
         }
     }
+}
+
+/// What merge3 prints for `merge` the way `git merge-file -p` does, and its conflict count.
+fn output_like_git(merge: &Merge3) -> (String, i32) {
+    let output = match merge.merged_text() {
+        Some(text) => text,
+        None => render_like_git(merge),
+    };
+    (output, merge.conflict_count() as i32)
+}
+
+/// Where git's histogram and Myers merges of the same files differ, merge3 gives what the
+/// histogram merge (`git merge`'s) gives, not what `git merge-file`'s default gives.
+#[test]
+fn merges_follow_gits_histogram_merge_where_myers_differs() {
+    if !merge_file_takes_an_algorithm() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (mut differing, mut like_histogram, mut like_myers) = (0, 0, 0);
+    for case in 0..RANDOM_CASES {
+        let (base, ours, theirs) = random_case(case);
+        let histogram = git_merge_file(dir.path(), "histogram", &base, &ours, &theirs);
+        let myers = git_merge_file(dir.path(), "myers", &base, &ours, &theirs);
+        if histogram == myers {
+            continue;
+        }
+        differing += 1;
+        let ours = output_like_git(&merge3(&base, &ours, &theirs));
+        like_histogram += usize::from(ours == histogram);
+        like_myers += usize::from(ours == myers);
+    }
+    eprintln!(
+        "{differing} of {RANDOM_CASES} merges differ between git's histogram and Myers; \
+         merge3 matches histogram in {like_histogram}, Myers in {like_myers}"
+    );
+    assert!(
+        differing > 0,
+        "the random cases never tell the algorithms apart"
+    );
+    // Measured: 9 of 10, and none like Myers.
+    assert!(
+        like_histogram * 5 >= differing * 4 && like_myers < like_histogram,
+        "merge3 matches git's histogram merge in only {like_histogram} of {differing} \
+         (Myers in {like_myers})"
+    );
 }
 
 /// xorshift64*: deterministic, so a failure reproduces from the printed case number.
@@ -599,9 +689,15 @@ fn random_case(case: u64) -> (String, String, String) {
     )
 }
 
-/// The hunks `git diff` finds between two files of `dir` with the diff `git merge-file` uses:
-/// Myers, no indent heuristic.
-fn git_diff_hunks(dir: &Path, before: &str, after: &str) -> Vec<(Range<usize>, Range<usize>)> {
+/// The hunks `git diff` finds between two files of `dir` with the diff a merge uses: the
+/// `algorithm`, no indent heuristic.
+fn git_diff_hunks(
+    dir: &Path,
+    algorithm: &str,
+    before: &str,
+    after: &str,
+) -> Vec<(Range<usize>, Range<usize>)> {
+    let algorithm = format!("--diff-algorithm={algorithm}");
     let output = run_git(
         dir,
         &[
@@ -610,7 +706,7 @@ fn git_diff_hunks(dir: &Path, before: &str, after: &str) -> Vec<(Range<usize>, R
             "--no-color",
             "--no-ext-diff",
             "-U0",
-            "--diff-algorithm=myers",
+            &algorithm,
             "--no-indent-heuristic",
             before,
             after,
@@ -640,14 +736,18 @@ fn git_diff_hunks(dir: &Path, before: &str, after: &str) -> Vec<(Range<usize>, R
         .collect()
 }
 
-fn our_diff_hunks(before: &str, after: &str) -> Vec<(Range<usize>, Range<usize>)> {
+fn our_diff_hunks(
+    algorithm: Algorithm,
+    before: &str,
+    after: &str,
+) -> Vec<(Range<usize>, Range<usize>)> {
     let mut interner: Interner<&str> = Interner::new(64);
     let [before, after] = [before, after].map(|text| {
         imara_diff::sources::lines(text)
             .map(|line| interner.intern(line))
             .collect::<Vec<Token>>()
     });
-    diff_lines(&before, &after, interner.num_tokens())
+    diff_lines(algorithm, &before, &after, interner.num_tokens())
         .into_iter()
         .map(|hunk| (hunk.before, hunk.after))
         .collect()
@@ -674,10 +774,12 @@ enum Outcome {
 /// none otherwise). The merge on top of the two-way diffs is a port of xdiff's, so when merge3
 /// differs from git we ask `git diff` for git's own two-way diffs and only fail if they equal
 /// ours, which means the merge logic itself is wrong. Tie-break mismatches are capped at 2%.
-fn compare_with_git(dir: &Path, case: u64) -> Outcome {
+/// With the histogram port (`merge3_histogram.rs`) the two-way diffs still differ from git's in
+/// a few very repetitive cases (2 of these 400 merges when measured, against 0 for Myers).
+fn compare_with_git(dir: &Path, (algorithm, name): (Algorithm, &str), case: u64) -> Outcome {
     let (base, ours, theirs) = random_case(case);
-    let (expected, status) = git_merge_file(dir, &base, &ours, &theirs);
-    let merge = merge3(&base, &ours, &theirs);
+    let (expected, status) = git_merge_file(dir, name, &base, &ours, &theirs);
+    let merge = merge3_with(algorithm, &base, &ours, &theirs);
     check_invariants(&merge);
     let actual = match merge.merged_text() {
         Some(text) if status == 0 => text,
@@ -687,13 +789,13 @@ fn compare_with_git(dir: &Path, case: u64) -> Outcome {
         return Outcome::Same;
     }
     // `git_merge_file` left the three files in `dir`.
-    if git_diff_hunks(dir, "base", "ours") != our_diff_hunks(&base, &ours)
-        || git_diff_hunks(dir, "base", "theirs") != our_diff_hunks(&base, &theirs)
+    if git_diff_hunks(dir, name, "base", "ours") != our_diff_hunks(algorithm, &base, &ours)
+        || git_diff_hunks(dir, name, "base", "theirs") != our_diff_hunks(algorithm, &base, &theirs)
     {
         return Outcome::DiffTieBreak;
     }
     Outcome::Different(format!(
-        "case {case}: base {base:?} ours {ours:?} theirs {theirs:?}\n\
+        "{name} case {case}: base {base:?} ours {ours:?} theirs {theirs:?}\n\
          git ({status} conflicts):\n{expected}\n\
          merge3 ({} conflicts):\n{actual}",
         merge.conflict_count()
@@ -702,6 +804,12 @@ fn compare_with_git(dir: &Path, case: u64) -> Outcome {
 
 #[test]
 fn random_merges_match_git_merge_file() {
+    for algorithm in algorithms() {
+        random_merges_match_git_merge_file_with(algorithm);
+    }
+}
+
+fn random_merges_match_git_merge_file_with(algorithm: (Algorithm, &'static str)) {
     let threads = 8;
     let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
@@ -710,7 +818,7 @@ fn random_merges_match_git_merge_file() {
                     let dir = tempfile::tempdir().expect("temp dir");
                     (thread..RANDOM_CASES)
                         .step_by(threads as usize)
-                        .map(|case| compare_with_git(dir.path(), case))
+                        .map(|case| compare_with_git(dir.path(), algorithm, case))
                         .collect::<Vec<_>>()
                 })
             })
@@ -731,10 +839,12 @@ fn random_merges_match_git_merge_file() {
             _ => None,
         })
         .collect();
+    let name = algorithm.1;
+    eprintln!("{name}: {tie_breaks} of {RANDOM_CASES} merges differ through diff tie-breaks");
     assert!(
         failures.is_empty(),
-        "{} of {RANDOM_CASES} merges differ from git merge-file although the two-way diffs \
-         agree:\n{}",
+        "{name}: {} of {RANDOM_CASES} merges differ from git merge-file although the two-way \
+         diffs agree:\n{}",
         failures.len(),
         failures
             .iter()
@@ -744,7 +854,7 @@ fn random_merges_match_git_merge_file() {
     );
     assert!(
         tie_breaks * 50 <= RANDOM_CASES as usize,
-        "{tie_breaks} of {RANDOM_CASES} merges differ through diff tie-breaks"
+        "{name}: {tie_breaks} of {RANDOM_CASES} merges differ through diff tie-breaks"
     );
 }
 

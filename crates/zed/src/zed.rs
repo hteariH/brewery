@@ -5684,7 +5684,7 @@ mod tests {
         })
     }
 
-    // brewery: ctrl-k is the Commit tool window's "focus the message" key, alt-0 still toggles it.
+    // brewery: ctrl-k opens the Commit tool window with the message focused, alt-0 toggles it.
     #[gpui::test]
     fn test_jetbrains_commit_keys(cx: &mut TestAppContext) {
         init_keymap_test(cx);
@@ -5693,12 +5693,12 @@ mod tests {
         let in_panel = ["Workspace", "Dock", "GitPanel", "ChangesList"];
         assert_eq!(
             base_keymap_bindings_for(base, "ctrl-k", &in_panel, cx).first(),
-            Some(&"git_panel::FocusEditor".to_string())
+            Some(&"brewery::FocusCommitMessage".to_string())
         );
-        // Outside the panel ctrl-k still opens it.
+        // Outside the panel one press opens it with the message focused.
         assert_eq!(
             base_keymap_bindings_for(base, "ctrl-k", &["Workspace", "Pane", "Editor"], cx).first(),
-            Some(&"git_panel::ToggleFocus".to_string())
+            Some(&"brewery::FocusCommitMessage".to_string())
         );
         assert_eq!(
             base_keymap_bindings_for(base, "alt-0", &["Workspace", "Pane", "Editor"], cx).first(),

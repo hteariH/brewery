@@ -123,7 +123,7 @@
       "shift-f10": "task::Spawn",
       "ctrl-f5": "task::Rerun",
       "ctrl-e": "file_finder::Toggle",
-      "ctrl-k": "git_panel::ToggleFocus", // opens the Commit tool window; inside it, see the GitPanel block below
+      "ctrl-k": "brewery::FocusCommitMessage", // brewery: opens the Commit tool window with the message focused
       "ctrl-shift-n": "file_finder::Toggle",
       "ctrl-alt-n": "file_finder::Toggle",
       "ctrl-n": "project_symbols::Toggle",
@@ -192,12 +192,12 @@
       "shift-pagedown": "terminal::ScrollPageDown",
     },
   },
-  // brewery: the Commit tool window. ctrl-k again, once it is open, focuses the commit message.
+  // brewery: the Commit tool window. ctrl-k inside it also focuses the commit message.
   {
     "context": "GitPanel",
     "bindings": {
       "alt-0": "workspace::CloseActiveDock",
-      "ctrl-k": "git_panel::FocusEditor",
+      "ctrl-k": "brewery::FocusCommitMessage",
     },
   },
   { "context": "ProjectPanel", "bindings": { "alt-1": "workspace::CloseActiveDock" } },

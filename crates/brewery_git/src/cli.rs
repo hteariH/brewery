@@ -12,7 +12,7 @@ pub use git::Oid;
 pub use git::repository::RepoPath;
 use gpui::{App, AsyncApp, BackgroundExecutor, Entity, SharedString, Task};
 use project::git_store::{LocalRepositoryState, Repository, RepositoryState};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -533,6 +533,27 @@ impl GitCli {
         )
     }
 
+    /// For every conflicted file, whether the merge editor can open it: every stage present
+    /// is a regular file of at most `max_size` bytes whose checked-out content is UTF-8 text
+    /// without NUL bytes, and neither side deleted the file (as [`MergeInput::is_text`] after
+    /// [`GitCli::conflict_stages`]). One `ls-files` and two `cat-file --batch` processes cover
+    /// all the files, so hundreds of conflicts do not hold the repository's job queue.
+    ///
+    /// [`MergeInput::is_text`]: crate::merge_view::MergeInput::is_text
+    pub fn mergeable_conflicts(
+        repo: &Entity<Repository>,
+        max_size: u64,
+        cx: &mut App,
+    ) -> Task<Result<BTreeMap<RepoPath, bool>>> {
+        Self::job(
+            repo,
+            "brewery git mergeable conflicts",
+            None,
+            cx,
+            async move |runner, _| runner.mergeable_conflicts(max_size).await,
+        )
+    }
+
     /// The index records of a conflicted file, `<mode> <oid> <stage>` each, sorted by stage:
     /// `git ls-files -u -s -z -- <path>`. Empty when the file is not conflicted. Two reads
     /// that compare equal mean the conflict did not change in between.
@@ -667,6 +688,57 @@ impl GitRunner {
         deadline: impl Future<Output = ()>,
     ) -> Result<RawOutput> {
         let subcommand = args.first().copied().unwrap_or_default();
+        let mut command = self.command(args, extra_env);
+        // Dropping the output future (deadline reached) kills git.
+        command.kill_on_drop(true);
+        let output = pin!(command.output());
+        let output = match future::select(output, pin!(deadline)).await {
+            Either::Left((output, _)) => {
+                output.with_context(|| format!("running {:?}", self.git_binary))?
+            }
+            Either::Right(_) => bail!("git {subcommand} timed out"),
+        };
+        Ok(RawOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    /// Runs git with `input` on its stdin, written while its output is read (a `cat-file
+    /// --batch` answers as it reads, so writing everything first could fill both pipes).
+    async fn run_with_input(&self, args: &[&str], input: Vec<u8>) -> Result<RawOutput> {
+        use futures::AsyncWriteExt as _;
+        let mut command = self.command(args, &[]);
+        command
+            .stdin(util::command::Stdio::piped())
+            .stdout(util::command::Stdio::piped())
+            .stderr(util::command::Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("running {:?}", self.git_binary))?;
+        let mut stdin = child.stdin.take().context("git's stdin")?;
+        let write = async move {
+            stdin.write_all(&input).await?;
+            // Closing flushes: smol's pipe writer may still hold the input in its buffer, and
+            // dropping it unflushed loses that (seen on Windows).
+            stdin.close().await
+        };
+        let (written, output) = future::join(write, child.output()).await;
+        let output = output.with_context(|| format!("running {:?}", self.git_binary))?;
+        // A git that exits early (e.g. on a bad object) closes its stdin; its message says why.
+        if written.is_err() && output.status.success() {
+            written.context("writing to git")?;
+        }
+        Ok(RawOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    fn command(&self, args: &[&str], extra_env: &[(&str, &str)]) -> util::command::Command {
         let mut command = util::command::new_command(&self.git_binary);
         command.current_dir(&self.work_dir);
         // Same safety and parsing options as Zed's `GitBinary::build_command`.
@@ -698,20 +770,7 @@ impl GitRunner {
         for (key, value) in extra_env {
             command.env(key, value);
         }
-        // Dropping the output future (deadline reached) kills git.
-        command.kill_on_drop(true);
-        let output = pin!(command.output());
-        let output = match future::select(output, pin!(deadline)).await {
-            Either::Left((output, _)) => {
-                output.with_context(|| format!("running {:?}", self.git_binary))?
-            }
-            Either::Right(_) => bail!("git {subcommand} timed out"),
-        };
-        Ok(RawOutput {
-            status: output.status.code().unwrap_or(-1),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+        command
     }
 
     pub(crate) async fn merge(&self, branch: &str) -> Result<MergeOutcome> {
@@ -1015,6 +1074,192 @@ impl GitRunner {
                 self.stage_blob(&object, path, max_size).await
             }
         }
+    }
+
+    pub(crate) async fn mergeable_conflicts(
+        &self,
+        max_size: u64,
+    ) -> Result<BTreeMap<RepoPath, bool>> {
+        let output = self.run_literal(&["ls-files", "-u", "-s", "-z"]).await?;
+        if !output.success() {
+            bail!("{}", output.message());
+        }
+        // Each conflicted path's stages 1-3 as (mode, oid).
+        let mut records = BTreeMap::<RepoPath, [Option<(String, String)>; 3]>::new();
+        for record in output.stdout.split('\0') {
+            let Some((info, name)) = record.split_once('\t') else {
+                continue;
+            };
+            let mut fields = info.split(' ');
+            let (Some(mode), Some(oid), Some(stage)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let Some(stage @ 1..=3) = stage.parse::<usize>().ok() else {
+                continue;
+            };
+            records.entry(RepoPath::new(name)?).or_default()[stage - 1] =
+                Some((mode.to_string(), oid.to_string()));
+        }
+
+        let mut mergeable = BTreeMap::new();
+        // (path, oids of its stages) still to be read.
+        let mut candidates = Vec::new();
+        for (path, stages) in records {
+            let regular_files = stages
+                .iter()
+                .flatten()
+                .all(|(mode, _)| mode == "100644" || mode == "100755");
+            let both_sides = stages[1].is_some() && stages[2].is_some();
+            if !regular_files || !both_sides {
+                mergeable.insert(path, false);
+            } else if path.as_unix_str().contains('\n') {
+                // `cat-file --batch` input is line based: read such a file on its own.
+                let text = self.mergeable_one(&path, max_size).await?;
+                mergeable.insert(path, text);
+            } else {
+                let oids = stages
+                    .into_iter()
+                    .flatten()
+                    .map(|(_, oid)| oid)
+                    .collect::<Vec<_>>();
+                candidates.push((path, oids));
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(mergeable);
+        }
+
+        // The blobs are read as stored. Checking them out converts line endings, which keeps
+        // text text, but a smudge filter (e.g. Git LFS) or a working-tree encoding can turn
+        // them into something else: such files are read on their own, as checked out.
+        let mut input = Vec::new();
+        for (path, _) in &candidates {
+            input.extend_from_slice(path.as_unix_str().as_bytes());
+            input.push(0);
+        }
+        let attributes = self
+            .run_with_input(
+                &[
+                    "check-attr",
+                    "--stdin",
+                    "-z",
+                    "filter",
+                    "working-tree-encoding",
+                ],
+                input,
+            )
+            .await?;
+        if attributes.status != 0 {
+            bail!("{}", attributes.text().message());
+        }
+        let attributes = String::from_utf8_lossy(&attributes.stdout).into_owned();
+        let converted = attributes
+            .split('\0')
+            .collect::<Vec<_>>()
+            .chunks_exact(3)
+            .filter(|record| record[2] != "unspecified" && record[2] != "unset")
+            .map(|record| record[0].to_string())
+            .collect::<HashSet<_>>();
+        let mut plain = Vec::with_capacity(candidates.len());
+        for (path, oids) in candidates {
+            if converted.contains(path.as_unix_str()) {
+                let text = self.mergeable_one(&path, max_size).await?;
+                mergeable.insert(path, text);
+            } else {
+                plain.push((path, oids));
+            }
+        }
+        let mut candidates = plain;
+        if candidates.is_empty() {
+            return Ok(mergeable);
+        }
+
+        // Sizes in the index, without reading the blobs.
+        let mut input = Vec::new();
+        for (_, oids) in &candidates {
+            for oid in oids {
+                input.extend_from_slice(oid.as_bytes());
+                input.push(b'\n');
+            }
+        }
+        let sizes = self
+            .run_with_input(&["cat-file", "--batch-check"], input)
+            .await?;
+        if sizes.status != 0 {
+            bail!("{}", sizes.text().message());
+        }
+        let sizes = String::from_utf8_lossy(&sizes.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split(' ');
+                let oid = fields.next()?;
+                let _kind = fields.next()?;
+                Some((oid.to_string(), fields.next()?.parse::<u64>().ok()?))
+            })
+            .collect::<HashMap<_, _>>();
+        candidates.retain(|(path, oids)| {
+            let small = oids
+                .iter()
+                .all(|oid| sizes.get(oid).is_some_and(|size| *size <= max_size));
+            if !small {
+                mergeable.insert(path.clone(), false);
+            }
+            small
+        });
+        if candidates.is_empty() {
+            return Ok(mergeable);
+        }
+
+        // The contents: `<oid>` in, `<oid> <type> <size>\n<content>\n` out, in order.
+        let mut input = Vec::new();
+        for (_, oids) in &candidates {
+            for oid in oids {
+                input.extend_from_slice(oid.as_bytes());
+                input.push(b'\n');
+            }
+        }
+        let blobs = self.run_with_input(&["cat-file", "--batch"], input).await?;
+        if blobs.status != 0 {
+            bail!("{}", blobs.text().message());
+        }
+        let mut rest = blobs.stdout.as_slice();
+        for (path, oids) in candidates {
+            let mut text = true;
+            for _ in &oids {
+                let header_end = rest
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .context("cat-file --batch ended early")?;
+                let header = std::str::from_utf8(&rest[..header_end])?;
+                rest = &rest[header_end + 1..];
+                // `<oid> missing` has no size.
+                let Some(size) = header
+                    .rsplit(' ')
+                    .next()
+                    .and_then(|size| size.parse::<usize>().ok())
+                else {
+                    bail!("cat-file --batch: {header}");
+                };
+                let content = rest.get(..size).context("cat-file --batch ended early")?;
+                text &= !content.contains(&0) && std::str::from_utf8(content).is_ok();
+                rest = rest.get(size + 1..).unwrap_or_default();
+            }
+            mergeable.insert(path, text);
+        }
+        Ok(mergeable)
+    }
+
+    /// Whether one conflicted file can open in the merge editor, read as the editor reads it.
+    async fn mergeable_one(&self, path: &RepoPath, max_size: u64) -> Result<bool> {
+        let stages = self.conflict_stages(path, max_size).await?;
+        let sides = ConflictSides {
+            operation: None,
+            yours: String::new(),
+            theirs: String::new(),
+        };
+        Ok(crate::merge_view::merge_input(stages, &sides, path).is_ok_and(|input| input.is_text()))
     }
 
     pub(crate) async fn conflict_stage_ids(&self, path: &RepoPath) -> Result<Vec<String>> {

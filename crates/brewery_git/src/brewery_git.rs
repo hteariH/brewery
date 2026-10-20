@@ -5,6 +5,7 @@
 
 pub mod branches_popup;
 pub mod cli;
+pub mod commit_message;
 pub mod compare;
 pub mod conflicts_dialog;
 pub mod file_history;
@@ -19,6 +20,7 @@ pub use branches_popup::BranchesPopup;
 pub use cli::{
     ConflictSides, ConflictStages, GitCli, GitOutput, MergeOutcome, Operation, Side, StageBlob,
 };
+pub use commit_message::FocusCommitMessage;
 pub use compare::{CompareTarget, CompareWithRevision};
 pub use conflicts_dialog::{ConflictsDialog, ResolveConflicts};
 pub use file_history::{FileHistoryView, ShowFileHistory};
@@ -36,6 +38,7 @@ pub fn init(cx: &mut App) {
     branches_popup::init(cx);
     log_panel::init(cx);
     file_history::init(cx);
+    commit_message::init(cx);
     compare::init(cx);
     conflicts_dialog::init(cx);
 }

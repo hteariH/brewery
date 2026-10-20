@@ -2480,7 +2480,8 @@ impl GitPanel {
         self.move_diff_to_entry(window, cx);
     }
 
-    fn focus_editor(&mut self, _: &FocusEditor, window: &mut Window, cx: &mut Context<Self>) {
+    // brewery: pub for brewery_git's one-press Commit shortcut
+    pub fn focus_editor(&mut self, _: &FocusEditor, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_editor.update(cx, |editor, cx| {
             window.focus(&editor.focus_handle(cx), cx);
         });
@@ -9324,6 +9325,11 @@ impl GitPanel {
 
     pub fn active_repository(&self) -> Option<&Entity<Repository>> {
         self.active_repository.as_ref()
+    }
+
+    // brewery: for brewery_git's Commit shortcut tests
+    pub fn commit_editor_is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.commit_editor.focus_handle(cx).is_focused(window)
     }
 
     // brewery: marks files as a ctrl-click would, for brewery_git's file-history tests
