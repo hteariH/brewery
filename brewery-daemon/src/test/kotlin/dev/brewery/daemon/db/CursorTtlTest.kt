@@ -58,6 +58,21 @@ class CursorTtlTest {
     }
 
     @Test
+    fun `by default an abandoned SQLite cursor still ends after a minute`() {
+        val defaults = DbService(Files.createTempDirectory("brewery-ttl-default"), InMemorySecretStore(), clock = { now })
+        try {
+            val lite = defaults.save(ConnectionInfo("", "lite", "sqlite", "jdbc:sqlite:$db", null, false, emptyMap()), null).id
+            val abandoned = defaults.execute(lite, "SELECT id FROM t").cursorId!!
+            assertEquals(1, defaults.fetch(abandoned, 0, 1).rows.size)
+            now = 60_000
+            defaults.sessions.sweep()
+            assertEquals(-32013, assertFailsWith<DbException> { defaults.fetch(abandoned, 1, 1) }.code)
+        } finally {
+            defaults.close()
+        }
+    }
+
+    @Test
     fun `finished cursors are not expired`() {
         val finished = service.execute(id, "SELECT id FROM t").cursorId!!
         assertEquals(true, service.fetch(finished, 0, 10).done)

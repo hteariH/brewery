@@ -96,16 +96,16 @@ fn assert_first(
 
 const IN_EDITOR: [&str; 3] = ["Workspace", "Pane", "Editor"];
 
-/// Ctrl+K / Cmd+K opens the Commit tool window and, inside it, focuses the commit message;
-/// Alt+0 / Cmd+0 toggles the tool window.
+/// Ctrl+K / Cmd+K opens the Commit tool window with the commit message focused, inside it as
+/// well; Alt+0 / Cmd+0 toggles the tool window.
 #[gpui::test]
 fn commit_tool_window_keys(cx: &mut TestAppContext) {
     let in_panel = ["Workspace", "Dock", "GitPanel", "ChangesList"];
     for platform in &PLATFORMS {
         let commit = format!("{}-k", platform.primary);
         let toggle = format!("{}-0", platform.tool_window);
-        assert_first(platform, &commit, &in_panel, "git_panel::FocusEditor", cx);
-        assert_first(platform, &commit, &IN_EDITOR, "git_panel::ToggleFocus", cx);
+        assert_first(platform, &commit, &in_panel, "brewery::FocusCommitMessage", cx);
+        assert_first(platform, &commit, &IN_EDITOR, "brewery::FocusCommitMessage", cx);
         assert_first(platform, &toggle, &IN_EDITOR, "git_panel::ToggleFocus", cx);
         assert_first(platform, &toggle, &in_panel, "workspace::CloseActiveDock", cx);
     }

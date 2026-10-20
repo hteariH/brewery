@@ -110,6 +110,16 @@ class BundleFixture(unittest.TestCase):
             "java-debug-0.1.jar": b"debug-bytes",
             "proxy-windows.zip": make_zip({"java-lsp-proxy.exe": b"win-proxy"}),
             "proxy-linux.tar.gz": make_tar_gz({"java-lsp-proxy": b"linux-proxy"}),
+            # No file extension, like the Marketplace VSIX endpoint.
+            "gradle/vsix": make_zip(
+                {
+                    "extension/lib/gradle-language-server.jar": b"gradle-ls",
+                    "extension/lib/gradle-server.jar": b"gradle-server",
+                    "extension/LICENSE.md": b"gradle MIT text",
+                    "extension/NOTICE.txt": b"gradle third-party notices",
+                    "extension/dist/index.js": b"js",
+                }
+            ),
             # No file extension, like the Zed gallery endpoint.
             "ext/download": make_tar_gz(
                 {"extension.toml": b'id = "java"\n', "grammars/java.wasm": b"wasm"}
@@ -219,6 +229,19 @@ sha256 = "{sha('proxy-windows.zip')}"
 url = "{u}/proxy-linux.tar.gz"
 sha256 = "{sha('proxy-linux.tar.gz')}"
 
+[artifacts.gradle-ls]
+version = "3.18.0"
+license = "MIT"
+source = "https://example.invalid/vscode-gradle"
+license_members = ["extension/LICENSE.md", "extension/NOTICE.txt"]
+dest = "jdtls/tools/gradle-ls/3.18.0/lib"
+root = "extension/lib"
+format = "zip"
+
+[artifacts.gradle-ls.any]
+url = "{u}/gradle/vsix"
+sha256 = "{sha('gradle/vsix')}"
+
 [artifacts.java-extension]
 version = "1.0"
 license = "Apache-2.0"
@@ -256,7 +279,8 @@ class LoadDepsTest(unittest.TestCase):
         )
         self.assertEqual(
             set(deps.artifacts),
-            {"jdk", "jdtls", "lombok", "java-debug", "java-lsp-proxy", "java-extension"},
+            {"jdk", "jdtls", "lombok", "java-debug", "java-lsp-proxy", "gradle-lsp-bridge",
+             "gradle-ls", "java-extension"},
         )
         for target in deps.targets:
             resolved = fbd.select(deps, target)
@@ -279,6 +303,12 @@ class LoadDepsTest(unittest.TestCase):
         self.assertEqual(win["java-debug"].dest, "jdtls/tools/java-debug.jar")
         self.assertEqual(win["java-lsp-proxy"].dest, "jdtls/tools/java-lsp-proxy.exe")
         self.assertEqual(lin["java-lsp-proxy"].dest, "jdtls/tools/java-lsp-proxy")
+        self.assertEqual(win["gradle-lsp-bridge"].dest, "jdtls/tools/gradle-lsp-bridge.exe")
+        self.assertEqual(lin["gradle-lsp-bridge"].dest, "jdtls/tools/gradle-lsp-bridge")
+        # java_setup.rs seeds tools/gradle-ls/<version>/ into the extension's work dir.
+        gradle_ls = win["gradle-ls"]
+        self.assertEqual(gradle_ls.dest, f"jdtls/tools/gradle-ls/{gradle_ls.version}/lib")
+        self.assertEqual(gradle_ls.format, "zip")
         for art in win.values():
             if art.into == "bundle":
                 top = art.dest.split("/")[0]
@@ -403,6 +433,11 @@ class BuildTest(BundleFixture):
         self.assertEqual((b / "jdtls/tools/lombok.jar").read_bytes(), self.artifacts["lombok-1.0.jar"])
         self.assertEqual((b / "jdtls/tools/java-debug.jar").read_bytes(), b"debug-bytes")
         self.assertEqual((b / "jdtls/tools/java-lsp-proxy.exe").read_bytes(), b"win-proxy")
+        gradle_lib = b / "jdtls/tools/gradle-ls/3.18.0/lib"
+        self.assertEqual(
+            sorted(p.name for p in gradle_lib.iterdir()),
+            ["gradle-language-server.jar", "gradle-server.jar"],
+        )
         self.assertTrue((b / "extensions/java/extension.toml").is_file())
         self.assertTrue((b / "extensions/java/grammars/java.wasm").is_file())
         self.assertEqual((b / "brewery-daemon/brewery-daemon.jar").read_bytes(), b"daemon")
@@ -795,6 +830,11 @@ class LicenseStepTest(BundleFixture):
         self.assertEqual(
             (lic / "java-extension" / "LICENSE").read_text(encoding="utf-8"), "Apache-2.0 text\n"
         )
+        # Licence and third-party notices straight from the downloaded archive.
+        self.assertEqual((lic / "gradle-ls" / "LICENSE.md").read_bytes(), b"gradle MIT text")
+        self.assertEqual(
+            (lic / "gradle-ls" / "NOTICE.txt").read_bytes(), b"gradle third-party notices"
+        )
         self.assertIn(
             b"Third-party notices",
             (lic / "brewery-daemon" / "THIRD-PARTY-NOTICES.txt").read_bytes(),
@@ -807,6 +847,7 @@ class LicenseStepTest(BundleFixture):
             ("java-debug", "0.1", "EPL-1.0"),
             ("java-lsp-proxy", "v1", "Apache-2.0"),
             ("java-extension", "1.0", "Apache-2.0"),
+            ("gradle-ls", "3.18.0", "MIT"),
         ):
             self.assertRegex(index, rf"(?m)^{re.escape(name)} {re.escape(version)}$")
             self.assertIn(license, index)
@@ -825,6 +866,14 @@ class LicenseStepTest(BundleFixture):
         with self.assertRaisesRegex(fbd.FetchError, "legal"):
             self.build(steps=[fbd.collect_licenses])
 
+    def test_missing_licence_member_is_an_error(self):
+        text = self.deps_path.read_text(encoding="utf-8").replace(
+            '"extension/NOTICE.txt"', '"extension/NOTICES.txt"'
+        )
+        self.deps_path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(fbd.FetchError, "gradle-ls.*NOTICES"):
+            self.build(steps=[self.fake_jre, fbd.collect_licenses])
+
     def test_artifact_without_licence_source_is_an_error(self):
         text = self.deps_path.read_text(encoding="utf-8").replace(
             'license_file = "licenses/java-debug.txt"\n', ""
@@ -837,7 +886,10 @@ class LicenseStepTest(BundleFixture):
         deps = fbd.load_deps(REAL_DEPS)
         for target in deps.targets:
             for art in fbd.select(deps, target):
-                sources = [s for s in (art.license_file, art.license_member, art.license_dir) if s]
+                sources = [
+                    s for s in (art.license_file, art.license_member, art.license_dir,
+                                art.license_members) if s
+                ]
                 self.assertEqual(len(sources), 1, art.name)
                 if art.license_file:
                     path = REAL_DEPS.parent / art.license_file

@@ -175,6 +175,14 @@ class DbProtocolTest {
         assertEquals(-32012, errorCode(server.dbExecute(DbExecuteParams(saved.id, "SELEKT"))))
         assertEquals(-32013, errorCode(server.dbExecute(DbExecuteParams("missing", "SELECT 1"))))
         assertEquals(-32013, errorCode(server.dbCancel(DbCancelParams("missing"))))
+
+        // A console's own session: its cursor ends with it, the shared session goes on.
+        val own = await(server.dbExecute(DbExecuteParams(saved.id, "SELECT id FROM t", sessionId = "console-1")))
+        await(server.dbCancel(DbCancelParams(saved.id, sessionId = "console-1")))
+        await(server.dbSessionsClose(DbCloseSessionParams(saved.id, "console-1")))
+        assertEquals(-32013, errorCode(server.dbFetch(DbFetchParams(own.cursorId!!, 0, 1))))
+        val shared = await(server.dbExecute(DbExecuteParams(saved.id, "SELECT id FROM t")))
+        assertEquals(3, await(server.dbFetch(DbFetchParams(shared.cursorId!!, 0, 5))).rows.size)
     }
 
     @Test
@@ -201,10 +209,13 @@ class DbProtocolTest {
         assertEquals(listOf("id", "name"), exec.columns.map { it.name })
         assertEquals(null, exec.updateCount)
         assertEquals(12L, exec.elapsedMs)
+        assertEquals(false, exec.moreResults)
+        assertEquals(false, exec.inTransaction)
         val fetch = gson.fromJson(fixture("db-fetch.result.json"), DbFetchResult::class.java)
         assertEquals(listOf("2", null), fetch.rows[1])
         assertEquals(false, fetch.done)
         assertEquals(false, fetch.truncated)
+        assertEquals(false, fetch.moreResults)
         val nodes = gson.fromJson(fixture("db-introspect.result.json"), Array<DbNode>::class.java)
         assertEquals(listOf("schema", "table", "folder", "column", "index", "foreignKey", "sequence"), nodes.map { it.kind })
         assertEquals(null, nodes[0].detail)

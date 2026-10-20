@@ -4,6 +4,7 @@
 
 pub mod completion;
 pub mod console;
+pub mod console_store;
 pub mod data_source_modal;
 pub mod panel;
 pub mod result_grid;
@@ -29,16 +30,50 @@ actions!(
         ToggleDatabasePanel,
         /// Opens an SQL console for the data source selected in the Database tool window.
         NewQueryConsole,
-        /// Runs the selection, or the statement at the cursor, in the query console.
+        /// Runs the statements of the selection, or the statement at the cursor, in the query
+        /// console.
         RunStatement,
+        /// Runs every statement of the query console, one result tab each.
+        RunAllStatements,
         /// Cancels the statement running in the query console.
         CancelStatement,
-        /// Copies the value of the selected result cell.
+        /// Commits the transaction open in the query console.
+        CommitTransaction,
+        /// Rolls back the transaction open in the query console.
+        RollbackTransaction,
+        /// Copies the selected result cells: one value, or a range as tab-separated rows.
         CopyResultCell,
+        /// Selects the result cell above.
+        MoveCellUp,
+        /// Selects the result cell below.
+        MoveCellDown,
+        /// Selects the result cell to the left.
+        MoveCellLeft,
+        /// Selects the result cell to the right.
+        MoveCellRight,
+        /// Extends the selected result cells up by a row.
+        ExtendCellsUp,
+        /// Extends the selected result cells down by a row.
+        ExtendCellsDown,
+        /// Extends the selected result cells left by a column.
+        ExtendCellsLeft,
+        /// Extends the selected result cells right by a column.
+        ExtendCellsRight,
+        /// Selects the first result cell of the row.
+        MoveCellToRowStart,
+        /// Selects the last result cell of the row.
+        MoveCellToRowEnd,
+        /// Selects the first result cell.
+        MoveCellToFirst,
+        /// Selects the last fetched result cell.
+        MoveCellToLast,
+        /// Selects every fetched result cell.
+        SelectAllCells,
     ]
 );
 
 pub fn init(cx: &mut App) {
+    workspace::register_serializable_item::<QueryConsole>(cx);
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleDatabasePanel, window, cx| {
             workspace.toggle_panel_focus::<DatabasePanel>(window, cx);

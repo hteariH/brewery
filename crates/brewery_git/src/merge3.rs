@@ -2,11 +2,15 @@
 //!
 //! [`merge3`] splits base, ours and theirs into [`Chunk`]s that tile all three texts: each
 //! chunk is a line range in every version plus a [`ChunkKind`]. The chunk boundaries follow
-//! `git merge-file` at its defaults (Myers diff, `XDL_MERGE_ZEALOUS_ALNUM`, merge style), so a
-//! merge without conflicts produces `git merge-file -p ours base theirs`, and the conflicts
-//! are the ones git would mark. The one known source of difference is the two-way diff:
-//! imara-diff's Myers and git's can choose different, equally short, edit scripts when lines
-//! repeat (rare; `merge3_tests.rs` measures it). The merge logic on top is a port of git's.
+//! git's content merge as `git merge`, `rebase` and `cherry-pick` run it (merge-ort: histogram
+//! diff, `XDL_MERGE_ZEALOUS_ALNUM`, merge style), which is `git merge-file
+//! --diff-algorithm=histogram`: a merge without conflicts produces `git merge-file -p
+//! --diff-algorithm=histogram ours base theirs`, and the conflicts are the ones git marked in
+//! the working tree file. The histogram diff is a port of git's (`merge3_histogram.rs`); the one
+//! known source of difference is imara-diff's Myers, which git's histogram falls back to for
+//! very repetitive ranges (and `git merge-file` uses by default): it and git's can choose
+//! different, equally short, edit scripts when lines repeat (rare; `merge3_tests.rs` measures
+//! it). The merge logic on top is a port of git's.
 //!
 //! [`MergeResult`] is the result buffer's model: it starts from [`Merge3::auto_merged_result`]
 //! (non-conflicting changes applied, conflicts showing the base text) and tracks how each chunk
@@ -17,6 +21,9 @@
 
 use imara_diff::{Algorithm, Diff, Interner, Token};
 use std::ops::Range;
+
+#[path = "merge3_histogram.rs"]
+mod histogram;
 
 /// One of the three inputs of a merge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -182,10 +189,16 @@ pub struct Merge3 {
     line_ending: &'static str,
 }
 
-/// Merges `ours` and `theirs`, both derived from `base`, line by line.
+/// Merges `ours` and `theirs`, both derived from `base`, line by line, as git's merges do
+/// (histogram diff).
 pub fn merge3(base: &str, ours: &str, theirs: &str) -> Merge3 {
+    merge3_with(Algorithm::Histogram, base, ours, theirs)
+}
+
+/// [`merge3`] with another two-way diff: `Algorithm::Myers` is `git merge-file`'s default.
+pub(crate) fn merge3_with(algorithm: Algorithm, base: &str, ours: &str, theirs: &str) -> Merge3 {
     let texts = [Text::new(base), Text::new(ours), Text::new(theirs)];
-    let chunks = compute_chunks(&texts);
+    let chunks = compute_chunks(&texts, algorithm);
     let line_ending = [ours, theirs, base]
         .into_iter()
         .find(|text| text.contains('\n'))
@@ -484,7 +497,7 @@ struct Record {
     theirs: Range<usize>,
 }
 
-fn compute_chunks(texts: &[Text; 3]) -> Vec<Chunk> {
+fn compute_chunks(texts: &[Text; 3], algorithm: Algorithm) -> Vec<Chunk> {
     let [base, ours, theirs] = texts;
     let mut interner: Interner<&str> =
         Interner::new(base.line_count() + ours.line_count() + theirs.line_count());
@@ -495,8 +508,8 @@ fn compute_chunks(texts: &[Text; 3]) -> Vec<Chunk> {
     });
     let num_tokens = interner.num_tokens();
 
-    let ours_hunks = diff_lines(&base_tokens, &ours_tokens, num_tokens);
-    let theirs_hunks = diff_lines(&base_tokens, &theirs_tokens, num_tokens);
+    let ours_hunks = diff_lines(algorithm, &base_tokens, &ours_tokens, num_tokens);
+    let theirs_hunks = diff_lines(algorithm, &base_tokens, &theirs_tokens, num_tokens);
     let (records, mut fillers) = sweep(
         &ours_hunks,
         &theirs_hunks,
@@ -511,6 +524,7 @@ fn compute_chunks(texts: &[Text; 3]) -> Vec<Chunk> {
         &ours_tokens,
         &theirs_tokens,
         num_tokens,
+        algorithm,
         &mut fillers,
     );
     let records = simplify_non_conflicts(records, ours);
@@ -693,6 +707,7 @@ fn refine_conflicts(
     ours_tokens: &[Token],
     theirs_tokens: &[Token],
     num_tokens: u32,
+    algorithm: Algorithm,
     fillers: &mut Vec<Record>,
 ) -> Vec<Record> {
     let mut refined = Vec::with_capacity(records.len());
@@ -701,7 +716,9 @@ fn refine_conflicts(
             refined.push(record);
             continue;
         }
+        // git refines conflicts with the merge's own diff algorithm.
         let hunks = diff_lines(
+            algorithm,
             &ours_tokens[record.ours.clone()],
             &theirs_tokens[record.theirs.clone()],
             num_tokens,
@@ -871,19 +888,33 @@ fn compose(records: Vec<Record>, fillers: Vec<Record>, texts: &[Text; 3]) -> Vec
     chunks
 }
 
-/// A two-way line diff as git's xdiff computes it for `git merge-file`: Myers (imara-diff's
-/// port of xdiff's), then xdiff's slider compaction (`xdl_change_compact` without the indent
-/// heuristic), applied to `before` and then to `after` like `xdl_merge` does. imara-diff's own
-/// `postprocess_*` passes differ from xdiff's in where they leave ambiguous hunks.
-fn diff_lines(before: &[Token], after: &[Token], num_tokens: u32) -> Vec<Hunk2> {
-    let mut diff = Diff::default();
-    diff.compute_with(Algorithm::Myers, before, after, num_tokens);
-    let mut removed: Vec<bool> = (0..before.len() as u32)
-        .map(|ix| diff.is_removed(ix))
-        .collect();
-    let mut added: Vec<bool> = (0..after.len() as u32)
-        .map(|ix| diff.is_added(ix))
-        .collect();
+/// A two-way line diff as git's xdiff computes it for a merge: `algorithm` (a port of xdiff's
+/// histogram, or imara-diff's port of xdiff's Myers), then xdiff's slider compaction (`xdl_change_compact`
+/// without the indent heuristic, which xdiff runs after every algorithm), applied to `before`
+/// and then to `after` like `xdl_merge` does. imara-diff's own `postprocess_*` passes differ
+/// from xdiff's in where they leave ambiguous hunks.
+fn diff_lines(
+    algorithm: Algorithm,
+    before: &[Token],
+    after: &[Token],
+    num_tokens: u32,
+) -> Vec<Hunk2> {
+    let (mut removed, mut added) = if algorithm == Algorithm::Histogram {
+        let mut removed = vec![false; before.len()];
+        let mut added = vec![false; after.len()];
+        histogram::diff(before, after, &mut removed, &mut added);
+        (removed, added)
+    } else {
+        let mut diff = Diff::default();
+        diff.compute_with(algorithm, before, after, num_tokens);
+        let removed: Vec<bool> = (0..before.len() as u32)
+            .map(|ix| diff.is_removed(ix))
+            .collect();
+        let added: Vec<bool> = (0..after.len() as u32)
+            .map(|ix| diff.is_added(ix))
+            .collect();
+        (removed, added)
+    };
     change_compact(&mut removed, before, &added);
     change_compact(&mut added, after, &removed);
 

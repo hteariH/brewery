@@ -328,6 +328,40 @@ async fn accept_left_and_right_take_the_whole_file(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn accept_left_and_right_keep_hand_edited_chunks(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    let conflicts = conflicts(&view, cx);
+    let editor = view.read_with(cx, |view, _| view.result_editor().clone());
+    editor.update_in(cx, |editor, window, cx| {
+        editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+            selections.select_ranges([Point::new(1, 1)..Point::new(1, 1)])
+        });
+        editor.insert("X", window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(resolution(&view, conflicts[0], cx), Resolution::Edited);
+
+    view.update(cx, |view, cx| view.accept_left(cx));
+    assert_eq!(
+        result_text(&view, cx),
+        result_with(&[(1, "bX"), (4, "e"), (14, "O-main")]),
+        "the hand-edited conflict is kept, every other change takes yours"
+    );
+    assert_eq!(resolution(&view, conflicts[0], cx), Resolution::Edited);
+    assert_eq!(resolution(&view, conflicts[1], cx), Resolution::Ours);
+
+    view.update(cx, |view, cx| view.accept_right(cx));
+    assert_eq!(
+        result_text(&view, cx),
+        result_with(&[(1, "bX"), (7, "h"), (14, "O-feature")])
+    );
+}
+
+#[gpui::test]
 async fn manual_edit_inside_a_conflict_marks_it_resolved(cx: &mut TestAppContext) {
     init_test(cx);
     let repo = TestRepo::new();
@@ -728,7 +762,7 @@ async fn closing_with_unapplied_work_asks_first(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn saving_from_the_close_prompt_applies(cx: &mut TestAppContext) {
+async fn saving_from_the_close_prompt_writes_without_staging(cx: &mut TestAppContext) {
     init_test(cx);
     let repo = TestRepo::new();
     repo.merge_with_conflicts();
@@ -743,7 +777,83 @@ async fn saving_from_the_close_prompt_applies(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(open_views(&fixture, cx), 0);
     assert_eq!(repo.read("a.txt"), lines(MAIN));
+    assert_eq!(repo.unmerged(), "a.txt", "only Apply marks it resolved");
+}
+
+/// Ctrl+S (and Save All) is a habit while editing: it writes the result, but only Apply
+/// stages the file and closes the view.
+#[gpui::test]
+async fn save_writes_the_result_without_staging_or_closing(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_left(cx));
+    view.read_with(cx, |view, _| assert_eq!(view.unresolved_count(), 0));
+
+    let project = fixture
+        .workspace
+        .read_with(cx, |workspace, _| workspace.project().clone());
+    let task = view.update_in(cx, |view, window, cx| {
+        view.save(SaveOptions::default(), project.clone(), window, cx)
+    });
+    task.await.expect("save");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt(), "nothing to confirm");
+    assert_eq!(repo.read("a.txt"), lines(MAIN));
+    assert_eq!(repo.unmerged(), "a.txt", "still conflicted");
+    assert_eq!(open_views(&fixture, cx), 1, "the view stays open");
+    view.read_with(cx, |view, cx| {
+        assert!(!view.is_dirty(cx), "saved");
+        assert!(view.has_unapplied_work(), "but not applied");
+    });
+
+    // Editing again makes it dirty; Apply then takes the saved file as its own, no prompt.
+    let conflicts = conflicts(&view, cx);
+    view.update(cx, |view, cx| {
+        view.accept_chunk(conflicts[1], Side::Theirs, cx)
+    });
+    view.read_with(cx, |view, cx| assert!(view.is_dirty(cx)));
+    let task = view.update_in(cx, |view, window, cx| {
+        view.save(SaveOptions::default(), project.clone(), window, cx)
+    });
+    task.await.expect("save again");
+    // Yours everywhere (Accept Left), then theirs for the second conflict.
+    let expected = result_with(&[(1, "B-main"), (4, "e"), (14, "O-feature")]);
+    assert_eq!(repo.read("a.txt"), expected);
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    task.await
+        .expect("apply without asking about outside changes");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
     assert_eq!(repo.unmerged(), "");
+    assert_eq!(open_views(&fixture, cx), 0);
+}
+
+#[gpui::test]
+async fn save_still_asks_about_changes_made_outside(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.merge_with_conflicts();
+    let (fixture, cx) = open_real(&repo, cx).await;
+    let view = open_view(&fixture, "a.txt", cx).await.expect("open");
+    view.update(cx, |view, cx| view.accept_left(cx));
+    let project = fixture
+        .workspace
+        .read_with(cx, |workspace, _| workspace.project().clone());
+    let task = view.update_in(cx, |view, window, cx| {
+        view.save(SaveOptions::default(), project.clone(), window, cx)
+    });
+    task.await.expect("save");
+    repo.write("a.txt", "changed outside\n");
+
+    let task = view.update_in(cx, |view, window, cx| view.apply(window, cx));
+    assert!(wait_for_prompt(cx).await);
+    cx.simulate_prompt_answer("Cancel");
+    assert_eq!(apply_error(task.await), ApplyError::Cancelled);
+    assert_eq!(repo.read("a.txt"), "changed outside\n");
 }
 
 #[gpui::test]

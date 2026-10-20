@@ -892,11 +892,42 @@ struct GraphData {
     /// lazily in `ref_label_gutter_width`.
     widest_ref_label: Option<(SharedString, usize)>,
     lines: Vec<Rc<CommitLine>>,
+    // brewery: the smallest `full_interval.start` of each `LINE_CHUNK` lines, so a frame skips
+    // the chunks that cannot reach the viewport (`lines` is sorted by `full_interval.end`).
+    line_chunk_min_start: Vec<usize>,
     active_commit_lines: HashMap<CommitLineKey, usize>,
     active_commit_lines_by_parent: HashMap<Oid, SmallVec<[usize; 1]>>,
 }
 
+// brewery: see `GraphData::line_chunk_min_start`; small in tests, so the random graphs span
+// several chunks.
+const LINE_CHUNK: usize = if cfg!(test) { 4 } else { 256 };
+
 impl GraphData {
+    /// brewery: the lines crossing `rows`, in `lines` order, without scanning every line: lines
+    /// are pushed when their parent row is reached, so they are sorted by `full_interval.end`;
+    /// chunks whose lines all start below `rows` are skipped.
+    fn lines_in(&self, rows: Range<usize>) -> Vec<Rc<CommitLine>> {
+        let mut visible = Vec::new();
+        let mut ix = self
+            .lines
+            .partition_point(|line| line.full_interval.end < rows.start);
+        while ix < self.lines.len() {
+            let chunk = ix / LINE_CHUNK;
+            let chunk_end = ((chunk + 1) * LINE_CHUNK).min(self.lines.len());
+            if self.line_chunk_min_start[chunk] <= rows.end {
+                visible.extend(
+                    self.lines[ix..chunk_end]
+                        .iter()
+                        .filter(|line| line.full_interval.start <= rows.end)
+                        .cloned(),
+                );
+            }
+            ix = chunk_end;
+        }
+        visible
+    }
+
     fn new(accent_colors_count: usize) -> Self {
         GraphData {
             lane_states: SmallVec::default(),
@@ -909,6 +940,7 @@ impl GraphData {
             max_lanes: 0,
             widest_ref_label: None,
             lines: Vec::default(),
+            line_chunk_min_start: Vec::default(), // brewery:
             active_commit_lines: HashMap::default(),
             active_commit_lines_by_parent: HashMap::default(),
         }
@@ -920,6 +952,7 @@ impl GraphData {
         self.parent_to_lanes.clear();
         self.commits.clear();
         self.lines.clear();
+        self.line_chunk_min_start.clear(); // brewery:
         self.active_commit_lines.clear();
         self.active_commit_lines_by_parent.clear();
         self.next_color = BranchColor(0);
@@ -998,6 +1031,13 @@ impl GraphData {
                     if let Some(commit_line) =
                         state.to_commit_lines(commit_row, lane_column, commit_lane, commit_color)
                     {
+                        // brewery: keep the chunk index of `lines` up to date
+                        let start = commit_line.full_interval.start;
+                        if self.lines.len().is_multiple_of(LINE_CHUNK) {
+                            self.line_chunk_min_start.push(start);
+                        } else if let Some(min) = self.line_chunk_min_start.last_mut() {
+                            *min = (*min).min(start);
+                        }
                         self.lines.push(Rc::new(commit_line));
                     }
                 }
@@ -3581,16 +3621,8 @@ impl GitGraph {
         let viewport_range = first_visible_row.min(loaded_commit_count.saturating_sub(1))
             ..(last_visible_row).min(loaded_commit_count);
         let rows = self.graph_data.commits[viewport_range.clone()].to_vec();
-        let commit_lines: Vec<_> = self
-            .graph_data
-            .lines
-            .iter()
-            .filter(|line| {
-                line.full_interval.start <= viewport_range.end
-                    && line.full_interval.end >= viewport_range.start
-            })
-            .cloned()
-            .collect();
+        // brewery: indexed instead of filtering every line on each frame
+        let commit_lines = self.graph_data.lines_in(viewport_range);
 
         let mut lines: BTreeMap<usize, Vec<_>> = BTreeMap::new();
 
@@ -5811,6 +5843,39 @@ mod tests {
             .context("keep shared parents on leftmost lane")?;
         verify_coverage(graph).context("coverage")?;
         verify_line_overlaps(graph).context("line overlaps")?;
+        verify_lines_in(graph).context("lines in a row range")?; // brewery:
+        Ok(())
+    }
+
+    // brewery: the chunk index finds exactly the lines a full scan finds.
+    fn verify_lines_in(graph: &GraphData) -> Result<()> {
+        let rows = graph.commits.len();
+        for start in 0..=rows {
+            for len in [0, 1, 3, 10] {
+                let range = start..(start + len).min(rows);
+                let scanned = graph
+                    .lines
+                    .iter()
+                    .filter(|line| {
+                        line.full_interval.start <= range.end
+                            && line.full_interval.end >= range.start
+                    })
+                    .map(Rc::as_ptr)
+                    .collect::<Vec<_>>();
+                let indexed = graph
+                    .lines_in(range.clone())
+                    .iter()
+                    .map(Rc::as_ptr)
+                    .collect::<Vec<_>>();
+                if indexed != scanned {
+                    bail!(
+                        "rows {range:?}: {} lines indexed, {} scanned",
+                        indexed.len(),
+                        scanned.len()
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

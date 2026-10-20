@@ -100,7 +100,7 @@ try {
     Check ((Compare-Object $expectedTop $top | Measure-Object).Count -eq 0) "top level is exactly: $($expectedTop -join ' ') (got: $($top -join ' '))"
     foreach ($file in @('Brewery.exe', 'bin\brewery.exe', 'bin\brewery', 'tools\auto_update_helper.exe', 'conpty.dll', 'x64\OpenConsole.exe',
             'jre\bin\java.exe', 'brewery-daemon\brewery-daemon.jar', 'jdtls\brewery-jdtls.cmd', 'jdtls\tools\lombok.jar',
-            'licenses\README.txt', 'licenses\brewery\LICENSE-GPL.txt', 'licenses\jre\LICENSE', 'licenses\conpty\LICENSE.txt')) {
+            'jdtls\tools\gradle-lsp-bridge.exe', 'licenses\gradle-ls\NOTICE.txt', 'licenses\README.txt', 'licenses\brewery\LICENSE-GPL.txt', 'licenses\jre\LICENSE', 'licenses\conpty\LICENSE.txt')) {
         Check (Test-Path -LiteralPath (Join-Path $dir $file) -PathType Leaf) "installed $file"
     }
     Check (@(Get-ChildItem -LiteralPath (Join-Path $dir 'extensions\java') -Force).Count -gt 0) 'installed extensions\java\'

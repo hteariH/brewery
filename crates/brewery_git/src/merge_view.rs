@@ -8,14 +8,16 @@
 //! [`merge3`] splits the three texts into chunks. The result pane starts with every
 //! non-conflicting change applied and each conflict showing its base text. Each chunk keeps an
 //! anchor range in the result buffer, so the result stays fully editable: a manual edit inside a
-//! chunk marks it `Edited` (resolved), and accepting a side later still replaces the chunk's
-//! current lines. Per-chunk `>>` / `<<` / `x` buttons are editor blocks above the chunk in the
+//! chunk marks it `Edited` (resolved), and accepting a side for that chunk later still replaces
+//! its current lines (Accept Left / Right for the whole file skip hand-edited chunks). Per-chunk `>>` / `<<` / `x` buttons are editor blocks above the chunk in the
 //! side panes. Scrolling one pane scrolls the others so the same chunk stays aligned at the top.
 //!
 //! Apply writes the result to the worktree file (through the project buffer when it is open,
-//! else straight to disk), marks it resolved with `git add` and closes the view.
+//! else straight to disk), marks it resolved with `git add` and closes the view. Save (Ctrl+S,
+//! Save All, Save in the close prompt) only writes the result: the file stays conflicted and
+//! the view stays open, as in IntelliJ where only Apply marks the file resolved.
 
-use crate::cli::{ConflictSides, GitCli, Operation, RepoPath, StageBlob};
+use crate::cli::{ConflictSides, ConflictStages, GitCli, Operation, RepoPath, StageBlob};
 use crate::merge3::{self, ChunkKind, Merge3, MergeResult, Resolution, Side, Version};
 use crate::revision_diff_view::{MAX_FILE_SIZE, in_memory_buffer, language_for_path};
 use anyhow::{Result, bail};
@@ -107,6 +109,17 @@ pub async fn load_input(
     let stages = cx
         .update(|cx| GitCli::conflict_stages(repo, path.clone(), MAX_FILE_SIZE as u64, cx))
         .await?;
+    let input = merge_input(stages, &sides, path)?;
+    Ok((sides, input))
+}
+
+/// What a conflicted file's stages offer the merge editor. [`GitCli::mergeable_conflicts`]
+/// answers [`MergeInput::is_text`] for all conflicted files at once and must agree with this.
+pub(crate) fn merge_input(
+    stages: ConflictStages,
+    sides: &ConflictSides,
+    path: &RepoPath,
+) -> Result<MergeInput> {
     let (yours, theirs) = match sides.yours_stage() {
         crate::cli::Side::Ours => (stages.ours, stages.theirs),
         crate::cli::Side::Theirs => (stages.theirs, stages.ours),
@@ -122,13 +135,13 @@ pub async fn load_input(
         .iter()
         .any(|blob| matches!(blob, StageBlob::NotAFile(_)))
     {
-        return Ok((sides, MergeInput::NotAFile));
+        return Ok(MergeInput::NotAFile);
     }
     if [&base, &yours, &theirs]
         .iter()
         .any(|blob| **blob == StageBlob::TooLarge)
     {
-        return Ok((sides, MergeInput::TooLarge));
+        return Ok(MergeInput::TooLarge);
     }
     let text = |blob: StageBlob| -> Option<Option<String>> {
         match blob {
@@ -138,19 +151,16 @@ pub async fn load_input(
         }
     };
     let (Some(base), Some(yours), Some(theirs)) = (text(base), text(yours), text(theirs)) else {
-        return Ok((sides, MergeInput::Binary));
+        return Ok(MergeInput::Binary);
     };
     let (Some(yours), Some(theirs)) = (yours, theirs) else {
-        return Ok((sides, MergeInput::Deleted));
+        return Ok(MergeInput::Deleted);
     };
-    Ok((
-        sides,
-        MergeInput::Text {
-            base: base.unwrap_or_default(),
-            yours,
-            theirs,
-        },
-    ))
+    Ok(MergeInput::Text {
+        base: base.unwrap_or_default(),
+        yours,
+        theirs,
+    })
 }
 
 pub struct MergeView {
@@ -186,6 +196,10 @@ pub struct MergeView {
     stage_ids: Vec<String>,
     /// The working tree file when the view opened; `None` when it did not exist.
     opened_file: Option<Vec<u8>>,
+    /// The working tree file as this view last saved it, and the result it saved: Apply does
+    /// not take that file for a change made outside, and the view is clean until the next
+    /// edit.
+    saved: Option<(Vec<u8>, TextBufferSnapshot)>,
     /// Each chunk's text in the result when the view opened (LF line endings).
     initial_texts: Vec<String>,
     /// Chunk offsets and resolutions for result texts this view produced itself, keyed by a
@@ -456,6 +470,7 @@ impl MergeView {
                 .collect(),
             stage_ids,
             opened_file,
+            saved: None,
             known_states: HashMap::new(),
             _subscriptions: subscriptions,
         };
@@ -556,19 +571,24 @@ impl MergeView {
         }
     }
 
-    /// The whole left file becomes the result: every change takes yours.
+    /// The whole left file becomes the result: every change takes yours, except chunks the
+    /// user edited by hand.
     pub fn accept_left(&mut self, cx: &mut Context<Self>) {
         self.accept_everywhere(Side::Ours, cx);
     }
 
-    /// The whole right file becomes the result: every change takes theirs.
+    /// The whole right file becomes the result: every change takes theirs, except chunks the
+    /// user edited by hand.
     pub fn accept_right(&mut self, cx: &mut Context<Self>) {
         self.accept_everywhere(Side::Theirs, cx);
     }
 
     fn accept_everywhere(&mut self, side: Side, cx: &mut Context<Self>) {
+        // Account for edits not synced yet, so a chunk typed into just now counts as edited.
+        self.result_edited(cx);
         for chunk in 0..self.merge.chunks.len() {
-            if self.merge.chunks[chunk].is_change() {
+            if self.merge.chunks[chunk].is_change() && self.resolutions[chunk] != Resolution::Edited
+            {
                 self.replace_chunk(chunk, side, cx);
             }
         }
@@ -603,7 +623,7 @@ impl MergeView {
     /// Writes the result to the file, marks it resolved and closes the view. Does not ask about
     /// unresolved conflicts; the Apply button does.
     pub fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let write = self.write_result(window, cx);
+        let write = self.write_result(true, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             write.await?;
             this.update(cx, |_, cx| cx.emit(ItemEvent::CloseItem))?;
@@ -656,6 +676,17 @@ impl MergeView {
         self.touched && !self.finished
     }
 
+    /// Unapplied work that is not saved to the file either.
+    fn has_unsaved_work(&self, cx: &App) -> bool {
+        self.has_unapplied_work()
+            && self.saved.as_ref().is_none_or(|(_, snapshot)| {
+                self.result_buffer
+                    .read(cx)
+                    .version()
+                    .changed_since(snapshot.version())
+            })
+    }
+
     fn touch(&mut self, cx: &mut Context<Self>) {
         if !self.touched {
             self.touched = true;
@@ -688,7 +719,7 @@ impl MergeView {
         cx.background_spawn(async move { answer.await.ok() == Some(0) })
     }
 
-    /// Writes the result to the worktree file and marks it resolved.
+    /// Writes the result to the worktree file and, with `mark_resolved`, marks it resolved.
     ///
     /// Refuses ([`ApplyError`]) when the file is no longer conflicted or has another conflict
     /// now, and asks before replacing changes made outside the merge editor: unsaved edits in
@@ -699,13 +730,20 @@ impl MergeView {
     /// Line endings: the stages are read as git checks them out (eol conversion applied), so
     /// the result has the working tree's line endings. An open buffer keeps its own; a file
     /// written to disk takes the line ending the file has now.
-    fn write_result(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<()>> {
-        let (rope, line_ending) = {
+    fn write_result(
+        &mut self,
+        mark_resolved: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let (snapshot, line_ending) = {
             let buffer = self.result_buffer.read(cx);
-            (buffer.as_rope().clone(), buffer.line_ending())
+            (buffer.text_snapshot(), buffer.line_ending())
         };
+        let rope = snapshot.as_rope().clone();
         let stage_ids = self.stage_ids.clone();
         let opened_file = self.opened_file.clone();
+        let saved_file = self.saved.as_ref().map(|(file, _)| file.clone());
         let repo = self.repo.clone();
         let path = self.path.clone();
         let project = self.project.clone();
@@ -742,9 +780,12 @@ impl MergeView {
             let buffer_dirty = open_buffer
                 .as_ref()
                 .is_some_and(|buffer| buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
+            // The file as this view saved it is not a change made outside.
+            let saved_by_view = saved_file.is_some() && on_disk == saved_file;
             let changed_outside = buffer_dirty
-                || on_disk != opened_file
-                || !opened_file.as_deref().is_some_and(has_conflict_markers);
+                || !saved_by_view
+                    && (on_disk != opened_file
+                        || !opened_file.as_deref().is_some_and(has_conflict_markers));
             if changed_outside {
                 let file_name = path.file_name().unwrap_or(path.as_unix_str()).to_string();
                 let answer = this.update_in(cx, |_, window, cx| {
@@ -783,6 +824,14 @@ impl MergeView {
                         .unwrap_or(line_ending);
                     fs.save(&abs_path, &rope, line_ending).await?
                 }
+            }
+            if !mark_resolved {
+                let written = fs.load_bytes(&abs_path).await?;
+                this.update(cx, |this, cx| {
+                    this.saved = Some((written, snapshot));
+                    cx.emit(ItemEvent::UpdateTab);
+                })?;
+                return Ok(());
             }
             cx.update(|_, cx| GitCli::mark_resolved(&repo, vec![path], cx))?
                 .await?;
@@ -1518,22 +1567,24 @@ impl Item for MergeView {
         f(*event)
     }
 
-    // Unapplied work makes the view dirty, so closing it (the tab, Cancel, quitting) goes
-    // through Zed's "Save / Don't Save / Cancel" prompt, where Save applies the result. Zed
-    // only asks for singleton items without project items, hence `Singleton`.
+    // Unsaved, unapplied work makes the view dirty, so closing it (the tab, Cancel, quitting)
+    // goes through Zed's "Save / Don't Save / Cancel" prompt, where Save writes the result
+    // without marking the file resolved. Zed only asks for singleton items without project
+    // items, hence `Singleton`.
     fn buffer_kind(&self, _cx: &App) -> ItemBufferKind {
         ItemBufferKind::Singleton
     }
 
-    fn is_dirty(&self, _cx: &App) -> bool {
-        self.has_unapplied_work()
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.has_unsaved_work(cx)
     }
 
     fn can_save(&self, _cx: &App) -> bool {
         true
     }
 
-    /// Applies the result (asking first when conflicts are left) and closes the view.
+    /// Writes the result to the file; the file stays conflicted and the view stays open (Apply
+    /// is the explicit step that stages it and closes the view).
     fn save(
         &mut self,
         _options: SaveOptions,
@@ -1541,14 +1592,7 @@ impl Item for MergeView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        let confirm = self.confirm_unresolved(window, cx);
-        cx.spawn_in(window, async move |this, cx| {
-            if !confirm.await {
-                bail!("the merge was not applied");
-            }
-            this.update_in(cx, |this, window, cx| this.apply(window, cx))?
-                .await
-        })
+        self.write_result(false, window, cx)
     }
 
     /// "Don't Save" in the close prompt: the result is dropped with the view.

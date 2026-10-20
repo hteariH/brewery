@@ -2,15 +2,21 @@
 """Assembles the files of a Brewery GitHub Release from the artifacts of the CI packaging jobs.
 
     script/brewery/release_assets.py check-tag --tag v0.1.0 --version-file crates/zed/BREWERY_VERSION
+    script/brewery/release_assets.py fetch-jdk-source --out <dir>
     script/brewery/release_assets.py assemble --version 0.1.0 --artifacts <dir> --out <dir> \\
-        [--changelog CHANGELOG.md] [--repo hteariH/brewery]
+        --jdk-source <dir> [--changelog CHANGELOG.md] [--repo hteariH/brewery]
+
+`fetch-jdk-source` downloads the bundled JRE's corresponding source (the pinned Temurin
+source archive in bundle-deps.toml, `source_code` / `source_sha256`) and refuses it unless its
+SHA-256 matches the pin; `assemble --jdk-source` attaches it to the release (GPLv2 section 3(a):
+the source goes with the binaries, not only a link to it).
 
 `assemble` looks for the packages by their exact names anywhere under --artifacts (the layout
 `actions/download-artifact` produces) and writes:
 
     <out>/assets/            everything that is uploaded to the release: the packages,
-                             SHA256SUMS, latest.json, jre-source.txt, brewery-<ver>-winget.zip,
-                             brewery-<ver>-aur.zip
+                             SHA256SUMS, latest.json, jre-source.txt, the JDK source archive,
+                             brewery-<ver>-winget.zip, brewery-<ver>-aur.zip
     <out>/winget/, <out>/aur/  the manifests, unpacked, for browsing the workflow artifact
     <out>/release-notes.md   the release body
 
@@ -27,6 +33,7 @@ import os
 import re
 import shutil
 import sys
+import urllib.parse
 import zipfile
 from pathlib import Path
 
@@ -175,7 +182,7 @@ INSTALL_NOTES = """### Install
 
 These builds are unsigned. Windows SmartScreen may warn about the installer ("More info", then "Run anyway"). On macOS, Gatekeeper blocks the app until you open it once with a right click, or run `xattr -dr com.apple.quarantine Brewery.app`. Check the downloads against `SHA256SUMS` below.
 
-The bundled JRE is Eclipse Temurin (GPLv2 with the Classpath Exception); `jre-source.txt` links to its source.
+The bundled JRE is Eclipse Temurin (GPLv2 with the Classpath Exception). Its source code is attached as `{jdk_source}`; `jre-source.txt` says where it comes from.
 """
 
 
@@ -194,30 +201,78 @@ def _changelog_section(version: str, changelog: str):
     return text or None
 
 
-def release_notes(version: str, changelog, sums_text: str) -> str:
+def release_notes(version: str, changelog, sums_text: str, bundle_deps: Path = BUNDLE_DEPS) -> str:
     section = _changelog_section(version, changelog) if changelog else None
     head = section if section else INTRO.format(version=version)
-    install = INSTALL_NOTES.format(aur=f"brewery-{version}-aur.zip", **package_names(version))
+    install = INSTALL_NOTES.format(
+        aur=f"brewery-{version}-aur.zip",
+        jdk_source=jdk_source_pin(bundle_deps)[0],
+        **package_names(version),
+    )
     nl = chr(10)
     fence = "```"
     parts = [head.rstrip(), install.rstrip(), "### SHA256SUMS", fence + nl + sums_text.rstrip() + nl + fence]
     return (nl + nl).join(parts) + nl
 
 
-def jre_source_text(bundle_deps: Path = BUNDLE_DEPS) -> str:
+def _jdk_pin(bundle_deps: Path) -> dict:
     import tomllib
 
     with open(bundle_deps, "rb") as f:
-        jdk = tomllib.load(f)["artifacts"]["jdk"]
+        return tomllib.load(f)["artifacts"]["jdk"]
+
+
+def jdk_source_pin(bundle_deps: Path = BUNDLE_DEPS):
+    """(file name, URL, SHA-256) of the bundled JRE's corresponding source archive."""
+    jdk = _jdk_pin(bundle_deps)
+    url, digest = jdk.get("source_code", ""), jdk.get("source_sha256", "")
+    if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError(f"{bundle_deps}: the jdk needs source_code (https) and source_sha256")
+    name = urllib.parse.unquote(urllib.parse.urlparse(url).path.rsplit("/", 1)[-1])
+    if not re.fullmatch(r"[A-Za-z0-9._+-]+", name):
+        raise ValueError(f"{bundle_deps}: unexpected source archive name {name!r}")
+    return name, url, digest
+
+
+def jre_source_text(bundle_deps: Path = BUNDLE_DEPS) -> str:
+    jdk = _jdk_pin(bundle_deps)
+    name, url, digest = jdk_source_pin(bundle_deps)
     return (
         f"The JRE bundled with Brewery is a jlink image of Eclipse Temurin JDK {jdk['version']}.\n"
         f"Licence: {jdk['license']}.\n"
         "\n"
         "Source code of the redistributed binaries (GPLv2 section 3):\n"
-        f"  Source archive: {jdk['source_code']}\n"
+        f"  {name} is attached to this release (SHA-256 {digest}),\n"
+        "  the archive Eclipse Temurin publishes for this build.\n"
+        f"  Source archive: {url}\n"
         f"  Source tag:     {jdk['source_tag']}\n"
         f"  Release page:   {jdk['source']}\n"
     )
+
+
+def fetch_jdk_source(out: Path, *, bundle_deps: Path = BUNDLE_DEPS, cache: Path = None, download=None) -> Path:
+    """Downloads the pinned JDK source archive to <out>/<name>; fails unless its SHA-256 matches."""
+    sys.path.insert(0, str(HERE))
+    import fetch_bundle_deps as fbd
+
+    name, url, digest = jdk_source_pin(bundle_deps)
+    jdk = _jdk_pin(bundle_deps)
+    art = fbd.Artifact(
+        name="jdk-source", version=jdk["version"], license=jdk["license"], source=jdk["source"],
+        url=url, sha256=digest, format="file", into="work", dest="", root="", member="",
+        executable=False,
+    )
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    scratch = out / ".download"
+    cached = (download or fbd.fetch)(art, Path(cache) if cache else scratch, print)
+    target = out / name
+    shutil.copyfile(cached, target)
+    if not cache:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if sha256_file(target) != digest:
+        raise ValueError(f"{name}: SHA-256 does not match the pin {digest}")
+    return target
 
 
 def sha256_file(path: Path) -> str:
@@ -245,9 +300,11 @@ def _zip_dir(directory: Path, target: Path) -> None:
             z.writestr(info, path.read_bytes())
 
 
-def assemble(version, artifacts: Path, out: Path, *, changelog=None, render, repo=DEFAULT_REPO, published_at=None):
+def assemble(version, artifacts: Path, out: Path, *, changelog=None, render, repo=DEFAULT_REPO, published_at=None,
+             jdk_source: Path, bundle_deps: Path = BUNDLE_DEPS):
     """`render(installer_sha256=..., release_date=...)` returns the winget manifests as
-    {relative path: text} (see render_manifests.render_all)."""
+    {relative path: text} (see render_manifests.render_all). `jdk_source` is the directory
+    `fetch-jdk-source` downloaded the pinned JDK source archive to."""
     artifacts, out = Path(artifacts), Path(out)
     assets = out / "assets"
     if out.exists():
@@ -287,7 +344,14 @@ def assemble(version, artifacts: Path, out: Path, *, changelog=None, render, rep
     _zip_dir(out / "winget", assets / f"brewery-{version}-winget.zip")
     _zip_dir(out / "aur", assets / f"brewery-{version}-aur.zip")
 
-    (assets / "jre-source.txt").write_text(jre_source_text(), encoding="utf-8", newline="\n")
+    source_name, _, source_sha = jdk_source_pin(bundle_deps)
+    source = _find(Path(jdk_source), source_name)
+    if source is None:
+        raise ValueError(f"the JDK source archive {source_name} is not in {jdk_source} (run fetch-jdk-source)")
+    shutil.copyfile(source, assets / source_name)
+    if sha256_file(assets / source_name) != source_sha:
+        raise ValueError(f"{source_name}: SHA-256 does not match the pin in {bundle_deps}")
+    (assets / "jre-source.txt").write_text(jre_source_text(bundle_deps), encoding="utf-8", newline="\n")
     manifest = latest_json(version, pkg_sums, repo=repo, published_at=published_at)
     validate_manifest(manifest.encode("utf-8"), version, repo=repo)
     (assets / "latest.json").write_text(manifest, encoding="utf-8", newline="\n")
@@ -296,7 +360,7 @@ def assemble(version, artifacts: Path, out: Path, *, changelog=None, render, rep
     sums_text = sha256sums(sums)
     (assets / "SHA256SUMS").write_text(sums_text, encoding="utf-8", newline="\n")
     (out / "release-notes.md").write_text(
-        release_notes(version, changelog, sums_text), encoding="utf-8", newline="\n"
+        release_notes(version, changelog, sums_text, bundle_deps), encoding="utf-8", newline="\n"
     )
     return sums
 
@@ -332,12 +396,25 @@ def _cmd_assemble(args) -> int:
         )
 
     try:
-        sums = assemble(args.version, args.artifacts, args.out, changelog=changelog, render=render, repo=args.repo)
+        sums = assemble(
+            args.version, args.artifacts, args.out, changelog=changelog, render=render, repo=args.repo,
+            jdk_source=args.jdk_source,
+        )
     except (ValueError, OSError) as e:
         print(f"release_assets: {e}", file=sys.stderr)
         return 1
     for name in sorted(sums):
         print(f"{sums[name]}  {name}")
+    return 0
+
+
+def _cmd_fetch_jdk_source(args) -> int:
+    try:
+        path = fetch_jdk_source(args.out, cache=args.cache)
+    except Exception as e:  # fetch_bundle_deps.FetchError and OSError alike
+        print(f"release_assets: {e}", file=sys.stderr)
+        return 1
+    print(path)
     return 0
 
 
@@ -354,7 +431,12 @@ def main(argv=None) -> int:
     a.add_argument("--out", required=True, type=Path)
     a.add_argument("--changelog", default="CHANGELOG.md")
     a.add_argument("--repo", default=DEFAULT_REPO)
+    a.add_argument("--jdk-source", required=True, type=Path, help="where fetch-jdk-source put the archive")
     a.set_defaults(func=_cmd_assemble)
+    f = sub.add_parser("fetch-jdk-source", help="download the pinned JDK source archive, checksum-verified")
+    f.add_argument("--out", required=True, type=Path)
+    f.add_argument("--cache", type=Path, help="download cache (default: a temporary dir in <out>)")
+    f.set_defaults(func=_cmd_fetch_jdk_source)
     args = p.parse_args(argv)
     return args.func(args)
 

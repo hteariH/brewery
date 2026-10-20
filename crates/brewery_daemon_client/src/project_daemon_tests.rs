@@ -453,6 +453,7 @@ async fn database_calls_reach_the_daemon_as_json(cx: &mut TestAppContext) {
                 ExecuteParams {
                     connection_id: "c1".into(),
                     sql: "select 1".into(),
+                    session_id: None,
                 },
                 cx,
             )
@@ -480,6 +481,7 @@ async fn database_calls_reach_the_daemon_as_json(cx: &mut TestAppContext) {
                 CancelParams {
                     connection_id: Some("c1".into()),
                     cursor_id: None,
+                    session_id: None,
                 },
                 cx,
             )
@@ -584,6 +586,7 @@ async fn a_database_error_keeps_the_daemon_code_and_message(cx: &mut TestAppCont
                 ExecuteParams {
                     connection_id: "c1".into(),
                     sql: "selec".into(),
+                    session_id: None,
                 },
                 cx,
             )

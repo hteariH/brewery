@@ -11,6 +11,8 @@ SHA-256 does not match, and lays out
             tools/lombok.jar
             tools/java-debug.jar
             tools/java-lsp-proxy[.exe]
+            tools/gradle-lsp-bridge[.exe]
+            tools/gradle-ls/<version>/lib/   (the Gradle language server)
         extensions/java/
         brewery-daemon/brewery-daemon.jar   (with --daemon-jar)
         licenses/                    (every component's licence + README.txt)
@@ -97,6 +99,7 @@ class Artifact:
     license_file: str = ""  # text file, relative to the deps file's directory
     license_member: str = ""  # file inside the bundled jar/zip (Lombok's LICENSE)
     license_dir: str = ""  # directory inside the bundle (the JRE's legal/java.base)
+    license_members: tuple = ()  # files inside the downloaded archive (licence + notices)
     source_code: str = ""  # GPL corresponding source (the JDK)
     source_tag: str = ""
 
@@ -191,6 +194,13 @@ def _resolve(name: str, table: dict, target: str) -> Artifact:
         if value and key.startswith("license_"):
             _safe_relpath(value, f"artifact {name}: {key}")
         licence[key] = value
+    members = table.get("license_members", [])
+    if not isinstance(members, list) or not all(isinstance(m, str) and m for m in members):
+        raise DepsError(f"artifact {name}: license_members must be a list of paths")
+    for value in members:
+        _safe_relpath(value, f"artifact {name}: license_members")
+    if members and fmt == "file":
+        raise DepsError(f"artifact {name}: license_members need an archive format")
     return Artifact(
         name=name,
         version=table["version"],
@@ -204,6 +214,7 @@ def _resolve(name: str, table: dict, target: str) -> Artifact:
         root=root.strip("/"),
         member=member,
         executable=bool(table.get("executable", False)),
+        license_members=tuple(members),
         **licence,
     )
 
@@ -471,6 +482,7 @@ class BundleContext:
     bundle: Path  # staging dir that becomes <out>/<target>
     work: dict = field(default_factory=dict)  # name -> unpacked dir for into = "work"
     artifacts: dict = field(default_factory=dict)  # name -> Artifact
+    files: dict = field(default_factory=dict)  # name -> verified download
     deps_dir: Path = SCRIPT_DIR
     log: Callable = print
     launchers_dir: Path = SCRIPT_DIR / "jdtls"
@@ -620,12 +632,16 @@ def write_jdtls_launchers(ctx: BundleContext) -> None:
 
 def _license_text(ctx: BundleContext, art: Artifact) -> dict:
     """{file name: bytes} for one artifact's licence; FetchError when it has none."""
-    sources = [s for s in (art.license_file, art.license_member, art.license_dir) if s]
+    sources = [
+        s for s in (art.license_file, art.license_member, art.license_dir, art.license_members) if s
+    ]
     if len(sources) != 1:
         raise FetchError(
             f"licenses: artifact {art.name} needs exactly one of license_file, "
-            "license_member, license_dir in the deps file"
+            "license_member, license_dir, license_members in the deps file"
         )
+    if art.license_members:
+        return _archive_members(art, ctx.files.get(art.name))
     if art.license_file:
         path = Path(ctx.deps_dir) / art.license_file
         if not path.is_file():
@@ -643,6 +659,28 @@ def _license_text(ctx: BundleContext, art: Artifact) -> dict:
         raise FetchError(f"licenses: {art.name}: {art.license_dir}/LICENSE not found (legal/ missing?)")
     # copyfile-style reads follow the Linux image's relative symlinks.
     return {p.name: p.read_bytes() for p in sorted(legal.iterdir()) if p.is_file()}
+
+
+def _archive_members(art: Artifact, archive: Path | None) -> dict:
+    """{base name: bytes} of art.license_members, read from its downloaded archive."""
+    if archive is None:
+        raise FetchError(f"licenses: {art.name}: its download is not known")
+    texts = {}
+    try:
+        if art.format == "zip":
+            with zipfile.ZipFile(archive) as zf:
+                for member in art.license_members:
+                    texts[PurePosixPath(member).name] = zf.read(member)
+        else:
+            with tarfile.open(archive, "r:gz") as tf:
+                for member in art.license_members:
+                    f = tf.extractfile(member)
+                    if f is None:
+                        raise KeyError(member)
+                    texts[PurePosixPath(member).name] = f.read()
+    except (OSError, KeyError, tarfile.TarError, zipfile.BadZipFile) as err:
+        raise FetchError(f"licenses: {art.name}: {err} not found in {archive.name}") from err
+    return texts
 
 
 def collect_licenses(ctx: BundleContext) -> None:
@@ -745,6 +783,7 @@ def build_bundle(
             arch=arch,
             bundle=bundle,
             artifacts={a.name: a for a in resolved},
+            files=files,
             deps_dir=Path(deps.path).parent,
             log=log,
         )

@@ -12,8 +12,10 @@ rem   java       <bundle>\jre\bin\java.exe, else %JAVA_HOME%\bin\java.exe, else 
 rem   Gradle     %JAVA_HOME% (see brewery.gradle.java.home below)
 rem   heap       -Xms%BREWERY_JDTLS_MIN_MEMORY% (else 1G) -Xmx%BREWERY_JDTLS_MAX_MEMORY%
 rem   config     shared, read-only: <bundle>\jdtls\config_win
-rem              writable: <cache>\config\<sha1 of this jdtls directory>
-rem   workspace  -data when given, else <cache>\workspace\jdtls-<sha1 of the cwd>;
+rem              writable: <cache>\config\%BREWERY_JDTLS_CONFIG_KEY% (Brewery sets
+rem              it to the sha1 of this jdtls directory), else the sanitized path
+rem   workspace  -data when given (Brewery sets the extension's data_directory),
+rem              else <cache>\workspace\jdtls-<the sanitized path of the cwd>;
 rem              rebuilt when this jdtls changes (see the stamp below)
 rem   cache      %BREWERY_JDTLS_CACHE_DIR%, else %LOCALAPPDATA%\Brewery\jdtls
 rem
@@ -165,24 +167,20 @@ set "CACHE=%TEMP%\Brewery\jdtls"
 if defined LOCALAPPDATA set "CACHE=%LOCALAPPDATA%\Brewery\jdtls"
 :cache_found
 
-rem SHA-1 keys like the extension's jdtls-<sha1> workspace names. PowerShell ships
-rem with Windows; without it the keys fall back to the sanitized paths.
-set "BREWERY_JDTLS_KEY_1=%JDTLS_HOME%"
-set "BREWERY_JDTLS_KEY_2=%CD%"
-set "CONFIG_KEY="
-set "DATA_KEY="
-for /f "usebackq tokens=1,2" %%A in (`powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$s = [Security.Cryptography.SHA1]::Create(); $u = [Text.Encoding]::UTF8; [BitConverter]::ToString($s.ComputeHash($u.GetBytes($env:BREWERY_JDTLS_KEY_1))).Replace('-', '').ToLower() + ' ' + [BitConverter]::ToString($s.ComputeHash($u.GetBytes($env:BREWERY_JDTLS_KEY_2))).Replace('-', '').ToLower()" 2^>nul`) do (
-    set "CONFIG_KEY=%%A"
-    set "DATA_KEY=%%B"
-)
-if defined DATA_KEY goto keys_found
+rem The keys of the configuration and workspace directories, found without starting
+rem another process (computing SHA-1 keys in PowerShell took 0.3-1 s per start).
+rem Brewery passes the configuration key in BREWERY_JDTLS_CONFIG_KEY (the SHA-1 of
+rem this jdtls directory) and the workspace as -data (jdtls-<SHA-1 of the project>
+rem from the extension's data_directory); without them the keys are sanitized paths.
+set "CONFIG_KEY=%BREWERY_JDTLS_CONFIG_KEY%"
+if defined CONFIG_KEY goto config_key_found
 set "CONFIG_KEY=%JDTLS_HOME::=%"
 set "CONFIG_KEY=%CONFIG_KEY:\=_%"
 set "CONFIG_KEY=%CONFIG_KEY: =_%"
+:config_key_found
 set "DATA_KEY=%CD::=%"
 set "DATA_KEY=%DATA_KEY:\=_%"
 set "DATA_KEY=%DATA_KEY: =_%"
-:keys_found
 set "CONFIG_AREA=%CACHE%\config\%CONFIG_KEY%"
 if not defined DATA set "DATA=%CACHE%\workspace\jdtls-%DATA_KEY%"
 

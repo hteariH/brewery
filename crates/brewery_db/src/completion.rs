@@ -3,7 +3,7 @@
 
 use crate::schema_cache::SchemaCache;
 use crate::sql_context::{ContextKind, KEYWORDS, SqlContext, TableRef, context_at};
-use crate::statements::quote_identifier;
+use crate::statements::{SqlFlavor, quote_identifier};
 use anyhow::Result;
 use brewery_daemon_client::{ConnectionInfo, DbSchema, TableInfo, TableKind};
 use editor::{CompletionProvider, Editor};
@@ -323,7 +323,8 @@ impl CompletionProvider for SqlCompletionProvider {
     ) -> Task<Result<Vec<CompletionResponse>>> {
         let buffer = buffer.read(cx).snapshot();
         let offset = buffer_position.to_offset(&buffer);
-        let context = context_at(&buffer.text(), offset);
+        let flavor = SqlFlavor::for_driver(&self.dialect.driver_id);
+        let context = context_at(&buffer.text(), offset, flavor);
         let start = buffer.anchor_before(context.prefix_start.min(offset));
         // Inside `"Fi|"` the closing quote is replaced too, inside `ow|ners` the rest of the
         // word when the name ends with it.

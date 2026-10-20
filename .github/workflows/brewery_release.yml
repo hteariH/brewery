@@ -94,8 +94,11 @@ jobs:
           path: target/artifacts
       - name: Artifacts
         run: find target/artifacts -type f -printf '%s\t%p\n' | sort -k2
+      # GPLv2 section 3(a): the bundled JRE's source goes on the release page with the binaries.
+      - name: JDK source archive
+        run: python script/brewery/release_assets.py fetch-jdk-source --out target/jdk-source
       - name: Assemble
-        run: python script/brewery/release_assets.py assemble --version "$VERSION" --artifacts target/artifacts --out target/release
+        run: python script/brewery/release_assets.py assemble --version "$VERSION" --artifacts target/artifacts --out target/release --jdk-source target/jdk-source
       - name: Release files
         run: |
           {

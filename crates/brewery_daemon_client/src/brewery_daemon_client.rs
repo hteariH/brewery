@@ -21,13 +21,14 @@ pub use project_daemon::{
     ProjectDaemonEvent, StartDaemon,
 };
 pub use protocol::{
-    AddDriverParams, BuildModule, BuildTask, BuildTool, CancelParams, CloseParams, ColumnInfo,
-    ConnectionInfo, DB_AUTH_FAILED, DB_CONNECTION_FAILED, DB_FETCH_LIMIT_MAX, DB_INVALID_PARAMS,
-    DB_NOT_FOUND, DB_QUERY_FAILED, DbNode, DbNodeKind, DbSchema, DeleteConnectionParams,
-    DriverInfo, ExecuteParams, ExecuteResult, FetchParams, FetchResult, HttpMethod,
-    IntrospectParams, PROTOCOL_VERSION, ProjectModel, RunConfiguration, RunConfigurationKind,
-    SaveConnectionParams, SchemaInfo, SchemaParams, SpringApp, SpringBean, SpringBeanKind,
-    SpringEndpoint, SpringModel, TableInfo, TableKind, TestConnectionParams, TestConnectionResult,
+    AddDriverParams, BuildModule, BuildTask, BuildTool, CancelParams, CloseParams,
+    CloseSessionParams, ColumnInfo, ConnectionInfo, DB_AUTH_FAILED, DB_CONNECTION_FAILED,
+    DB_FETCH_LIMIT_MAX, DB_INVALID_PARAMS, DB_NOT_FOUND, DB_QUERY_FAILED, DbNode, DbNodeKind,
+    DbSchema, DeleteConnectionParams, DriverInfo, ExecuteParams, ExecuteResult, FetchParams,
+    FetchResult, HttpMethod, IntrospectParams, PROTOCOL_VERSION, ProjectModel, RunConfiguration,
+    RunConfigurationKind, SaveConnectionParams, SchemaInfo, SchemaParams, SpringApp, SpringBean,
+    SpringBeanKind, SpringEndpoint, SpringModel, TableInfo, TableKind, TestConnectionParams,
+    TestConnectionResult,
 };
 
 use anyhow::{Context as _, Error, Result, bail};

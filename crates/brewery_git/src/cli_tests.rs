@@ -1073,3 +1073,117 @@ fn a_hanging_hook_times_out_instead_of_blocking() {
     assert_eq!(error.to_string(), "git merge timed out");
     assert!(started.elapsed() < Duration::from_secs(20));
 }
+
+/// One side's content for each file of `mergeable_conflicts_scenario`.
+fn write_side(repo: &TestRepo, side: &str) {
+    let write = |name: &str, bytes: Vec<u8>| {
+        std::fs::write(repo.work.join(name), bytes).expect("write");
+    };
+    write("text.txt", format!("{side}\n").into_bytes());
+    write("with space.txt", format!("{side}\n").into_bytes());
+    write("ünicode.txt", format!("{side}\n").into_bytes());
+    write("crlf.txt", format!("one\n{side}\n").into_bytes());
+    write("zero.dat", format!("\0{side}\n").into_bytes());
+    write("latin1.txt", [b"\xe9", side.as_bytes()].concat());
+    write("big.txt", side.repeat(40).into_bytes());
+    write("del.txt", format!("{side}\n").into_bytes());
+    // Stored as UTF-8, checked out as UTF-16 (with NUL bytes).
+    write(
+        "utf16.txt",
+        format!("{side}\n")
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+    );
+}
+
+/// main and feature change the same files in every way the merge editor tells apart: text,
+/// names with spaces and non-ASCII, an eol filter, a working-tree encoding, NUL bytes, invalid
+/// UTF-8, a large file, a modify/delete, an add/add and a symlink.
+fn mergeable_conflicts_scenario() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.write(
+        ".gitattributes",
+        "crlf.txt text eol=crlf\nutf16.txt working-tree-encoding=UTF-16LE\n",
+    );
+    write_side(&repo, "base");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "--quiet", "-m", "base"]);
+    commit_symlink(&repo, "link", "base.txt", "base link");
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    write_side(&repo, "feature");
+    repo.write("added.txt", "feature\n");
+    repo.git(&["rm", "--quiet", "--force", "del.txt"]);
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "--quiet", "-m", "feature"]);
+    commit_symlink(&repo, "link", "feature.txt", "feature link");
+    repo.git(&["checkout", "--quiet", "main"]);
+    write_side(&repo, "main");
+    repo.write("added.txt", "main\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "--quiet", "-m", "main"]);
+    commit_symlink(&repo, "link", "main.txt", "main link");
+    repo
+}
+
+#[test]
+fn mergeable_conflicts_agree_with_reading_each_file() {
+    let repo = mergeable_conflicts_scenario();
+    let runner = repo.runner();
+    let MergeOutcome::Conflicts(conflicts) = block(runner.merge("feature")).expect("merge") else {
+        panic!("the merge should conflict");
+    };
+    assert_eq!(conflicts.len(), 11, "{conflicts:?}");
+    let sides = block(runner.conflict_sides()).expect("sides");
+
+    // "main" * 40 = 160 bytes: 200 lets big.txt through, 100 does not.
+    for max_size in [1024 * 1024, 200, 100] {
+        let batched = block(runner.mergeable_conflicts(max_size)).expect("batched");
+        let one_by_one = conflicts
+            .iter()
+            .map(|path| {
+                let stages = block(runner.conflict_stages(path, max_size)).expect("stages");
+                let text = crate::merge_view::merge_input(stages, &sides, path)
+                    .expect("input")
+                    .is_text();
+                (path.clone(), text)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(batched, one_by_one, "max size {max_size}");
+    }
+
+    let batched = block(runner.mergeable_conflicts(1024 * 1024)).expect("batched");
+    let mergeable = batched
+        .iter()
+        .filter(|(_, mergeable)| **mergeable)
+        .map(|(path, _)| path.as_unix_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mergeable,
+        [
+            "added.txt",
+            "big.txt",
+            "crlf.txt",
+            "text.txt",
+            "with space.txt",
+            "ünicode.txt"
+        ]
+    );
+    let small = block(runner.mergeable_conflicts(100)).expect("batched");
+    assert_eq!(
+        small.get(&RepoPath::new("big.txt").expect("path")),
+        Some(&false)
+    );
+}
+
+#[test]
+fn mergeable_conflicts_without_conflicts_is_empty() {
+    let repo = TestRepo::new();
+    repo.diverged_without_conflict();
+    let runner = repo.runner();
+    assert!(
+        block(runner.mergeable_conflicts(1024))
+            .expect("mergeable")
+            .is_empty()
+    );
+}

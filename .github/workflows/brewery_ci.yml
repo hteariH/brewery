@@ -94,9 +94,13 @@ jobs:
             daemon:
               - 'brewery-daemon/**'
               - '.github/workflows/brewery_ci.yml'
+            # Everything the bundle and packaging scripts read: the winget/AUR/nfpm templates, the
+            # Inno script, and the icons, desktop file and Info.plist parts of crates/zed/resources.
             bundle:
               - 'script/brewery/**'
               - 'brewery-daemon/**'
+              - 'packaging/**'
+              - 'crates/zed/resources/**'
               - '.github/workflows/brewery_ci.yml'
       - id: plan
         shell: bash
@@ -207,14 +211,8 @@ jobs:
       - name: Dev Drive
         shell: pwsh
         run: script/brewery/setup-dev-drive.ps1
-      - name: Install MSVC Spectre libraries
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $p = Start-Process -Wait -PassThru -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
-          # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
-          if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
+      - name: MSVC Spectre libraries
+        uses: ./.github/actions/msvc-spectre
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0
@@ -256,11 +254,28 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-          cache: gradle
+      # Gradle's caches, saved from main and tags only (SAVE_CACHE). The Daemon and Bundle jobs of
+      # an OS share the key, so Bundle resolves the test dependencies too.
+      - name: Restore the Gradle cache
+        id: gradle-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            !~/.gradle/caches/**/*.lock
+            !~/.gradle/caches/**/gc.properties
+          key: gradle-${{ runner.os }}-${{ hashFiles('brewery-daemon/*.gradle.kts', 'brewery-daemon/gradle.properties', 'brewery-daemon/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
       - name: Test and package
         working-directory: brewery-daemon
         shell: bash
         run: ./gradlew test shadowJar --no-daemon
+      - name: Save the Gradle cache
+        if: env.SAVE_CACHE == 'true' && steps.gradle-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-gradle-cache
+        with:
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: brewery-daemon-${{ matrix.os }}
@@ -303,7 +318,18 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-          cache: gradle
+      # The Daemon job's Gradle cache (same key).
+      - name: Restore the Gradle cache
+        id: gradle-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            !~/.gradle/caches/**/*.lock
+            !~/.gradle/caches/**/gc.properties
+          key: gradle-${{ runner.os }}-${{ hashFiles('brewery-daemon/*.gradle.kts', 'brewery-daemon/gradle.properties', 'brewery-daemon/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
       # The launcher and real-jlink tests use the setup-java JDK (it has jmods).
       - name: Test the bundle scripts
         env:
@@ -363,6 +389,12 @@ jobs:
       - name: Smoke (daemon and jdtls, Gradle import; Gradle 8.4 on JAVA_HOME)
         if: runner.os != 'Linux'
         run: python script/brewery/smoke_bundle.py "$BUNDLE" --checks basic,gradle,gradle-old
+      # After the smoke tests, so the cache also holds the Gradle distributions their fixtures download.
+      - name: Save the Gradle cache
+        if: env.SAVE_CACHE == 'true' && steps.gradle-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/save-gradle-cache
+        with:
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       # A tarball keeps the executable bits that upload-artifact's zip would drop.
       - name: Pack
         if: runner.os != 'Windows'
@@ -375,10 +407,50 @@ jobs:
           path: ${{ runner.os == 'Windows' && env.BUNDLE || format('target/bundle-{0}.tar.gz', matrix.target) }}
           retention-days: 14
 
+  # Zed's licences of the Rust dependencies (cargo-about over every package of Cargo.lock, for
+  # all targets, so one file serves every platform). They are embedded in the app (Help > View
+  # Dependency Licenses), so the build jobs need them before they build. Generating them takes
+  # minutes and they change only with their inputs, so they are cached by those (saved from
+  # main and tags only, like the other caches) and handed to the build jobs as an artifact.
+  licenses:
+    name: Licences
+    needs: changes
+    if: needs.changes.outputs.windows_build == 'true' || needs.changes.outputs.other_builds == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Restore the licences
+        id: cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: assets/licenses.md
+          key: rust-licenses-cargo-about-0.8.2-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'script/generate-licenses', 'script/licenses/**', 'assets/themes/LICENSES', 'assets/icons/LICENSES') }}
+      # The version script/generate-licenses pins; prebuilt, checksum-checked by install-action.
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          tool: cargo-about@0.8.2
+      - name: Generate the Rust dependency licences
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: script/generate-licenses assets/licenses.md
+      - name: Save the licences
+        if: env.SAVE_CACHE == 'true' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: assets/licenses.md
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-licenses
+          path: assets/licenses.md
+          if-no-files-found: error
+          retention-days: 14
+
   # Runs alongside the checks: the release-fast profile shares nothing with the test builds.
   build-windows:
     name: Build (windows-2025)
-    needs: changes
+    needs: [changes, licenses]
     if: needs.changes.outputs.windows_build == 'true'
     runs-on: windows-2025
     timeout-minutes: 240
@@ -404,14 +476,8 @@ jobs:
         run: |
           echo "$BREWERY_CHANNEL" > crates/zed/RELEASE_CHANNEL
           echo "RELEASE_CHANNEL=$BREWERY_CHANNEL" >> "$GITHUB_ENV"
-      - name: Install MSVC Spectre libraries
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $p = Start-Process -Wait -PassThru -FilePath "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath `"$vs`" --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --quiet --norestart --nocache"
-          # 3010 means "succeeded, reboot required", which a fresh runner can ignore.
-          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { throw "vs_installer exited with $($p.ExitCode)" }
-          if (-not (Test-Path "$vs\VC\Tools\MSVC\*\lib\spectre")) { throw "MSVC Spectre libraries not found under $vs" }
+      - name: MSVC Spectre libraries
+        uses: ./.github/actions/msvc-spectre
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.18.0
@@ -424,14 +490,12 @@ jobs:
           cache-targets: false
           save-if: ${{ env.SAVE_CACHE }}
           cache-on-failure: true
-      # Zed's licences of the Rust dependencies (cargo-about). They are embedded in the app
-      # (Help > View Dependency Licenses), so they must exist before the build.
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+      # Embedded in the app, so they must exist before the build (the Licences job).
+      - name: Get the Rust dependency licences
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          tool: cargo-about@0.8.2
-      - name: Generate the Rust dependency licences
-        shell: pwsh
-        run: script/generate-licenses.ps1 assets/licenses.md
+          name: rust-licenses
+          path: assets
       # The installer also needs the CLI (bin\brewery.exe) and the update helper.
       - name: Build
         run: cargo build --locked --profile release-fast -p zed -p cli -p auto_update_helper
@@ -532,7 +596,7 @@ jobs:
   # Linux and macOS release builds run on tags, or on a manual run with "all_platforms".
   build-other:
     name: Build (${{ matrix.os }})
-    needs: changes
+    needs: [changes, licenses]
     if: needs.changes.outputs.other_builds == 'true'
     strategy:
       fail-fast: false
@@ -568,14 +632,12 @@ jobs:
           shared-key: brewery-build
           save-if: ${{ github.ref == 'refs/heads/main' && inputs.release != true }}
           cache-on-failure: true
-      # Zed's licences of the Rust dependencies (cargo-about, the version script/generate-licenses
-      # pins; prebuilt, checksum-checked by install-action). They are embedded in the app
-      # (Help > View Dependency Licenses), so they must exist before the build.
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+      # Embedded in the app, so they must exist before the build (the Licences job).
+      - name: Get the Rust dependency licences
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          tool: cargo-about@0.8.2
-      - name: Generate the Rust dependency licences
-        run: script/generate-licenses assets/licenses.md
+          name: rust-licenses
+          path: assets
       - name: Build
         run: cargo build --locked --profile release-fast -p zed
       # A separate invocation, as Zed's bundle scripts do, so the app's features don't unify into the CLI.

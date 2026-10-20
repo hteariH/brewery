@@ -91,6 +91,7 @@ fn groups_actions_recent_local_and_remotes_by_remote() {
             "> Checkout Tag or Revision…",
             "> Update Project",
             "> Push…",
+            "> Stashes…",
             "# Recent",
             "  feature-b [Recent]",
             "  develop [Recent]",
@@ -108,7 +109,7 @@ fn groups_actions_recent_local_and_remotes_by_remote() {
         ]
     );
     // The first branch row is selected by default.
-    assert_eq!(grouped.selected, Some(5));
+    assert_eq!(grouped.selected, Some(6));
 }
 
 #[test]
@@ -233,6 +234,7 @@ fn submenu_entries_depend_on_branch_kind() {
             "Rebase 'main' onto 'origin/main'",
             "Merge 'origin/main' into 'main'",
             "Compare with 'main'",
+            "Delete",
         ]
     );
     // Detached HEAD: nothing to merge into or rebase.
@@ -445,12 +447,13 @@ async fn popup_lists_groups_for_a_fake_branch_list(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let listed = rows(&popup, cx);
     assert_eq!(
-        &listed[..6],
+        &listed[..7],
         &[
             "> New Branch…",
             "> Checkout Tag or Revision…",
             "> Update Project",
             "> Push…",
+            "> Stashes…",
             "# Recent",
             "  develop [Recent]",
         ]
@@ -813,7 +816,90 @@ async fn conflicting_merge_opens_the_conflicts_dialog(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn checkout_blocked_by_local_changes_shows_gits_reason(cx: &mut TestAppContext) {
+async fn checkout_blocked_by_local_changes_offers_smart_checkout(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = TestRepo::new();
+    repo.commit("a.txt", "base\n", "base");
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    repo.commit("a.txt", "feature\n", "feature change");
+    repo.git(&["checkout", "--quiet", "main"]);
+    std::fs::write(repo.work.join("a.txt"), "local edit\n").expect("write");
+    let mut opened = open_real(&repo, cx).await;
+    wait_for_branch_list(&mut opened, "branches", |names| names.len() == 2);
+
+    // Cancel: nothing changes, and there is no toast.
+    let popup = open_popup(&mut opened);
+    run_action(&popup, BranchAction::Checkout, "feature", &mut opened.cx);
+    wait_until(&mut opened.cx, "smart checkout prompt", |cx| {
+        cx.has_pending_prompt()
+    });
+    opened.cx.simulate_prompt_answer("Cancel");
+    opened.cx.run_until_parked();
+    assert!(shown_toasts().is_empty());
+    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert_eq!(repo.read("a.txt"), "local edit\n");
+    assert_eq!(repo.git(&["stash", "list"]), "");
+}
+
+#[test]
+fn local_changes_toast_shows_gits_reason() {
+    let error = "Git command failed:\nerror: Your local changes to the following files would be \
+                 overwritten by checkout:\n\ta.txt\nPlease commit your changes or stash them.\n";
+    let toast = OutcomeToast::error("Checkout failed", error);
+    assert!(
+        toast.message.starts_with("Checkout failed: error:")
+            && toast.message.contains("a.txt")
+            && !toast.message.contains(ZED_GIT_ERROR_HEADER),
+        "{:?}",
+        toast.message
+    );
+}
+
+/// main: a.txt with five lines; feature changes the first. The local change to the last line
+/// blocks the checkout but applies cleanly on feature.
+fn repo_with_compatible_local_change() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.commit("a.txt", "1\n2\n3\n4\n5\n", "base");
+    repo.git(&["checkout", "--quiet", "-b", "feature"]);
+    repo.commit("a.txt", "one\n2\n3\n4\n5\n", "feature change");
+    repo.git(&["checkout", "--quiet", "main"]);
+    std::fs::write(repo.work.join("a.txt"), "1\n2\n3\n4\nfive\n").expect("write");
+    repo
+}
+
+#[gpui::test]
+async fn smart_checkout_stashes_checks_out_and_restores(cx: &mut TestAppContext) {
+    init_test(cx);
+    let repo = repo_with_compatible_local_change();
+    let mut opened = open_real(&repo, cx).await;
+    wait_for_branch_list(&mut opened, "branches", |names| names.len() == 2);
+
+    let popup = open_popup(&mut opened);
+    run_action(&popup, BranchAction::Checkout, "feature", &mut opened.cx);
+    wait_until(&mut opened.cx, "smart checkout prompt", |cx| {
+        cx.has_pending_prompt()
+    });
+    opened.cx.simulate_prompt_answer("Smart Checkout");
+    wait_until(&mut opened.cx, "checkout toast", |_| {
+        !shown_toasts().is_empty()
+    });
+    assert_eq!(
+        shown_toasts(),
+        vec![OutcomeToast::success(
+            "Checked out 'feature' and restored the local changes"
+        )]
+    );
+    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "feature");
+    assert_eq!(repo.read("a.txt"), "one\n2\n3\n4\nfive\n");
+    assert_eq!(
+        repo.git(&["stash", "list"]),
+        "",
+        "the stash was applied and dropped"
+    );
+}
+
+#[gpui::test]
+async fn smart_checkout_conflicts_open_the_conflicts_dialog(cx: &mut TestAppContext) {
     init_test(cx);
     let repo = TestRepo::new();
     repo.commit("a.txt", "base\n", "base");
@@ -826,21 +912,249 @@ async fn checkout_blocked_by_local_changes_shows_gits_reason(cx: &mut TestAppCon
 
     let popup = open_popup(&mut opened);
     run_action(&popup, BranchAction::Checkout, "feature", &mut opened.cx);
+    wait_until(&mut opened.cx, "smart checkout prompt", |cx| {
+        cx.has_pending_prompt()
+    });
+    opened.cx.simulate_prompt_answer("Smart Checkout");
+    let workspace = opened.workspace.clone();
+    wait_until(&mut opened.cx, "conflicts dialog", |cx| {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<ConflictsDialog>(cx).is_some()
+        })
+    });
+    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "feature");
+    assert_eq!(
+        repo.git(&["diff", "--name-only", "--diff-filter=U"]),
+        "a.txt"
+    );
+    assert!(
+        repo.git(&["stash", "list"])
+            .contains("before checking out feature"),
+        "a stash that did not apply is kept"
+    );
+}
+
+fn tracking(local: &str, upstream: Option<&str>) -> Branch {
+    Branch {
+        upstream: upstream.map(|upstream| git::repository::Upstream {
+            ref_name: format!("refs/remotes/{upstream}").into(),
+            tracking: git::repository::UpstreamTracking::Gone,
+        }),
+        ..branch(local)
+    }
+}
+
+#[test]
+fn checking_out_a_remote_branch_asks_before_moving_an_upstream() {
+    let remote = |name: &str| BranchRow {
+        branch: branch(&format!("remote:{name}")),
+        group: Group::Remote,
+        is_current: false,
+        positions: Vec::new(),
+    };
+    let local = BranchRow {
+        branch: branch("feature"),
+        group: Group::Local,
+        is_current: false,
+        positions: Vec::new(),
+    };
+    // No local branch yet: Zed creates one tracking the remote branch.
+    assert_eq!(
+        checkout_plan(&remote("origin/feature"), &[branch("main")]),
+        CheckoutPlan::Checkout("origin/feature".into())
+    );
+    // The local branch already tracks it: a plain local checkout.
+    assert_eq!(
+        checkout_plan(
+            &remote("origin/feature"),
+            &[tracking("feature", Some("origin/feature"))]
+        ),
+        CheckoutPlan::Checkout("feature".into())
+    );
+    // It tracks something else, or nothing: ask.
+    assert_eq!(
+        checkout_plan(
+            &remote("origin/feature"),
+            &[tracking("feature", Some("fork/feature"))]
+        ),
+        CheckoutPlan::AskUpstream {
+            local: "feature".into(),
+            remote: "origin/feature".into(),
+            upstream: Some("fork/feature".into()),
+        }
+    );
+    assert_eq!(
+        checkout_plan(&remote("origin/feature"), &[tracking("feature", None)]),
+        CheckoutPlan::AskUpstream {
+            local: "feature".into(),
+            remote: "origin/feature".into(),
+            upstream: None,
+        }
+    );
+    assert_eq!(
+        checkout_plan(&local, &[branch("feature")]),
+        CheckoutPlan::Checkout("feature".into())
+    );
+}
+
+/// A clone-like setup: a bare `origin` with main and feature, fetched, and a local feature
+/// branch without an upstream.
+fn repo_with_origin() -> (TestRepo, PathBuf) {
+    let repo = TestRepo::new();
+    repo.commit("a.txt", "base\n", "base");
+    repo.git(&["branch", "feature"]);
+    let origin = repo._dir.path().join("origin.git");
+    let origin_path = origin.to_string_lossy().into_owned();
+    repo.git(&["init", "--quiet", "--bare", &origin_path]);
+    repo.git(&["remote", "add", "origin", &origin_path]);
+    repo.git(&["push", "--quiet", "origin", "main", "feature"]);
+    repo.git(&["fetch", "--quiet", "origin"]);
+    (repo, origin)
+}
+
+#[gpui::test]
+async fn remote_checkout_keeps_or_moves_the_upstream_as_asked(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (repo, _origin) = repo_with_origin();
+    let mut opened = open_real(&repo, cx).await;
+    wait_for_branch_list(&mut opened, "branches", |names| {
+        names.iter().any(|name| name == "origin/feature")
+    });
+    let upstream =
+        |repo: &TestRepo| repo.git_status(&["rev-parse", "--abbrev-ref", "feature@{upstream}"]);
+    assert!(!upstream(&repo).0, "no upstream yet");
+
+    // Keeping the upstream checks out the local branch as it is.
+    let popup = open_popup(&mut opened);
+    run_action(
+        &popup,
+        BranchAction::Checkout,
+        "origin/feature",
+        &mut opened.cx,
+    );
+    wait_until(&mut opened.cx, "upstream prompt", |cx| {
+        cx.has_pending_prompt()
+    });
+    opened.cx.simulate_prompt_answer("Keep Its Upstream");
     wait_until(&mut opened.cx, "checkout toast", |_| {
         !shown_toasts().is_empty()
     });
-    let toasts = shown_toasts();
-    assert_eq!(toasts.len(), 1);
-    assert_eq!(toasts[0].kind, ToastKind::Error);
-    assert!(
-        toasts[0].message.starts_with("Checkout failed: error:")
-            && toasts[0].message.contains("a.txt")
-            && !toasts[0].message.contains(ZED_GIT_ERROR_HEADER),
-        "{:?}",
-        toasts[0].message
+    assert_eq!(
+        shown_toasts(),
+        vec![OutcomeToast::success("Checked out 'feature'")]
     );
-    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "main");
-    assert_eq!(repo.read("a.txt"), "local edit\n");
+    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "feature");
+    assert!(!upstream(&repo).0, "the upstream was not set");
+
+    // Tracking moves it, as Zed's checkout of a remote branch does.
+    SHOWN_TOASTS.with(|shown| shown.borrow_mut().clear());
+    repo.git(&["checkout", "--quiet", "main"]);
+    wait_until(&mut opened.cx, "main checked out", |_| true);
+    let popup = open_popup(&mut opened);
+    run_action(
+        &popup,
+        BranchAction::Checkout,
+        "origin/feature",
+        &mut opened.cx,
+    );
+    wait_until(&mut opened.cx, "upstream prompt", |cx| {
+        cx.has_pending_prompt()
+    });
+    opened.cx.simulate_prompt_answer("Track 'origin/feature'");
+    wait_until(&mut opened.cx, "checkout toast", |_| {
+        !shown_toasts().is_empty()
+    });
+    assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "feature");
+    assert_eq!(upstream(&repo), (true, "origin/feature".to_string()));
+}
+
+#[gpui::test]
+async fn deleting_a_remote_branch_pushes_the_deletion(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (repo, origin) = repo_with_origin();
+    let mut opened = open_real(&repo, cx).await;
+    wait_for_branch_list(&mut opened, "branches", |names| {
+        names.iter().any(|name| name == "origin/feature")
+    });
+    let on_origin = |name: &str| {
+        let origin = origin.to_string_lossy().into_owned();
+        repo.git_status(&[
+            "--git-dir",
+            &origin,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ])
+        .0
+    };
+    assert!(on_origin("feature"));
+
+    let popup = open_popup(&mut opened);
+    run_action(
+        &popup,
+        BranchAction::Delete,
+        "origin/feature",
+        &mut opened.cx,
+    );
+    wait_until(&mut opened.cx, "delete prompt", |cx| {
+        cx.has_pending_prompt()
+    });
+    opened.cx.simulate_prompt_answer("Cancel");
+    opened.cx.run_until_parked();
+    assert!(on_origin("feature"));
+
+    let popup = open_popup(&mut opened);
+    run_action(
+        &popup,
+        BranchAction::Delete,
+        "origin/feature",
+        &mut opened.cx,
+    );
+    wait_until(&mut opened.cx, "delete prompt", |cx| {
+        cx.has_pending_prompt()
+    });
+    opened.cx.simulate_prompt_answer("Delete");
+    wait_until(&mut opened.cx, "delete toast", |_| {
+        !shown_toasts().is_empty()
+    });
+    assert_eq!(
+        shown_toasts(),
+        vec![OutcomeToast::success(
+            "Deleted remote branch 'origin/feature'"
+        )]
+    );
+    assert!(!on_origin("feature"));
+    assert!(on_origin("main"));
+    assert!(repo.has_branch("feature"), "the local branch stays");
+    wait_for_branch_list(&mut opened, "branch list without origin/feature", |names| {
+        !names.iter().any(|name| name == "origin/feature")
+    });
+}
+
+#[gpui::test]
+async fn stashes_opens_zeds_stash_picker(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (_repo, mut opened) = repo_with_feature_branch(cx).await;
+    let opened_picker = Rc::new(RefCell::new(0));
+    opened.workspace.update(&mut opened.cx, |workspace, _| {
+        let opened_picker = opened_picker.clone();
+        workspace.register_action(move |_, _: &zed_actions::git::ViewStash, _, _| {
+            *opened_picker.borrow_mut() += 1;
+        });
+    });
+    let popup = open_popup(&mut opened);
+    let picker = popup.read_with(&opened.cx, |popup, _| popup.picker.clone());
+    picker.update_in(&mut opened.cx, |picker, window, cx| {
+        picker
+            .delegate
+            .run_top_action(TopAction::Stashes, window, cx)
+    });
+    opened.cx.run_until_parked();
+    assert_eq!(*opened_picker.borrow(), 1);
+    opened.workspace.read_with(&opened.cx, |workspace, cx| {
+        assert!(workspace.active_modal::<BranchesPopup>(cx).is_none())
+    });
 }
 
 #[test]

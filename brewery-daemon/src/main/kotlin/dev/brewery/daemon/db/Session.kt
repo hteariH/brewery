@@ -42,6 +42,7 @@ class Session(
     private val busy = AtomicInteger()
     private val closeListeners = CopyOnWriteArrayList<() -> Unit>()
     private val sweepHooks = CopyOnWriteArrayList<Pair<() -> Boolean, (Connection) -> Unit>>()
+    private val keepOpenConditions = CopyOnWriteArrayList<() -> Boolean>()
 
     @Volatile private var connection: Connection? = null
     @Volatile private var sessionThread: Thread? = null
@@ -170,10 +171,19 @@ class Session(
         closeListeners.add(listener)
     }
 
-    /** Closes the session if nothing is running and it has been unused for [timeoutMs]; true if it was closed. */
+    /** While [condition] holds (cheap, any thread), [closeIfIdle] leaves the session open: an open transaction. */
+    fun keepOpenWhile(condition: () -> Boolean) {
+        keepOpenConditions.add(condition)
+    }
+
+    /**
+     * Closes the session if nothing is running, nothing keeps it open (see [keepOpenWhile]) and it has been unused
+     * for [timeoutMs]; true if it was closed.
+     */
     fun closeIfIdle(timeoutMs: Long): Boolean {
         gate.withLock {
             if (closed || busy.get() > 0 || clock() - lastUsed < timeoutMs) return false
+            if (keepOpenConditions.any { runCatching(it).getOrDefault(false) }) return false
             closed = true
         }
         shutdown()
@@ -216,8 +226,18 @@ class Session(
 }
 
 /**
- * One [Session] per connection id, created on first use and closed after [idleTimeoutMs] without use, when the
- * connection is deleted or saved again, and on [close]. [clock] (milliseconds) is injectable for tests.
+ * The key of a [Session]: the connection id for the connection's shared session (the schema tree, completion), or
+ * the connection id plus a client-chosen session id for a session of its own (one per query console).
+ */
+fun sessionKey(connectionId: String, sessionId: String?): String =
+    if (sessionId.isNullOrEmpty()) connectionId else "$connectionId$SESSION_SEPARATOR$sessionId"
+
+private const val SESSION_SEPARATOR = '\u0000'
+
+/**
+ * Sessions of saved connections: the shared one of a connection id and any number of named ones (see [sessionKey]),
+ * each created on first use and closed after [idleTimeoutMs] without use, when the connection is deleted or saved
+ * again (all of its sessions), by [closeSession], and on [close]. [clock] (milliseconds) is injectable for tests.
  */
 class SessionManager(
     private val exists: (String) -> Boolean,
@@ -233,28 +253,36 @@ class SessionManager(
 
     val openCount: Int get() = sessions.size
 
-    /** The live session for [id], creating it if needed; unknown ids throw `DB_NOT_FOUND`. */
-    fun session(id: String): Session {
+    /**
+     * The live session [sessionId] (null: the shared one) of connection [id], creating it if needed; unknown ids
+     * throw `DB_NOT_FOUND`.
+     */
+    fun session(id: String, sessionId: String? = null): Session {
         if (shut) throw DbException(DbErrorCodes.CONNECTION_FAILED, "The database service is shutting down")
-        sessions[id]?.takeUnless { it.closed }?.let { return it }
+        val key = sessionKey(id, sessionId)
+        sessions[key]?.takeUnless { it.closed }?.let { return it }
         if (!exists(id)) throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
         ensureSweeper()
-        val created = sessions.compute(id) { _, old -> old?.takeUnless { it.closed } ?: Session(id, { opener(id) }, clock) }!!
+        val created = sessions.compute(key) { _, old -> old?.takeUnless { it.closed } ?: Session(key, { opener(id) }, clock) }!!
         if (shut) {
             // close() ran between the check above and the compute: do not leave a session behind.
-            close(id)
+            closeKey(key)
             throw DbException(DbErrorCodes.CONNECTION_FAILED, "The database service is shutting down")
         }
         return created
     }
 
+    /** The live session [sessionId] of connection [id], without creating one. */
+    fun existing(id: String, sessionId: String? = null): Session? =
+        sessions[sessionKey(id, sessionId)]?.takeUnless { it.closed }
+
     fun <T> run(id: String, block: (Connection) -> T): T = runIn(id) { _, c -> block(c) }
 
-    /** Like [run], but the block also gets the [Session] it runs in. */
-    fun <T> runIn(id: String, block: (Session, Connection) -> T): T {
+    /** Like [run], in session [sessionId] (null: the shared one), and the block also gets the [Session] it runs in. */
+    fun <T> runIn(id: String, sessionId: String? = null, block: (Session, Connection) -> T): T {
         repeat(2) {
             try {
-                val s = session(id)
+                val s = session(id, sessionId)
                 return s.run { c -> block(s, c) }
             } catch (_: SessionClosedException) {
                 // Raced with an idle close or a re-save: take a fresh session.
@@ -271,8 +299,21 @@ class SessionManager(
         }
     }
 
+    /** Closes every session of connection [id]: the shared one and the named ones. */
     fun close(id: String) {
-        sessions.remove(id)?.close()
+        val named = "$id$SESSION_SEPARATOR"
+        for (key in sessions.keys.toList()) {
+            if (key == id || key.startsWith(named)) closeKey(key)
+        }
+    }
+
+    /** Closes session [sessionId] of connection [id], rolling back what it has not committed. */
+    fun closeSession(id: String, sessionId: String) {
+        closeKey(sessionKey(id, sessionId))
+    }
+
+    private fun closeKey(key: String) {
+        sessions.remove(key)?.close()
     }
 
     override fun close() {
@@ -281,7 +322,7 @@ class SessionManager(
             sweeper?.shutdownNow()
             sweeper = null
         }
-        for (id in sessions.keys.toList()) close(id)
+        for (key in sessions.keys.toList()) closeKey(key)
     }
 
     private fun ensureSweeper() {

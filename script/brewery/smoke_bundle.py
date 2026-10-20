@@ -11,6 +11,8 @@ basic (the default):
    (java-lsp-proxy -> jdtls/brewery-jdtls[.cmd] --jvm-arg=-javaagent:jdtls/tools/lombok.jar)
    on a plain folder with one Java file (no build files): initialize, ServiceReady,
    java-debug's startDebugSession, documentSymbol; the bundle must stay unchanged.
+   Then the Gradle language server (jdtls/tools/gradle-lsp-bridge -> jre/bin/java -cp
+   jdtls/tools/gradle-ls/<version>/lib/*) on a build.gradle: documentSymbol.
 
 gradle (needs the network once, for the Gradle distribution of the fixture's wrapper):
 3. jdtls imports a two-project Gradle build (app uses lib): no errors on the build
@@ -138,7 +140,7 @@ def basic(bundle: Path, windows: bool, scratch: Path, timeout: float) -> int:
     java_file.parent.mkdir(parents=True)
     java_file.write_text(JAVA_SOURCE, encoding="utf-8")
     launcher = bundle / "jdtls" / ("brewery-jdtls.cmd" if windows else "brewery-jdtls")
-    return lsp_smoke.main(
+    code = lsp_smoke.main(
         ["--project", str(project),
          "--proxy", str(bundle / "jdtls" / "tools" / f"java-lsp-proxy{exe}"),
          "--launcher", str(launcher),
@@ -148,6 +150,35 @@ def basic(bundle: Path, windows: bool, scratch: Path, timeout: float) -> int:
          "--unchanged", str(bundle),
          "--cache", str(scratch / "jdtls-cache"),
          "--timeout", str(timeout)]
+    )
+    if code != 0:
+        return code
+    return gradle_ls(bundle, windows, scratch, timeout)
+
+
+def gradle_ls(bundle: Path, windows: bool, scratch: Path, timeout: float) -> int:
+    """The Gradle language server as the Java extension starts it for build.gradle:
+    <gradle-lsp-bridge> <java> -cp <every jar in lib/>, here on the bundled JRE."""
+    exe = ".exe" if windows else ""
+    versions = sorted((bundle / "jdtls" / "tools" / "gradle-ls").glob("*/lib"))
+    if len(versions) != 1:
+        lsp_smoke.log(f"gradle-ls: FAILED: want one jdtls/tools/gradle-ls/<version>/lib, got {versions}")
+        return 1
+    jars = sorted(str(jar) for jar in versions[0].glob("*.jar"))
+    project = scratch / "gradle-ls"
+    project.mkdir()
+    (project / "settings.gradle").write_text('rootProject.name = "demo"\n', encoding="utf-8")
+    (project / "build.gradle").write_text(
+        'plugins {\n    id "java"\n}\n\ndependencies {\n'
+        '    implementation "org.slf4j:slf4j-api:2.0.17"\n}\n',
+        encoding="utf-8",
+    )
+    lsp_smoke.log(f"gradle-ls: {versions[0].parent.name} through the bundled gradle-lsp-bridge")
+    return lsp_smoke.main(
+        ["--project", str(project), "--open", "build.gradle", "--unchanged", str(bundle),
+         "--timeout", str(min(timeout, 120)), "--",
+         str(bundle / "jdtls" / "tools" / f"gradle-lsp-bridge{exe}"),
+         str(bundle / "jre" / "bin" / f"java{exe}"), "-cp", os.pathsep.join(jars)]
     )
 
 

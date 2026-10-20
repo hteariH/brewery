@@ -29,6 +29,8 @@ class DbService(
     private val snapshotOnSeparateConnection: (ConnectionInfo) -> Boolean = { isMariaDbUrl(it.url) },
     /** Most rows of a result the driver buffers in the heap instead of streaming; tests inject a small value. */
     private val maxBufferedRows: Long = CursorManager.DEFAULT_MAX_BUFFERED_ROWS,
+    /** How long any other unfinished cursor may sit without a fetch before it is closed. */
+    private val idleCursorTtlMs: Long = CursorManager.DEFAULT_IDLE_CURSOR_TTL_MS,
 ) : AutoCloseable {
     private val projectKey: String = try {
         root.toRealPath().toString()
@@ -326,19 +328,25 @@ class DbService(
 
     // cursor id -> the manager (one per live session) that owns it
     private val cursorIndex = ConcurrentHashMap<String, CursorManager>()
+    // session key (see sessionKey) -> the manager of that session
     private val cursorManagers = ConcurrentHashMap<String, CursorManager>()
 
-    private fun cursorsOf(connectionId: String, session: Session): CursorManager =
-        cursorManagers.compute(connectionId) { _, old ->
-            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions, clock, streamingTtlMs, expireUnfinishedBeforeCommands, maxBufferedRows).also { manager ->
+    private fun cursorsOf(key: String, session: Session): CursorManager =
+        cursorManagers.compute(key) { _, old ->
+            old?.takeIf { it.session === session } ?: CursorManager(session, cursorIndex, manageTransactions, clock, streamingTtlMs, expireUnfinishedBeforeCommands, maxBufferedRows, idleCursorTtlMs).also { manager ->
                 // A manager of a closed session would otherwise stay in the map (and keep the session alive).
-                session.onClose { if (session.closed) cursorManagers.remove(connectionId, manager) }
+                session.onClose { if (session.closed) cursorManagers.remove(key, manager) }
             }
         }!!
 
-    /** Runs [sql] on the session of [connectionId] and returns after the first result; see [CursorManager.execute]. */
-    fun execute(connectionId: String, sql: String): DbExecuteResult = try {
-        sessions.runIn(connectionId) { session, c -> cursorsOf(connectionId, session).execute(c, sql) }
+    /**
+     * Runs [sql] on session [sessionId] of [connectionId] (null: the connection's shared session) and returns after
+     * the first result; see [CursorManager.execute]. A query console runs in a session of its own, so its statements,
+     * results, cancels and transactions do not touch other consoles.
+     */
+    fun execute(connectionId: String, sql: String, sessionId: String? = null): DbExecuteResult = try {
+        val key = sessionKey(connectionId, sessionId)
+        sessions.runIn(connectionId, sessionId) { session, c -> cursorsOf(key, session).execute(c, sql) }
     } catch (e: SQLException) {
         throw queryFailure(e)
     } finally {
@@ -357,12 +365,26 @@ class DbService(
         }
     }
 
-    /** Aborts the statement currently running on the session; a no-op when nothing runs. Works from any thread. */
-    fun cancel(connectionId: String?, cursorId: String?) {
+    /**
+     * Aborts the statement currently running on session [sessionId] of [connectionId] (null: the shared one), or on
+     * the session of [cursorId] when no connection is given; a no-op when nothing runs. Works from any thread.
+     */
+    fun cancel(connectionId: String?, cursorId: String?, sessionId: String? = null) {
         val id = connectionId?.takeIf { it.isNotBlank() }
-            ?: cursorId?.let { cursorIndex[it] }?.let { m -> cursorManagers.entries.firstOrNull { it.value === m }?.key }
-            ?: throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: ${connectionId ?: ""}")
-        sessions.session(id).cancelRunning()
+        if (id == null) {
+            val manager = cursorId?.let { cursorIndex[it] }
+                ?: throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: ${connectionId ?: ""}")
+            manager.session.cancelRunning()
+            return
+        }
+        if (store.connection(id) == null) throw DbException(DbErrorCodes.NOT_FOUND, "Unknown connection: $id")
+        // Nothing runs in a session that does not exist.
+        sessions.existing(id, sessionId)?.cancelRunning()
+    }
+
+    /** Closes session [sessionId] of [connectionId] (a closed console's), rolling back what it left uncommitted. */
+    fun closeSession(connectionId: String, sessionId: String) {
+        sessions.closeSession(connectionId, sessionId)
     }
 
     /** Idempotent: unknown or already evicted cursors are ignored. */

@@ -97,12 +97,25 @@ The Database tool window (left stripe) lists the project's data sources. Use `+`
 to add one: PostgreSQL, MySQL, MariaDB and SQLite drivers are bundled, and any
 other database works through a JDBC driver jar you add in the same dialog. Test
 Connection checks the settings before you save them. Expand a data source to
-browse schemas, tables, views, columns, indexes and foreign keys.
+browse schemas, tables, views, columns, indexes and foreign keys. Right-click a
+table or view for Select Top 500 and Copy Qualified Name; Show System Objects in the
+same menu also lists schemas such as `pg_catalog` and `information_schema`. When the
+database rejects the password, the data source dialog opens at the password field.
 
 New Query Console opens a SQL editor for the selected data source. Ctrl+Enter
-runs the selected text or the statement under the cursor, and Ctrl+F2 stops it.
+runs the statement under the cursor, or every statement of the selection one after
+another, and Ctrl+F2 stops it; Run All in the console toolbar runs the whole console.
+Each statement of a run gets a result tab, and a failing statement ends the run.
+After `BEGIN` the console toolbar says "In transaction" and offers Commit and Rollback;
+an idle connection with an open transaction is not closed, and saving the data source
+again (which reconnects and rolls it back) asks for a second Save first.
 Results appear in a grid under the editor, and more rows load as you scroll.
+Click a cell or move with the arrow keys; Shift+click, Shift+arrows or a drag
+select a range, and Ctrl+C copies it as tab-separated rows.
 Double-click a table to open a console with `SELECT * FROM` that table.
+A console's SQL is saved as you type (in Brewery's data directory, one file per
+console of a data source); closing the tab keeps it for the next console of that data
+source, and open consoles come back when the project is reopened.
 
 While you type in a console, Brewery suggests SQL keywords, the data source's schemas
 and tables after `FROM` or `JOIN`, and columns of the tables in the statement,
@@ -116,19 +129,19 @@ Credential Manager, Secret Service on Linux, macOS Keychain).
 
 Limits in this version:
 
-- Consoles on the same data source share one connection, so stopping a statement
-  in one console can stop a statement running in another, and running a
-  statement ends the unread results of the other consoles.
-- Only one statement runs at a time; there is no "run all".
+- Each console has a connection of its own, but the results of one run share it:
+  on PostgreSQL a statement that writes ends the streaming of the reads before it,
+  and on MariaDB/MySQL every statement does; those results keep their first page
+  ("Result expired — run again" when you scroll further).
 - MySQL Connector/J is not bundled because of its GPL licence; MySQL servers are
   reached through MariaDB Connector/J.
 - On macOS the console keys are Cmd+Enter (run) and Cmd+F2 (stop).
 - Without a secret store on the system the password is not saved; a warning says
   so when you save the data source.
-- PostgreSQL results stop loading more rows after about a minute without
-  scrolling ("Result expired — run again").
-- Expanding the tree of a data source waits while a statement runs on it: each
-  data source has one connection.
+- Results stop loading more rows when you leave them without scrolling for a while
+  ("Result expired — run again"): five minutes on PostgreSQL, a minute on other
+  databases, where an unfinished result can lock the table (SQLite) or its metadata
+  (MariaDB/MySQL).
 
 ## Git
 

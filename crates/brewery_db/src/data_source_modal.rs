@@ -1,6 +1,7 @@
 //! The Add/Edit Data Source dialog: name, driver, URL (prefilled per driver), user and password,
 //! Test Connection, and a section to register a JDBC driver from jar files.
 
+use crate::console::QueryConsole;
 use crate::panel::DatabasePanel;
 use brewery_daemon_client::{
     AddDriverParams, ConnectionInfo, DriverInfo, ProjectDaemon, SaveConnectionParams,
@@ -135,6 +136,11 @@ pub struct DataSourceModal {
     forget_password: bool,
     test_state: TestState,
     error: Option<SharedString>,
+    /// Shown after a first Save while consoles of the data source have a transaction open; the
+    /// next Save goes ahead.
+    rollback_warning: Option<SharedString>,
+    /// Opened because the daemon could not sign in; the password field takes the focus.
+    asking_for_password: bool,
     saving: bool,
     show_add_driver: bool,
     new_driver_name: Entity<InputField>,
@@ -268,6 +274,8 @@ impl DataSourceModal {
             forget_password: false,
             test_state: TestState::Idle,
             error: None,
+            rollback_warning: None,
+            asking_for_password: false,
             saving: false,
             show_add_driver: false,
             new_driver_name,
@@ -298,6 +306,38 @@ impl DataSourceModal {
 
     pub fn error(&self) -> Option<&SharedString> {
         self.error.as_ref()
+    }
+
+    pub fn rollback_warning(&self) -> Option<&SharedString> {
+        self.rollback_warning.as_ref()
+    }
+
+    /// Opened because the daemon could not sign in: says so and starts at the password.
+    pub fn ask_for_password(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.asking_for_password = true;
+        self.error = Some(SharedString::from(message.to_string()));
+        window.focus(&self.password.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    pub fn is_asking_for_password(&self) -> bool {
+        self.asking_for_password
+    }
+
+    /// The consoles of the data source being edited that have a transaction open: saving closes
+    /// their connection, which rolls it back.
+    fn consoles_in_transaction(&self, cx: &App) -> usize {
+        let (Some(editing), Some(workspace)) = (&self.editing, self.workspace.upgrade()) else {
+            return 0;
+        };
+        workspace
+            .read(cx)
+            .items_of_type::<QueryConsole>(cx)
+            .filter(|console| {
+                let console = console.read(cx);
+                console.connection().id == editing.id && console.in_transaction()
+            })
+            .count()
     }
 
     pub fn name_field(&self) -> &Entity<InputField> {
@@ -437,6 +477,25 @@ impl DataSourceModal {
         if !self.validate(&params, true) {
             cx.notify();
             return;
+        }
+        if self.rollback_warning.is_none() {
+            let consoles = self.consoles_in_transaction(cx);
+            if consoles > 0 {
+                let which = if consoles == 1 {
+                    "a console".to_string()
+                } else {
+                    format!("{consoles} consoles")
+                };
+                self.rollback_warning = Some(
+                    format!(
+                        "A transaction is open in {which} of this data source. Saving reconnects \
+                         and rolls it back; Save again to go ahead."
+                    )
+                    .into(),
+                );
+                cx.notify();
+                return;
+            }
         }
         self.saving = true;
         let save = self.daemon.read(cx).db_save_connection(params, cx);
@@ -706,10 +765,17 @@ impl DataSourceModal {
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
                     )
                     .child(
-                        Button::new("data-source-save", "Save")
-                            .style(ButtonStyle::Filled)
-                            .disabled(self.saving)
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                        Button::new(
+                            "data-source-save",
+                            if self.rollback_warning.is_some() {
+                                "Save and Roll Back"
+                            } else {
+                                "Save"
+                            },
+                        )
+                        .style(ButtonStyle::Filled)
+                        .disabled(self.saving)
+                        .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     ),
             )
     }
@@ -725,7 +791,11 @@ impl ModalView for DataSourceModal {}
 
 impl Focusable for DataSourceModal {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.name.focus_handle(cx)
+        if self.asking_for_password {
+            self.password.focus_handle(cx)
+        } else {
+            self.name.focus_handle(cx)
+        }
     }
 }
 
@@ -756,6 +826,11 @@ impl Render for DataSourceModal {
                     .clone()
                     .map(|error| Label::new(error).size(LabelSize::Small).color(Color::Error)),
             )
+            .children(self.rollback_warning.clone().map(|warning| {
+                Label::new(warning)
+                    .size(LabelSize::Small)
+                    .color(Color::Warning)
+            }))
             .child(self.render_add_driver(cx));
         div()
             .elevation_3(cx)

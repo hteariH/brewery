@@ -4,8 +4,10 @@
 //! `git_ui_core::set_branch_picker_builder`) and for `git::Branch`.
 //!
 //! Checkout, create, rename and delete go through Zed's `Repository` methods; merge, rebase,
-//! detached checkout and the reflog go through [`GitCli`]. Update Project and Push dispatch
-//! Zed's `git::Pull` / `git::Push`, so credentials stay with Zed's askpass. Zed's repository
+//! detached checkout, the smart checkout's stash and the reflog go through [`GitCli`]. Update
+//! Project and Push dispatch Zed's `git::Pull` / `git::Push`, and deleting a remote branch
+//! pushes through Zed's `Repository::push`, so credentials stay with Zed's askpass. Stashes…
+//! opens Zed's stash picker (`git::ViewStash`). Zed's repository
 //! watcher sees the `.git` changes these commands make and rescans, so the title bar and the
 //! git panel refresh by themselves.
 
@@ -17,7 +19,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use fuzzy_nucleo::{Case, LengthPenalty, StringMatchCandidate};
-use git::repository::Branch;
+use git::repository::{AskPassDelegate, Branch};
+use git_ui_core::askpass_modal::AskPassModal;
 use gpui::{
     Action, Anchor, App, AsyncWindowContext, Bounds, ClickEvent, Context, DismissEvent, Entity,
     EventEmitter, FocusHandle, Focusable, MouseButton, MouseDownEvent, Pixels, Point, PromptLevel,
@@ -49,14 +52,16 @@ pub(crate) enum TopAction {
     CheckoutRevision,
     UpdateProject,
     Push,
+    Stashes,
 }
 
 impl TopAction {
-    pub(crate) const ALL: [TopAction; 4] = [
+    pub(crate) const ALL: [TopAction; 5] = [
         TopAction::NewBranch,
         TopAction::CheckoutRevision,
         TopAction::UpdateProject,
         TopAction::Push,
+        TopAction::Stashes,
     ];
 
     pub(crate) fn label(self) -> &'static str {
@@ -65,6 +70,7 @@ impl TopAction {
             TopAction::CheckoutRevision => "Checkout Tag or Revision…",
             TopAction::UpdateProject => "Update Project",
             TopAction::Push => "Push…",
+            TopAction::Stashes => "Stashes…",
         }
     }
 
@@ -74,6 +80,7 @@ impl TopAction {
             TopAction::CheckoutRevision => IconName::Hash,
             TopAction::UpdateProject => IconName::ArrowDown,
             TopAction::Push => IconName::ArrowUp,
+            TopAction::Stashes => IconName::Archive,
         }
     }
 }
@@ -590,8 +597,194 @@ pub(crate) fn submenu_entries(
         if !row.is_current {
             entries.push((BranchAction::Delete, "Delete".to_string(), true));
         }
+    } else {
+        // `git push <remote> --delete <branch>`.
+        entries.push((BranchAction::Delete, "Delete".to_string(), true));
     }
     entries
+}
+
+/// How checking out a branch row goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CheckoutPlan {
+    /// `Repository::change_branch` with this name: a local branch, or a remote branch that
+    /// has no local branch yet (Zed creates one tracking it).
+    Checkout(String),
+    /// A remote branch whose local branch exists and tracks something else (or nothing):
+    /// Zed's checkout would silently move the local branch's upstream, so ask first.
+    AskUpstream {
+        local: String,
+        remote: String,
+        /// The local branch's upstream now, `None` when it has none.
+        upstream: Option<String>,
+    },
+}
+
+/// Plans the checkout of `row` given the repository's `branches`. A remote branch maps to the
+/// local branch named after it without the remote (as Zed's `change_branch` does).
+pub(crate) fn checkout_plan(row: &BranchRow, branches: &[Branch]) -> CheckoutPlan {
+    let name = row.branch.name().to_string();
+    if !row.branch.is_remote() {
+        return CheckoutPlan::Checkout(name);
+    }
+    let Some((_, local)) = name.split_once('/') else {
+        return CheckoutPlan::Checkout(name);
+    };
+    let Some(existing) = branches
+        .iter()
+        .find(|branch| !branch.is_remote() && branch.name() == local)
+    else {
+        return CheckoutPlan::Checkout(name);
+    };
+    let upstream = existing
+        .upstream
+        .as_ref()
+        .map(|upstream| upstream.ref_name.to_string());
+    if upstream.as_deref() == Some(row.branch.ref_name.as_ref()) {
+        return CheckoutPlan::Checkout(local.to_string());
+    }
+    CheckoutPlan::AskUpstream {
+        local: local.to_string(),
+        remote: name,
+        upstream: upstream.map(|upstream| {
+            upstream
+                .strip_prefix("refs/remotes/")
+                .or_else(|| upstream.strip_prefix("refs/heads/"))
+                .unwrap_or(&upstream)
+                .to_string()
+        }),
+    }
+}
+
+/// Resolves a [`CheckoutPlan`] to the name `change_branch` gets, asking about the upstream
+/// when needed; `Err(CANCELLED)` when the user cancels.
+async fn checkout_target(plan: CheckoutPlan, cx: &mut AsyncWindowContext) -> Result<String> {
+    let (local, remote, upstream) = match plan {
+        CheckoutPlan::Checkout(name) => return Ok(name),
+        CheckoutPlan::AskUpstream {
+            local,
+            remote,
+            upstream,
+        } => (local, remote, upstream),
+    };
+    let detail = match &upstream {
+        Some(upstream) => format!("'{local}' tracks '{upstream}'."),
+        None => format!("'{local}' has no upstream branch."),
+    };
+    let track = format!("Track '{remote}'");
+    let keep = "Keep Its Upstream";
+    let answer = cx.update(|window, cx| {
+        window.prompt(
+            PromptLevel::Info,
+            &format!(
+                "Local branch '{local}' already exists. Check it out and make it track '{remote}'?"
+            ),
+            Some(&detail),
+            &[track.as_str(), keep, "Cancel"],
+            cx,
+        )
+    })?;
+    match answer.await {
+        Ok(0) => Ok(remote),
+        Ok(1) => Ok(local),
+        _ => Err(anyhow!(CANCELLED)),
+    }
+}
+
+/// Bounds for the smart checkout's stash commands.
+const STASH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Checks out `target`. When git refuses because of local changes to tracked files, offers
+/// IntelliJ's Smart Checkout: stash them, check out, apply the stash again. A stash that does
+/// not apply cleanly stays in the stash list and its conflicts open the Conflicts dialog.
+async fn checkout_with_smart_fallback(
+    repo: &Entity<Repository>,
+    target: String,
+    cx: &mut AsyncWindowContext,
+) -> Result<OutcomeToast> {
+    let change_branch = async |cx: &mut AsyncWindowContext| {
+        repo.update(cx, |repo, _| repo.change_branch(target.clone()))
+            .await
+            .map_err(|_| anyhow!("checkout was cancelled"))
+            .and_then(|result| result)
+    };
+    let Err(error) = change_branch(cx).await else {
+        return Ok(OutcomeToast::success(format!("Checked out '{target}'")));
+    };
+    let failed =
+        |error: &anyhow::Error| OutcomeToast::error("Checkout failed", &format!("{error:#}"));
+    // Checked structurally, not by git's (localised) message: are tracked files changed?
+    let run = |args: &[&str], cx: &mut AsyncWindowContext| {
+        let args = args.iter().map(|arg| arg.to_string()).collect();
+        cx.update(|_, cx| GitCli::run(repo, args, Some(STASH_TIMEOUT), cx))
+    };
+    let status = run(&["status", "--porcelain", "--untracked-files=no"], cx)?.await?;
+    if !status.success() || status.stdout.trim().is_empty() {
+        return Ok(failed(&error));
+    }
+    let answer = cx.update(|window, cx| {
+        window.prompt(
+            PromptLevel::Warning,
+            &format!("Your local changes would be overwritten by checking out '{target}'."),
+            Some(&format!(
+                "{}\n\nSmart Checkout stashes the local changes, checks out '{target}' and \
+                 applies them again.",
+                git_error_line(&format!("{error:#}"))
+            )),
+            &["Smart Checkout", "Cancel"],
+            cx,
+        )
+    })?;
+    if answer.await != Ok(0) {
+        return Err(anyhow!(CANCELLED));
+    }
+    let message = format!("Brewery: uncommitted changes before checking out {target}");
+    let stash = run(&["stash", "push", "--message", &message], cx)?.await?;
+    if !stash.success() {
+        return Ok(OutcomeToast::error(
+            "Smart Checkout failed",
+            &stash.message(),
+        ));
+    }
+    if let Err(error) = change_branch(cx).await {
+        // Put the changes back where they were.
+        let restore = run(&["stash", "pop", "--index"], cx)?.await?;
+        let mut toast = failed(&error);
+        if !restore.success() {
+            toast
+                .message
+                .push_str(" (your changes are in the stash list)");
+        }
+        return Ok(toast);
+    }
+    let pop = run(&["stash", "pop"], cx)?.await?;
+    if pop.success() {
+        return Ok(OutcomeToast::success(format!(
+            "Checked out '{target}' and restored the local changes"
+        )));
+    }
+    let conflicts = cx.update(|_, cx| GitCli::unmerged_paths(repo, cx))?.await?;
+    if conflicts.is_empty() {
+        return Ok(OutcomeToast::error(
+            &format!(
+                "Checked out '{target}', but the local changes did not apply (they are in the stash list)"
+            ),
+            &pop.message(),
+        ));
+    }
+    Ok(OutcomeToast {
+        kind: ToastKind::Conflicts,
+        message: format!(
+            "Checked out '{target}'; restoring the local changes has conflicts: {} {} (the \
+             changes stay in the stash list)",
+            conflicts.len(),
+            if conflicts.len() == 1 {
+                "file"
+            } else {
+                "files"
+            }
+        ),
+    })
 }
 
 struct Submenu {
@@ -762,6 +955,11 @@ impl BranchesDelegate {
                 window.dispatch_action(git::Push.boxed_clone(), cx);
                 cx.emit(DismissEvent);
             }
+            TopAction::Stashes => {
+                // Zed's stash picker: apply, pop, drop and view each stash.
+                window.dispatch_action(zed_actions::git::ViewStash.boxed_clone(), cx);
+                cx.emit(DismissEvent);
+            }
         }
     }
 
@@ -849,6 +1047,7 @@ impl BranchesDelegate {
             BranchAction::CheckoutAndRebaseOntoCurrent => {
                 let Some(current) = current else { return };
                 let is_remote = row.branch.is_remote();
+                let plan = checkout_plan(row, &self.branches);
                 self.spawn_operation(
                     window,
                     cx,
@@ -856,8 +1055,9 @@ impl BranchesDelegate {
                         if let Some(toast) = refuse_while_in_progress("Rebase", &repo, cx).await? {
                             return Ok(toast);
                         }
+                        let target = checkout_target(plan, cx).await?;
                         if let Err(error) = repo
-                            .update(cx, |repo, _| repo.change_branch(name.clone()))
+                            .update(cx, |repo, _| repo.change_branch(target.clone()))
                             .await
                             .map_err(|_| anyhow!("checkout was cancelled"))
                             .and_then(|result| result)
@@ -869,11 +1069,13 @@ impl BranchesDelegate {
                         }
                         // Checking out a remote branch creates the local tracking branch.
                         let local = if is_remote {
-                            name.split_once('/')
+                            target
+                                .split_once('/')
+                                .filter(|_| target == name)
                                 .map(|(_, local)| local.to_string())
-                                .unwrap_or(name.clone())
+                                .unwrap_or(target.clone())
                         } else {
-                            name.clone()
+                            target.clone()
                         };
                         let outcome = cx
                             .update(|_, cx| GitCli::rebase(&repo, &current, cx))?
@@ -888,6 +1090,7 @@ impl BranchesDelegate {
                     },
                 );
             }
+            BranchAction::Delete if row.branch.is_remote() => self.delete_remote(row, window, cx),
             BranchAction::Delete => self.delete(name, window, cx),
         }
     }
@@ -936,19 +1139,69 @@ impl BranchesDelegate {
             cx.emit(DismissEvent);
             return;
         }
-        let name = row.branch.name().to_string();
+        let plan = checkout_plan(row, &self.branches);
         self.spawn_operation(
             window,
             cx,
             async move |repo, cx: &mut AsyncWindowContext| {
-                let result = repo
-                    .update(cx, |repo, _| repo.change_branch(name.clone()))
+                let target = checkout_target(plan, cx).await?;
+                checkout_with_smart_fallback(&repo, target, cx).await
+            },
+        );
+    }
+
+    /// Deletes a remote branch with `git push <remote> :<branch>` through Zed's push, which
+    /// asks for credentials in Zed's askpass modal.
+    fn delete_remote(
+        &mut self,
+        row: &BranchRow,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        let name = row.branch.name().to_string();
+        let Some(remote) = row.branch.remote_name().map(str::to_string) else {
+            return;
+        };
+        let Some(branch) = name.strip_prefix(&format!("{remote}/")).map(str::to_string) else {
+            return;
+        };
+        let workspace = self.workspace.clone();
+        self.spawn_operation(
+            window,
+            cx,
+            async move |repo, cx: &mut AsyncWindowContext| {
+                let answer = cx.update(|window, cx| {
+                    window.prompt(
+                        PromptLevel::Warning,
+                        &format!("Delete remote branch '{name}'?"),
+                        Some(&format!("The branch '{branch}' is deleted on '{remote}'.")),
+                        &["Delete", "Cancel"],
+                        cx,
+                    )
+                })?;
+                if answer.await != Ok(0) {
+                    return Err(anyhow!(CANCELLED));
+                }
+                let askpass = cx.update(|window, cx| {
+                    askpass_delegate(workspace, format!("git push {remote} --delete"), window, cx)
+                })?;
+                let pushed = repo
+                    .update(cx, |repo, cx| {
+                        repo.push(
+                            SharedString::default(),
+                            branch.clone().into(),
+                            remote.clone().into(),
+                            None,
+                            askpass,
+                            cx,
+                        )
+                    })
                     .await
-                    .map_err(|_| anyhow!("checkout was cancelled"))
+                    .map_err(|_| anyhow!("delete was cancelled"))
                     .and_then(|result| result);
-                Ok(match result {
-                    Ok(()) => OutcomeToast::success(format!("Checked out '{name}'")),
-                    Err(error) => OutcomeToast::error("Checkout failed", &format!("{error:#}")),
+                Ok(match pushed {
+                    Ok(_) => OutcomeToast::success(format!("Deleted remote branch '{name}'")),
+                    Err(error) => OutcomeToast::error("Delete failed", &format!("{error:#}")),
                 })
             },
         );
@@ -1097,6 +1350,40 @@ impl BranchesDelegate {
 
 /// An `Err` with this message from an operation means the user cancelled: no toast.
 const CANCELLED: &str = "cancelled by the user";
+
+/// Asks for credentials in Zed's askpass modal, as the git panel's push does.
+fn askpass_delegate(
+    workspace: WeakEntity<Workspace>,
+    operation: String,
+    window: &mut Window,
+    cx: &mut App,
+) -> AskPassDelegate {
+    let operation = SharedString::from(operation);
+    let window = window.window_handle();
+    AskPassDelegate::new_with_cancellation(
+        &mut cx.to_async(),
+        move |prompt, tx, cancellation, cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.toggle_modal(window, cx, |window, cx| {
+                                AskPassModal::new(
+                                    operation.clone(),
+                                    prompt.into(),
+                                    tx,
+                                    cancellation,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        })
+                        .ok();
+                })
+                .ok();
+        },
+    )
+}
 
 /// A merge or rebase refuses to start while git has one in progress, and the unmerged paths
 /// left by it would make the refusal look like new conflicts: say what is in progress instead.
