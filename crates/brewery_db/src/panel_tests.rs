@@ -8,7 +8,10 @@ use util::path;
 use workspace::notifications::NotificationId;
 
 fn rendered_rows(panel: &Entity<DatabasePanel>, cx: &mut VisualTestContext) -> usize {
-    panel.update_in(cx, |panel, _, cx| panel.render_rows(cx).len())
+    panel.update_in(cx, |panel, _, cx| {
+        let count = panel.tree().rows().len();
+        panel.render_rows(0..count, cx).len()
+    })
 }
 
 fn select_source(fixture: &Fixture, id: &str, cx: &mut VisualTestContext) {
@@ -869,4 +872,43 @@ async fn other_failures_do_not_open_a_dialog(cx: &mut TestAppContext) {
         .update(cx, |panel, cx| panel.toggle(RowKey::data_source("c2"), cx));
     cx.run_until_parked();
     assert!(fixture.modal(cx).is_none());
+}
+
+#[gpui::test]
+async fn a_schema_with_thousands_of_tables_builds_only_the_rows_on_screen(cx: &mut TestAppContext) {
+    let (fixture, cx) = shown_panel(cx).await;
+    fixture.state.many_tables.set(5000);
+    expand_public(&fixture, cx);
+    let total = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.tree().rows().len());
+    assert_eq!(
+        total,
+        2 + 1 + 5000,
+        "two data sources, public and its tables"
+    );
+    let shown = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.last_rendered_rows())
+        .expect("the list should have rendered rows");
+    assert_eq!(shown.start, 0);
+    assert!(
+        shown.len() < 200,
+        "only the rows on screen are built, not {}",
+        shown.len()
+    );
+
+    // Selecting the last row scrolls it into view.
+    fixture.panel.update_in(cx, |panel, window, cx| {
+        panel.select_previous(&menu::SelectPrevious, window, cx)
+    });
+    cx.run_until_parked();
+    let shown = fixture
+        .panel
+        .read_with(cx, |panel, _| panel.last_rendered_rows())
+        .unwrap();
+    assert!(
+        shown.contains(&(total - 1)),
+        "{shown:?} should show the last row"
+    );
 }

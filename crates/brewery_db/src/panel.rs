@@ -14,11 +14,13 @@ use brewery_daemon_client::{
 };
 use gpui::{
     Action, AnyWindowHandle, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Entity,
-    EventEmitter, FocusHandle, Focusable, Pixels, PromptLevel, Render, ScrollHandle, SharedString,
-    Subscription, Task, WeakEntity, Window, px,
+    EventEmitter, FocusHandle, Focusable, Pixels, PromptLevel, Render, ScrollStrategy,
+    SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, px,
+    uniform_list,
 };
 use project::Project;
 use settings::{RegisterSetting, Settings};
+use std::ops::Range;
 use std::sync::Arc;
 use ui::{
     ContextMenu, Disclosure, ListItem, ListItemSpacing, Tooltip, prelude::*, right_click_menu,
@@ -68,7 +70,9 @@ pub struct DatabasePanel {
     /// being updated, when reading the workspace entity panics.
     project: Entity<Project>,
     focus_handle: FocusHandle,
-    scroll_handle: ScrollHandle,
+    scroll_handle: UniformListScrollHandle,
+    /// The rows the list built last.
+    last_rendered: Option<Range<usize>>,
     daemon: Option<Entity<ProjectDaemon>>,
     _daemon_events: Option<Subscription>,
     status: Status,
@@ -110,7 +114,8 @@ impl DatabasePanel {
             workspace,
             project,
             focus_handle: cx.focus_handle(),
-            scroll_handle: ScrollHandle::new(),
+            scroll_handle: UniformListScrollHandle::new(),
+            last_rendered: None,
             daemon: None,
             _daemon_events: None,
             status: Status::Waiting,
@@ -138,6 +143,10 @@ impl DatabasePanel {
             self.introspect(fetch, cx);
         }
         cx.notify();
+    }
+
+    pub fn last_rendered_rows(&self) -> Option<Range<usize>> {
+        self.last_rendered.clone()
     }
 
     pub fn tree(&self) -> &DbTree {
@@ -655,7 +664,8 @@ impl DatabasePanel {
                 .iter()
                 .position(|row| row.key() == Some(next.clone()))
             {
-                self.scroll_handle.scroll_to_item(ix);
+                self.scroll_handle
+                    .scroll_to_item(ix, ScrollStrategy::Nearest);
             }
             self.selected = Some(next);
             cx.notify();
@@ -893,11 +903,19 @@ impl DatabasePanel {
         }
     }
 
-    pub(crate) fn render_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The tree rows in `range` (clamped to the rows there are); the list renders only those
+    /// that are on screen.
+    pub(crate) fn render_rows(
+        &self,
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let panel = cx.weak_entity();
         self.rows()
             .into_iter()
             .enumerate()
+            .skip(range.start)
+            .take(range.len())
             .map(|(ix, row)| {
                 let icon = Self::row_icon(&row);
                 match &row {
@@ -1097,13 +1115,22 @@ impl Render for DatabasePanel {
                         cx.listener(|this, _, window, cx| this.add_data_source(window, cx)),
                     ))
                     .into_any_element(),
-                None => v_flex()
-                    .id("db-panel-rows")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll_handle)
-                    .children(self.render_rows(cx))
-                    .into_any_element(),
+                // Uniform `ListItem`s: only the rows on screen are built, so a schema with
+                // thousands of tables stays quick.
+                None => uniform_list(
+                    "db-panel-rows",
+                    self.tree.rows().len(),
+                    cx.processor(|this, range: Range<usize>, _window, cx| {
+                        // `uniform_list` first renders row 0 alone to measure it.
+                        if range != (0..1) || this.tree.rows().len() == 1 {
+                            this.last_rendered = Some(range.clone());
+                        }
+                        this.render_rows(range, cx)
+                    }),
+                )
+                .flex_1()
+                .track_scroll(&self.scroll_handle)
+                .into_any_element(),
             };
         v_flex()
             .key_context("DatabasePanel")

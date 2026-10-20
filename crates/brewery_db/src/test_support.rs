@@ -37,6 +37,8 @@ pub struct FakeState {
     pub held: RefCell<Vec<(String, oneshot::Sender<()>)>>,
     /// Replaces the `db/schema` answer of `schema()`.
     pub schema_reply: RefCell<Option<Value>>,
+    /// When set, `public` lists this many tables instead of the usual two nodes.
+    pub many_tables: Cell<usize>,
     /// Between a `begin` and a `commit` or `rollback`.
     pub in_transaction: Cell<bool>,
 }
@@ -198,6 +200,14 @@ impl FakeState {
                     [] => json!([
                         { "name": "public", "kind": "schema", "path": ["public"], "hasChildren": true }
                     ]),
+                    ["public"] if self.many_tables.get() > 0 => Value::Array(
+                        (0..self.many_tables.get())
+                            .map(|ix| {
+                                let name = format!("t{ix:05}");
+                                json!({ "name": name, "kind": "table", "path": ["public", name], "hasChildren": true })
+                            })
+                            .collect(),
+                    ),
                     ["public"] => json!([
                         { "name": "owners", "kind": "table", "path": ["public", "owners"], "hasChildren": true },
                         { "name": "owners_id_seq", "kind": "sequence", "path": ["public", "owners_id_seq"], "hasChildren": false, "detail": "integer" }
