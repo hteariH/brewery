@@ -4295,7 +4295,9 @@ async fn test_collapse_selected_entry_does_not_scroll_visible_parent(cx: &mut Te
                 "f.rs": "",
             }
         }),
-        size(px(800.), px(160.)),
+        // brewery: 140 instead of 160: with 23 px rows (as here on Windows) src, the 6th row,
+        // fits in a 160 px window, so scrolling it to the bottom would not move the list.
+        size(px(800.), px(140.)),
         cx,
     )
     .await;
@@ -12434,6 +12436,8 @@ async fn test_focus_follows_mouse_into_blank_area(cx: &mut gpui::TestAppContext)
                     enabled: Some(true),
                     debounce_ms: Some(100),
                 });
+                // brewery: Brewery docks the project panel left; this test hovers the right dock.
+                settings.project_panel.get_or_insert_default().dock = Some(DockSide::Right);
             });
         });
     });

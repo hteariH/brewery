@@ -14570,6 +14570,15 @@ mod tests {
     #[gpui::test]
     async fn test_history_tab_pane_navigation_focuses_rendered_panel(cx: &mut TestAppContext) {
         init_test(cx);
+        // brewery: Brewery docks the git panel left; this test navigates right into it.
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.git_panel.get_or_insert_default().dock =
+                        Some(settings::DockPosition::Right);
+                });
+            });
+        });
 
         let (_, _project, workspace, panel, mut cx) =
             setup_git_panel_with_changes(cx, json!({ ".git": {} }), &[]).await;

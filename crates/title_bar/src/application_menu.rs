@@ -386,6 +386,8 @@ mod tests {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
             DisableAiSettings::register(cx);
+            // brewery: Brewery ships with AI disabled; these tests start from upstream's default.
+            DisableAiSettings::override_global(DisableAiSettings { disable_ai: false }, cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
         });
     }

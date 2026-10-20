@@ -20301,7 +20301,19 @@ pub fn init_test(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
+        brewery_enable_ai(cx); // brewery:
         release_channel::init(semver::Version::new(0, 0, 0), cx);
+    });
+}
+
+// brewery: Brewery ships with AI disabled; these upstream tests assume Zed's default. It is set
+// in the default settings because `disable_ai` saturates (a later `false` cannot undo a `true`)
+// and an override would not survive a settings recompute.
+pub fn brewery_enable_ai(cx: &mut gpui::App) {
+    SettingsStore::update_global(cx, |store, cx| {
+        store.update_default_settings(cx, |settings| {
+            settings.project.disable_ai = Some(settings::settings_content::SaturatingBool(false));
+        });
     });
 }
 
@@ -21328,6 +21340,7 @@ mod disable_ai_settings_tests {
     async fn test_disable_ai_settings_security(cx: &mut TestAppContext) {
         cx.update(|cx| {
             settings::init(cx);
+            crate::brewery_enable_ai(cx); // brewery:
 
             // Test 1: Default is false (AI enabled)
             assert!(
@@ -21376,6 +21389,7 @@ mod disable_ai_settings_tests {
 
         cx.update(|cx| {
             settings::init(cx);
+            crate::brewery_enable_ai(cx); // brewery:
 
             // Default should allow AI
             assert!(

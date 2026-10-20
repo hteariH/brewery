@@ -564,6 +564,7 @@ async fn test_context_server_respects_disable_ai(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
+        crate::brewery_enable_ai(cx); // brewery:
         DisableAiSettings::register(cx);
         // Set disable_ai via user settings (not override_global) so it persists through recompute_values
         SettingsStore::update_global(cx, |store, cx| {
@@ -672,6 +673,7 @@ async fn test_context_server_loaded_when_first_worktree_added(cx: &mut TestAppCo
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
+        crate::brewery_enable_ai(cx); // brewery:
     });
     set_context_server_configuration(
         vec![(
@@ -739,6 +741,7 @@ async fn test_stdio_server_restarts_when_project_root_becomes_available(cx: &mut
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
+        crate::brewery_enable_ai(cx); // brewery:
     });
 
     // Open a single-file worktree, whose `root_dir()` is `None`, so the server is
@@ -1417,6 +1420,7 @@ async fn test_context_server_global_timeout(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
+        crate::brewery_enable_ai(cx); // brewery:
         SettingsStore::update_global(cx, |store, cx| {
             store
                 .set_user_settings(r#"{"context_server_timeout": 90}"#, cx)
@@ -1463,6 +1467,7 @@ async fn test_context_server_per_server_timeout_override(cx: &mut TestAppContext
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
+        crate::brewery_enable_ai(cx); // brewery:
         SettingsStore::update_global(cx, |store, cx| {
             store
                 .set_user_settings(r#"{"context_server_timeout": 60}"#, cx)
@@ -1601,6 +1606,7 @@ async fn test_multi_worktree_context_server_settings(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
+        crate::brewery_enable_ai(cx); // brewery:
     });
 
     // Create project with only project_a initially
@@ -1699,6 +1705,7 @@ async fn test_multi_worktree_duplicate_server_first_wins(cx: &mut TestAppContext
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
+        crate::brewery_enable_ai(cx); // brewery:
     });
 
     // Create project with both worktrees
@@ -1858,6 +1865,7 @@ async fn setup_context_server_test(
     cx.update(|cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
+        crate::brewery_enable_ai(cx); // brewery:
         let mut settings = ProjectSettings::get_global(cx).clone();
         for (id, config) in context_server_configurations {
             settings.context_servers.insert(id, config);

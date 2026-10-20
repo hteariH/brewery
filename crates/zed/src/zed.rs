@@ -3271,7 +3271,8 @@ mod tests {
             .update(cx, |multi_workspace, window, cx| {
                 multi_workspace.workspace().update(cx, |workspace, cx| {
                     assert_eq!(workspace.worktrees(cx).count(), 2);
-                    assert!(workspace.right_dock().read(cx).is_open());
+                    // brewery: the project panel docks left (IntelliJ placement)
+                    assert!(workspace.left_dock().read(cx).is_open());
                     assert!(
                         workspace
                             .active_pane()
@@ -5555,8 +5556,20 @@ mod tests {
             client::init(&app_state.client, cx);
             workspace::init(app_state.clone(), cx);
             onboarding::init(cx);
+            brewery_enable_ai(cx); // brewery:
             app_state
         })
+    }
+
+    // brewery: Brewery ships with AI disabled; these upstream tests assume Zed's default. It is
+    // set in the default settings because `disable_ai` saturates (a later `false` cannot undo a
+    // `true`) and an override would not survive a settings recompute.
+    fn brewery_enable_ai(cx: &mut App) {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_default_settings(cx, |settings| {
+                settings.project.disable_ai = Some(SaturatingBool(false));
+            });
+        });
     }
 
     actions!(test_only, [ActionA, ActionB]);
@@ -6282,6 +6295,7 @@ mod tests {
             call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
             notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
             workspace::init(app_state.clone(), cx);
+            brewery_enable_ai(cx); // brewery:
             release_channel::init(Version::new(0, 0, 0), cx);
             command_palette::init(cx);
             editor::init(cx);

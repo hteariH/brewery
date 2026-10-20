@@ -27,7 +27,7 @@
 
     git checkout main
     script/brewery/merge-upstream
-    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p extension_host -p util -p extension_suggest -p diagnostics -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
+    cargo test -p brewery_cloud -p brewery_core -p brewery_theme -p release_channel -p paths -p settings -p theme_settings -p client -p brewery_run_widget -p brewery_search_everywhere -p file_finder -p brewery_daemon_client -p brewery_spring_config -p brewery_build -p brewery_services -p brewery_db -p brewery_git -p brewery_bundle -p cli -p auto_update -p auto_update_ui -p extension_host -p util -p extension_suggest -p diagnostics -p project -p title_bar -p git_ui -p project_panel -p zed -- --skip test_extension_store_with_test_extension --skip test_kill_terminates_grandchildren --skip test_drop_terminates_grandchildren
     cargo test -p workspace --lib
     script/brewery/list-hooks   # every hook still present?
 
