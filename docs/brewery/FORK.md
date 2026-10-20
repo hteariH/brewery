@@ -253,9 +253,10 @@ A release is a tag. Everything is built by `.github/workflows/brewery_release.ym
 calls `brewery_ci.yml` for the `stable` channel, so the packages are the ones CI already
 installs and smoke-tests.
 
-1. Set `crates/zed/BREWERY_VERSION` (for example `0.1.0`, or `0.1.0-rc.1`), add a
-   `## <version>` section to `CHANGELOG.md` (without one the release gets a generic install
-   note), merge to `main`.
+1. Set `crates/zed/BREWERY_VERSION` (for example `0.1.0`, or `0.1.0-rc.1`), run
+   `python script/brewery/sync_brewery_lite.py` (Brewery Lite's version follows it), rename
+   `## Unreleased` in `CHANGELOG.md` to `## <version>` (or add a `## <version>` section;
+   without one the release gets a generic install note) before tagging, merge to `main`.
 2. Dry run: `gh workflow run brewery_release.yml --ref main -R hteariH/brewery`
    (`dry_run` defaults to true). It builds, packages and tests everything, and uploads the
    release files as the `release-files` artifact (`assets/`, `winget/`, `aur/` and
@@ -368,7 +369,8 @@ Without Zed, the two servers can be smoke-tested on the daemon jar directly
       '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"spring_endpoints"}}' \
       | java -jar ../../../../../build/libs/brewery-daemon-all.jar --mcp
 
-    # Spring config LSP: answers initialize with completion and hover
+    # Spring config LSP: answers initialize and advertises completion and hover capabilities
+    # (it checks the initialize result only; it does not request a completion or a hover)
     python script/brewery/lsp_smoke.py --project brewery-daemon/src/test/resources/projects/spring-petshop \
       -- java -jar "$PWD/brewery-daemon/build/libs/brewery-daemon-all.jar" --spring-config-lsp
 
@@ -409,9 +411,10 @@ with it and add the `wasm32-wasip2` target themselves).
 ### Publishing
 
 After the release `v<version>` (with its jar) is published, open a PR to
-[zed-industries/extensions](https://github.com/zed-industries/extensions) that adds this
-repository as a git submodule (`extensions/brewery-lite`) and an entry in its
-`extensions.toml`:
+[zed-industries/extensions](https://github.com/zed-industries/extensions) that adds a
+repository holding the extension as a git submodule (`extensions/brewery-lite`, with an
+HTTPS URL such as `https://github.com/hteariH/brewery.git`, never an SSH one: the registry's
+CI clones submodules anonymously) and an entry in its `extensions.toml`:
 
 ```toml
 [brewery-lite]
@@ -425,3 +428,16 @@ commit and `version` in a new PR to that repository; the registry's version must
 `extension.toml`, and the release `v<version>` must be published first, or the published
 extension cannot download its daemon. Read that repository's README for its current rules
 (licence file, naming, CI checks) before each first submission.
+
+Using this repository as the submodule makes the registry clone the whole Brewery repository
+(a full Zed fork, gigabytes of history) for a small extension, and its maintainers may refuse
+that. The alternative is a small mirror repository with only `extensions/brewery-lite` at its
+root, for example `hteariH/brewery-lite`, refreshed for each release:
+
+    # the split is deterministic, so each release's split extends the previous one
+    split=$(git subtree split --prefix=extensions/brewery-lite v<version>)
+    git push https://github.com/hteariH/brewery-lite.git "$split:refs/heads/main" "$split:refs/tags/v<version>"
+
+The submodule then points at the mirror (`https://github.com/hteariH/brewery-lite.git`) and
+the registry entry drops `path`, since the extension is the mirror's root. The extension
+still downloads its daemon from `hteariH/brewery` releases, so nothing else changes.
