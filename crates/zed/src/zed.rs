@@ -2910,6 +2910,10 @@ pub(crate) fn eager_load_active_theme_and_icon_theme(fs: Arc<dyn Fs>, cx: &mut A
     }
 }
 
+// brewery: the JetBrains keymap tests, per platform
+#[cfg(test)]
+mod brewery_keymap_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5659,67 +5663,6 @@ mod tests {
         assert_eq!(
             emacs_bindings_for("ctrl-p", selection_mode, cx).first(),
             Some(&"editor::SelectUp".to_string())
-        );
-    }
-
-    /// The actions the default keymap plus the given base keymap and the specific overrides resolve
-    /// for `keystroke` along `contexts` (root first), most specific binding first.
-    fn base_keymap_bindings_for(
-        base: &str,
-        keystroke: &str,
-        contexts: &[&str],
-        cx: &mut TestAppContext,
-    ) -> Vec<String> {
-        cx.update(|cx| {
-            let mut bindings = Vec::new();
-            for (path, source) in [
-                ("keymaps/default-linux.json", settings::KeybindSource::Default),
-                (base, settings::KeybindSource::Base),
-                ("keymaps/specific-overrides.json", settings::KeybindSource::Base),
-            ] {
-                let mut loaded =
-                    settings::KeymapFile::load_asset_allow_partial_failure(path, cx).unwrap();
-                for binding in &mut loaded {
-                    binding.set_meta(source.meta());
-                }
-                bindings.extend(loaded);
-            }
-            let contexts = contexts
-                .iter()
-                .map(|context| gpui::KeyContext::parse(context).unwrap())
-                .collect::<Vec<_>>();
-            gpui::Keymap::new(bindings)
-                .bindings_for_input(&[gpui::Keystroke::parse(keystroke).unwrap()], &contexts)
-                .0
-                .iter()
-                .map(|binding| binding.action().name().to_string())
-                .collect()
-        })
-    }
-
-    // brewery: ctrl-k is the Commit tool window's "focus the message" key, alt-0 still toggles it.
-    #[gpui::test]
-    fn test_jetbrains_commit_keys(cx: &mut TestAppContext) {
-        init_keymap_test(cx);
-        let base = "keymaps/linux/jetbrains.json";
-
-        let in_panel = ["Workspace", "Dock", "GitPanel", "ChangesList"];
-        assert_eq!(
-            base_keymap_bindings_for(base, "ctrl-k", &in_panel, cx).first(),
-            Some(&"git_panel::FocusEditor".to_string())
-        );
-        // Outside the panel ctrl-k still opens it.
-        assert_eq!(
-            base_keymap_bindings_for(base, "ctrl-k", &["Workspace", "Pane", "Editor"], cx).first(),
-            Some(&"git_panel::ToggleFocus".to_string())
-        );
-        assert_eq!(
-            base_keymap_bindings_for(base, "alt-0", &["Workspace", "Pane", "Editor"], cx).first(),
-            Some(&"git_panel::ToggleFocus".to_string())
-        );
-        assert_eq!(
-            base_keymap_bindings_for(base, "alt-0", &in_panel, cx).first(),
-            Some(&"workspace::CloseActiveDock".to_string())
         );
     }
 

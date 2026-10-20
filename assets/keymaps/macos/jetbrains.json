@@ -3,7 +3,9 @@
     "bindings": {
       "cmd-{": "pane::ActivatePreviousItem",
       "cmd-}": "pane::ActivateNextItem",
-      "cmd-0": "git_panel::ToggleFocus", // overrides `cmd-0` zoom reset
+      // brewery: cmd-0 is the Commit tool window (Workspace and Pane below). A context-less binding
+      // here would beat the GitPanel block's cmd-0, so the zoom reset is unbound instead.
+      "cmd-0": ["zed::Unbind", "zed::ResetBufferFontSize"],
       "shift-escape": null, // Unmap workspace::zoom
       "cmd-~": "git::Branch",
       "ctrl-f2": "debugger::Stop",
@@ -127,6 +129,7 @@
       "cmd-f5": "task::Rerun",
       "cmd-e": "file_finder::Toggle",
       "cmd-k": "git_panel::ToggleFocus", // opens the Commit tool window; inside it, see the GitPanel block below
+      "cmd-0": "git_panel::ToggleFocus",
       "cmd-shift-o": "file_finder::Toggle",
       "cmd-shift-n": "file_finder::Toggle",
       "cmd-n": "project_symbols::Toggle",
