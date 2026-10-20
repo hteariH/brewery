@@ -83,7 +83,8 @@ jobs:
             rust:
               - 'crates/**'
               - 'tooling/**'
-              - 'extensions/**'
+              # Every extension but Brewery Lite, which is outside the workspace (job brewery-lite).
+              - 'extensions/!(brewery-lite)/**'
               - 'assets/**'
               - 'brewery-daemon/protocol/**'
               - 'Cargo.toml'

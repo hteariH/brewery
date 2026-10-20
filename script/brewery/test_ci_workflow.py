@@ -68,10 +68,21 @@ class CacheWriteTests(unittest.TestCase):
 
 
 def glob_regex(pattern):
-    """dorny/paths-filter (picomatch) globs, as far as brewery_ci.yml uses them."""
+    """dorny/paths-filter (picomatch) globs, as far as brewery_ci.yml uses them. `!(name)` is a
+    path segment that does not start with name (picomatch also rejects `name-suffix` there)."""
     out = ""
-    for part in re.split(r"(\*\*/|\*\*|\*)", pattern):
+    # A trailing `/**` also matches the directory's own name (picomatch: `extensions/!(x)/**`
+    # matches `extensions/README.md`).
+    tail = pattern.endswith("/**")
+    if tail:
+        pattern = pattern[:-3]
+    for part in re.split(r"(\*\*/|\*\*|\*|!\([^)/]*\))", pattern):
+        if part.startswith("!("):
+            out += f"(?!{re.escape(part[2:-1])})[^/]*"
+            continue
         out += {"**/": "(?:.*/)?", "**": ".*", "*": "[^/]*"}.get(part, re.escape(part))
+    if tail:
+        out += "(?:/.*)?"
     return re.compile(out + r"\Z")
 
 
@@ -100,7 +111,7 @@ class PathsFilterTests(unittest.TestCase):
             self.assertTrue(filter_matches("bundle", path), path)
 
     def test_bundle_filter_skips_unrelated_paths(self):
-        for path in ["crates/editor/src/editor.rs", "docs/src/README.md", "packaging"]:
+        for path in ["crates/editor/src/editor.rs", "docs/src/README.md", "packaging.md"]:
             self.assertFalse(filter_matches("bundle", path), path)
 
     def test_lite_filter_covers_the_extension_and_what_is_synced_into_it(self):
@@ -117,6 +128,18 @@ class PathsFilterTests(unittest.TestCase):
             self.assertTrue(filter_matches("lite", path), path)
         for path in ["crates/editor/src/editor.rs", "extensions/html/src/html.rs"]:
             self.assertFalse(filter_matches("lite", path), path)
+
+    def test_rust_filter_skips_brewery_lite(self):
+        # Brewery Lite is not a workspace member; the brewery-lite job covers it.
+        for path in ["extensions/brewery-lite/src/lib.rs", "extensions/brewery-lite/README.md"]:
+            self.assertFalse(filter_matches("rust", path), path)
+        for path in [
+            "extensions/html/src/html.rs",
+            "extensions/glsl/extension.toml",
+            "extensions/README.md",
+            "crates/editor/src/editor.rs",
+        ]:
+            self.assertTrue(filter_matches("rust", path), path)
 
     def test_lite_job_runs_on_the_lite_output(self):
         jobs = load(WORKFLOW)["jobs"]
