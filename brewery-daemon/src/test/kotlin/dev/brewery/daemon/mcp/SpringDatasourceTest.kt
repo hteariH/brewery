@@ -92,4 +92,16 @@ class SpringDatasourceTest {
     fun `no datasource gives null`() {
         assertNull(SpringDatasource.find(project("$res/application.yml" to "server.port: 8080")) { null })
     }
+
+    @Test
+    fun `properties wins over yaml within a module like in Spring Boot`() {
+        val root = project(
+            "$res/application.yml" to "spring.datasource.url: jdbc:sqlite:yml.db",
+            "$res/application.yaml" to "spring.datasource.url: jdbc:sqlite:yaml.db",
+            "$res/application.properties" to "spring.datasource.url=jdbc:sqlite:props.db",
+        )
+        assertEquals("jdbc:sqlite:props.db", SpringDatasource.find(root) { null }!!.url)
+        Files.delete(root.resolve("$res/application.properties"))
+        assertEquals("jdbc:sqlite:yml.db", SpringDatasource.find(root) { null }!!.url)
+    }
 }

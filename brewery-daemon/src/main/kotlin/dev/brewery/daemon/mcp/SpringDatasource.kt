@@ -14,11 +14,12 @@ data class Datasource(val url: String, val username: String?, val password: Stri
 /**
  * Finds the project's `spring.datasource.*` in `src/main/resources/application.{yml,yaml,properties}`.
  * Only the default profile counts: the first YAML document and the plain properties file. The root
- * module's file wins, then modules in path order.
+ * module's file wins, then modules in path order; within a module `.properties` wins over `.yml`/`.yaml`.
  */
 object SpringDatasource {
     private val SKIP = setOf("build", "target", "out", "node_modules", ".gradle", ".git", ".idea")
-    private val NAMES = listOf("application.yml", "application.yaml", "application.properties")
+    // Spring Boot precedence within one location: .properties over .yml over .yaml.
+    private val NAMES = listOf("application.properties", "application.yml", "application.yaml")
     private val PLACEHOLDER = Regex("""\$\{([^}:]+)(?::([^}]*))?}""")
     private const val MAX_DEPTH = 6
 
@@ -48,7 +49,7 @@ object SpringDatasource {
                 return FileVisitResult.CONTINUE
             }
         })
-        // Root module first (fewest path segments), then path order; yml before properties within a module.
+        // Root module first (fewest path segments), then path order; properties before yml within a module.
         return found.sortedWith(compareBy<Path>({ root.relativize(it).nameCount }, { it.parent.toString() }, { NAMES.indexOf(it.fileName.toString()) }))
     }
 
