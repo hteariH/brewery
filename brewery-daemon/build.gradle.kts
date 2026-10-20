@@ -129,6 +129,14 @@ tasks.shadowJar {
     // INCLUDE lets the service-file merger see every copy (java.sql.Driver lists one driver per jar).
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
     mergeServiceFiles()
+    // The MCP server reports this (Main.kt daemonVersion()); the jar ships with the Brewery release.
+    manifest {
+        attributes(
+            "Implementation-Version" to
+                providers.fileContents(rootProject.layout.projectDirectory.file("../crates/zed/BREWERY_VERSION"))
+                    .asText.map { it.trim() },
+        )
+    }
 }
 
 // CI: the Bundle jobs only build the jar, yet share the Daemon job's setup-java Gradle cache (one key

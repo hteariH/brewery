@@ -240,6 +240,7 @@ class AssembleTests(unittest.TestCase):
             "package-windows-x64": ["windows"],
             "package-linux-x64": ["linux", "deb", "rpm"],
             "package-macos-aarch64": ["macos"] if macos else [],
+            "package-daemon": ["daemon"],
         }
         for artifact, keys in layout.items():
             (root / artifact).mkdir(parents=True)

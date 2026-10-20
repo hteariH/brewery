@@ -65,6 +65,7 @@ def package_names(version: str) -> dict:
         "deb": f"brewery_{version}_amd64.deb",
         "rpm": f"brewery-{version}-1.x86_64.rpm",
         "macos": f"brewery-{version}-macos-aarch64.zip",
+        "daemon": f"brewery-daemon-{version}.jar",
     }
 
 

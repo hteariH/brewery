@@ -281,6 +281,19 @@ jobs:
           name: brewery-daemon-${{ matrix.os }}
           path: brewery-daemon/build/libs/brewery-daemon-all.jar
           retention-days: 14
+      # The release attaches the daemon jar for Brewery Lite (extensions/brewery-lite downloads it).
+      - name: Name the daemon jar for the release
+        if: matrix.os == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          mkdir -p target/package-daemon
+          cp brewery-daemon/build/libs/brewery-daemon-all.jar "target/package-daemon/brewery-daemon-$(tr -d '[:space:]' < crates/zed/BREWERY_VERSION).jar"
+      - if: matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-daemon
+          path: target/package-daemon
+          retention-days: 14
 
   # The offline bundle (script/brewery/fetch_bundle_deps.py): pinned, checksum-verified
   # downloads, a jlinked JRE (jlink only links for its own OS, hence the matrix), the
