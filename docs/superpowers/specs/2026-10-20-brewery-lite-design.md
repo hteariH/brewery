@@ -21,8 +21,8 @@ Out of scope: gutter debugging (the extension API lacks the `finalize_substitute
 - `extension.toml`: id `brewery-lite`, name "Brewery Lite", version equal to `crates/zed/BREWERY_VERSION`, licence Apache-2.0, repository `https://github.com/hteariH/brewery`.
   - `[language_servers.brewery-spring-config]` with `languages = ["YAML", "Properties"]`.
   - `[context_servers.brewery]`.
-  - `[[capabilities]] kind = "process:exec", command = "java", args = ["-version"]` and the same for the downloaded JRE's `java` (any path, `-version` only).
-- `Cargo.toml`: `cdylib`, `zed_extension_api` from crates.io (the version matching `crates/extension_api`, 0.8.0), `sha2` for checksum checks. Not a member of the main workspace (it targets `wasm32-wasip2`).
+  - `[[capabilities]] kind = "process:exec", command = "java", args = ["-version"]` (the downloaded JRE is never probed: its version is known).
+- `Cargo.toml`: `cdylib`, `zed_extension_api = "0.7.0"` from crates.io (the newest published; 0.8.0 exists only in this tree), `sha2` for checksum checks. Not a member of the main workspace (it targets `wasm32-wasip2`).
 - `src/lib.rs`: the `Extension` impl; `src/java.rs`, `src/daemon_jar.rs`: provisioning with pure, natively testable helpers.
 - `themes/brewery.json`: copy of `assets/themes/brewery/brewery.json`.
 - `icon_themes/brewery-icons.json` and `icons/`: copy of `crates/brewery_theme/icons` (with its NOTICE).
@@ -39,7 +39,7 @@ Daemon jar:
 - Verified against the release's `SHA256SUMS` before first use; on mismatch the file is deleted and the server fails with a clear message.
 - Older `brewery-daemon-*.jar` files in the work directory are deleted once the current one is in place.
 
-Java 21+, first match wins:
+Java 21+ (the daemon is built with `jvmToolchain(21)`), first match wins:
 1. `java_path` from the extension's settings (`lsp.brewery-spring-config.settings.java_path` for the LSP, the context server's settings for MCP).
 2. LSP only: `JAVA_HOME` from the worktree's shell env, then `which java` in the worktree. MCP has no worktree access, so it skips this step.
 3. `java -version` on PATH via `process:exec`; accepted when the parsed major version is >= 21.
@@ -54,14 +54,14 @@ MCP over stdio: newline-delimited JSON-RPC 2.0, implemented directly with Gson (
 Project root: the process working directory (Zed starts context servers in the first worktree's root and does not send MCP roots).
 
 Tools (results as JSON text content; tool errors as `isError: true` results):
-- `project_model`: build tool, modules, source sets, dependencies, JDK, from `ProjectModelReader`.
+- `project_model` (`refresh` optional): build tool, modules and their tasks, from the Gradle/Maven readers; cached for the process lifetime unless `refresh` is true.
 - `spring_beans`: beans with type, source location and stereotype, from `SpringScanner`.
 - `spring_endpoints`: HTTP endpoints (method, path, handler).
 - `run_configurations`: main classes and Spring Boot applications (`RunConfigurations`).
 - `db_schema` (`table` optional): tables and columns, or one table's columns.
 - `db_query` (`sql`): read-only query, at most 200 rows, returns columns, rows and a `truncated` flag.
 
-Database: the connection comes from the project's Spring config: `spring.datasource.url`, `username`, `password` in `src/main/resources/application.yml` / `application.properties` (default profile; `${ENV:default}` placeholders resolved from the environment). No datasource gives a tool error saying so. Read-only is enforced twice: the JDBC connection is `readOnly` inside a transaction that is always rolled back, and only a single statement starting with `SELECT`, `WITH`, `SHOW`, `EXPLAIN`, `DESCRIBE` or `VALUES` is accepted (comments stripped, using the existing `SqlText` splitter).
+Database: the connection comes from the project's Spring config: `spring.datasource.url`, `username`, `password` in `src/main/resources/application.yml` / `application.properties` (the first YAML document / the plain properties file, i.e. the default profile; `${ENV}` and `${ENV:default}` placeholders resolved from the environment; the root module's file wins, then the first module in path order). No datasource gives a tool error saying so. Read-only is enforced twice: the JDBC connection is `readOnly` inside a transaction that is always rolled back, and only SQL that `SqlText.classify` reports as `READ` is accepted: one SELECT/WITH/VALUES/TABLE/SHOW/EXPLAIN statement without INTO, locking clauses or writes.
 
 ## Release
 
@@ -69,7 +69,7 @@ Database: the connection comes from the project's Spring config: `spring.datasou
 
 ## Testing
 
-- Daemon (Kotlin): MCP protocol round trips over piped streams (initialize, tools/list, each tool on a fixture project, unknown method, malformed line); datasource parsing (yml, properties, placeholders); read-only guard (accepts/rejects); `db_query` against Postgres in a container on CI, plus H2 locally.
+- Daemon (Kotlin): MCP protocol round trips over piped streams (initialize, tools/list, each tool on a fixture project, unknown method, malformed line); datasource parsing (yml, properties, placeholders); read-only guard (accepts/rejects); `db_query` against SQLite locally and Postgres in a container on CI.
 - Extension (Rust): unit tests of the pure helpers on the host target (parse `java -version` output, asset names, SHA256SUMS lookup, Adoptium os/arch mapping); `cargo build --target wasm32-wasip2` in CI.
 - CI: a `brewery-lite` job (path filter `extensions/brewery-lite/**`) building and testing the extension, plus the icon/theme drift check.
 - Manual end to end: install as a dev extension in a Brewery build, confirm the Spring LSP starts on a Spring sample and the MCP tools answer in the agent panel.
