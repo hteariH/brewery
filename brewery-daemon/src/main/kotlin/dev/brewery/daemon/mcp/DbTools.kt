@@ -10,17 +10,35 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.SQLException
+import java.util.Properties
 
 const val MAX_ROWS = 200
 private const val QUERY_TIMEOUT_SECONDS = 30
 
 data class QueryResult(val columns: List<String>, val rows: List<List<String?>>, val truncated: Boolean)
 
-private fun openJdbc(ds: Datasource): Connection = DriverManager.getConnection(ds.url, ds.username, ds.password)
+/** sqlite-jdbc's `SQLITE_OPEN_READONLY`: without CREATE, a missing database file is an error instead of a new file. */
+private const val SQLITE_OPEN_READONLY = "1"
 
 /**
- * Read-only database tools on the project's Spring datasource. Read-only is enforced twice: only SQL that
- * [SqlText.classify] calls a plain read is run, on a read-only connection whose transaction is rolled back.
+ * Opens [ds]. SQLite cannot switch an open connection to read-only, so its file is opened read-only from the start
+ * (sqlite-jdbc's `open_mode` property); other drivers are switched by [DbTools] with `setReadOnly`.
+ */
+internal fun openJdbc(ds: Datasource): Connection {
+    val props = Properties()
+    ds.username?.let { props.setProperty("user", it) }
+    ds.password?.let { props.setProperty("password", it) }
+    if (ds.url.startsWith("jdbc:sqlite:", ignoreCase = true)) props.setProperty("open_mode", SQLITE_OPEN_READONLY)
+    return DriverManager.getConnection(ds.url, props)
+}
+
+/**
+ * Read-only database tools on the project's Spring datasource. Read-only is enforced twice:
+ * - only a single statement that [SqlText.classify] calls a plain read is run;
+ * - it runs on a read-only connection (`setReadOnly(true)`; a connection that refuses it fails the call, it is never
+ *   used writable) inside a transaction that is always rolled back.
+ * How strictly the driver honours a read-only connection is up to the driver: PostgreSQL runs a READ ONLY
+ * transaction, SQLite opens the file read-only (see [openJdbc]).
  */
 class DbTools(
     private val root: Path,
@@ -48,9 +66,8 @@ class DbTools(
             throw McpToolError("Could not connect to ${ds.url} (from ${ds.source}): ${e.message}")
         }
         return connection.use {
-            // SQLite's driver refuses to change the read-only flag once the connection is open; there the
-            // SqlText guard and the rollback below still keep the database unchanged.
-            runCatching { it.isReadOnly = true }
+            // A connection opened read-only (SQLite, see openJdbc) already is; SQLite would throw on the call.
+            if (!it.isReadOnly) it.isReadOnly = true
             it.autoCommit = false
             try {
                 block(it)

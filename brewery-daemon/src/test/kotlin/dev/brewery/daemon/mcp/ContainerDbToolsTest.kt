@@ -9,8 +9,10 @@ import org.junit.jupiter.api.condition.EnabledIf
 import org.testcontainers.postgresql.PostgreSQLContainer
 import java.nio.file.Files
 import java.sql.DriverManager
+import java.sql.SQLException
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 @EnabledIf("dev.brewery.daemon.db.DockerSupport#available", disabledReason = "Docker is not available")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -55,6 +57,9 @@ class ContainerDbToolsTest {
         assertFailsWith<McpToolError> { query("delete from pet") }
         query("select pg_catalog.set_config('x.y','1',false)")
         assertFailsWith<McpToolError> { query("with d as (delete from pet returning 1) select * from d") }
+        // SqlText calls this a read, but it writes the sequence: the READ ONLY transaction must refuse it.
+        val nextval = assertFailsWith<SQLException> { query("select nextval('pet_id_seq')") }
+        assertTrue(nextval.message!!.contains("read-only", ignoreCase = true), nextval.message)
         assertEquals("3", query("select count(*) from pet").rows[0][0])
     }
 }

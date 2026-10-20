@@ -5,8 +5,10 @@ import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.DriverManager
+import java.sql.SQLException
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class DbToolsTest {
@@ -60,6 +62,37 @@ class DbToolsTest {
         val empty = DbTools(Files.createTempDirectory("nods"), env = { null }).tools().associateBy { it.name }
         val e = assertFailsWith<McpToolError> { empty.getValue("db_schema").call(args()) }
         assertTrue(e.message!!.contains("spring.datasource.url"))
+    }
+
+    @Test
+    fun `a missing sqlite file is not created`() {
+        val dir = Files.createTempDirectory("nodb")
+        val missing = dir.resolve("missing.db")
+        val res = dir.resolve("src/main/resources")
+        Files.createDirectories(res)
+        Files.writeString(res.resolve("application.properties"), "spring.datasource.url=jdbc:sqlite:${missing.toString().replace('\\', '/')}\n")
+        val missingTools = DbTools(dir, env = { null }).tools().associateBy { it.name }
+        assertFailsWith<McpToolError> { missingTools.getValue("db_schema").call(args()) }
+        assertFailsWith<McpToolError> { missingTools.getValue("db_query").call(args("sql" to "select 1")) }
+        assertFalse(Files.exists(missing))
+    }
+
+    @Test
+    fun `the sqlite connection itself refuses writes`() {
+        val url = Files.readString(root.resolve("src/main/resources/application.properties")).substringAfter("=").trim()
+        openJdbc(Datasource(url, null, null, root)).use { c ->
+            assertTrue(c.isReadOnly)
+            assertFailsWith<SQLException> { c.createStatement().use { it.executeUpdate("delete from pet") } }
+        }
+        val count = tools.getValue("db_query").call(args("sql" to "select count(*) from pet")) as QueryResult
+        assertEquals("250", count.rows[0][0])
+    }
+
+    @Test
+    fun `a connection that cannot be made read-only is a failure, not a silent downgrade`() {
+        // A writable SQLite connection: the driver refuses to switch it to read-only once open.
+        val writable = DbTools(root, env = { null }, connect = { DriverManager.getConnection(it.url) }).tools().associateBy { it.name }
+        assertFailsWith<SQLException> { writable.getValue("db_query").call(args("sql" to "select 1")) }
     }
 
     @Test
