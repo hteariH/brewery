@@ -12,6 +12,14 @@ open-source Zed-based IDE for Java and Spring, to stock Zed:
 - **Brewery's theme and icons**: the IntelliJ-style "Brewery" theme (dark and light) and the
   "Brewery Icons" icon theme.
 
+Completion and hover come from the configuration metadata in your project's dependency jars
+(`spring-boot-autoconfigure` and friends). The language server resolves them through Gradle
+or Maven when you open the first configuration file, which can take a while on a large build;
+a project without Spring Boot on its classpath gets no completion. The MCP server reads the
+project from its working directory, the project root; the database tools use the
+`spring.datasource.url` (with username and password) in
+`src/main/resources/application.{yml,properties}` and report an error when there is none.
+
 Both servers are the Brewery daemon, a Kotlin program that runs on Java. The extension
 downloads the daemon jar of its own version from the Brewery GitHub release and checks it
 against the release's `SHA256SUMS` before running it.

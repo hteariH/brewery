@@ -3,6 +3,14 @@
 The text under `## <version>` is the top of that version's GitHub Release (install notes and checksums are added below it; see
 "Releasing" in docs/brewery/FORK.md). A version without a section gets a generic intro in its place.
 
+## Unreleased
+
+- Brewery Lite extension for Zed (`extensions/brewery-lite`): Spring Boot configuration completion,
+  the `brewery` MCP server (project model, Spring beans and endpoints, run configurations, read-only
+  database schema and queries) and Brewery's theme and icons in stock Zed. It downloads the Brewery
+  daemon from the GitHub release of the same version.
+- Releases include the Brewery daemon jar (`brewery-daemon-<version>.jar`) for Brewery Lite.
+
 ## 0.1.5
 
 - Databases:

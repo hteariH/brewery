@@ -267,7 +267,8 @@ installs and smoke-tests.
    Windows version assert and the deb/rpm smoke tests yet. If a release for the tag exists,
    `publish` fails: delete the draft (and fix a moved tag) before re-running. A pre-release tag (`v0.1.0-rc.1`) works
    when the file says `0.1.0-rc.1` too; it creates a pre-release draft.
-4. The `publish` job creates a **draft** release with the packages, `SHA256SUMS`,
+4. The `publish` job creates a **draft** release with the packages, the daemon jar
+   `brewery-daemon-<version>.jar` (downloaded by Brewery Lite, see below), `SHA256SUMS`,
    `latest.json` (what the updater reads), the bundled Temurin JRE's source archive
    (`OpenJDK21U-jdk-sources_*.tar.gz`, GPLv2 section 3(a): downloaded in the `assemble`
    job (`release_assets.py fetch-jdk-source`) from the pin in `bundle-deps.toml`, `source_code` + `source_sha256`, and refused on a
@@ -311,3 +312,116 @@ draft release files are not public, so they don't work. Brewery logs when the
 override is active. Anyone who can set that variable can point Brewery at another
 installer, so treat it like any other environment variable that changes what runs.
 On Windows an installer without `sha256` in the manifest is refused.
+
+## Brewery Lite (`extensions/brewery-lite/`)
+
+A Zed extension for people who stay on stock Zed. It contains what Zed's extension API can
+carry:
+
+- the Spring Boot configuration language server (`brewery-spring-config`, the daemon's
+  `--spring-config-lsp`) for `application*.yml` and `application*.properties`;
+- the MCP context server `brewery` (the daemon's `--mcp`) with the tools `project_model`,
+  `spring_beans`, `spring_endpoints`, `run_configurations`, `db_schema` and `db_query`
+  (read-only);
+- the Brewery theme and the Brewery Icons icon theme.
+
+Everything else (the Database, Git, Run and Spring tool windows, run configurations, the
+merge editor, Java navigation on top of jdtls and so on) stays in the IDE: Zed extensions
+have no UI extension points (no panels, tool windows, dialogs or custom editors), only
+languages, language servers, context servers, slash commands, themes and icon themes.
+
+The extension is a Rust crate compiled to `wasm32-wasip2` (`zed_extension_api` 0.7.0). It is
+not a member of the root Cargo workspace and has its own `Cargo.lock`.
+
+### Version coupling
+
+The extension version is always `crates/zed/BREWERY_VERSION`, in `extension.toml`,
+`Cargo.toml` and the extension's entry in its `Cargo.lock`. The extension downloads
+`brewery-daemon-<version>.jar` from the release `v<version>` of `hteariH/brewery` (its own
+version, compiled in from `CARGO_PKG_VERSION`), checks it against that release's
+`SHA256SUMS` and keeps it in its work directory; other versions' jars there are deleted.
+CI attaches the jar to every release (the `package-daemon` artifact of `brewery_ci.yml`).
+
+`script/brewery/sync_brewery_lite.py` copies the theme and icons from the IDE
+(`assets/themes/brewery/brewery.json`, `crates/brewery_theme/icons/`) and sets the three
+versions; `--check` lists what drifted. Run it after changing `BREWERY_VERSION`, the theme
+or the icons.
+
+The first release that can serve Brewery Lite is **0.1.6**: the v0.1.5 draft was built
+before the jar was attached and has no `brewery-daemon-0.1.5.jar`, so an extension at
+0.1.5 cannot download its daemon (the theme and icons still work).
+
+### Checks
+
+    cd extensions/brewery-lite
+    cargo test --locked
+    cargo build --locked --release --target wasm32-wasip2
+    python script/brewery/sync_brewery_lite.py --check   # from the repository root
+
+Without Zed, the two servers can be smoke-tested on the daemon jar directly
+(`./gradlew shadowJar` in `brewery-daemon/` first):
+
+    # MCP: one JSON-RPC message per line on stdin, one answer per line on stdout
+    cd brewery-daemon/src/test/resources/projects/spring-petshop
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+      '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"spring_endpoints"}}' \
+      | java -jar ../../../../../build/libs/brewery-daemon-all.jar --mcp
+
+    # Spring config LSP: answers initialize with completion and hover
+    python script/brewery/lsp_smoke.py --project brewery-daemon/src/test/resources/projects/spring-petshop \
+      -- java -jar "$PWD/brewery-daemon/build/libs/brewery-daemon-all.jar" --spring-config-lsp
+
+The `spring-petshop` fixture has no datasource, so `db_schema` and `db_query` answer with
+`isError` and "No spring.datasource.url in ...". It also has no Spring Boot dependency:
+completion needs the configuration metadata of the project's dependency jars (resolved
+through Gradle or Maven), so test completion on a real Spring Boot project.
+
+### Testing the extension locally
+
+Until a release with the jar exists for the current version, give the extension the jar
+by hand. This needs Rust installed through rustup (Zed and Brewery compile dev extensions
+with it and add the `wasm32-wasip2` target themselves).
+
+1. Build the jar: `cd brewery-daemon && ./gradlew shadowJar`.
+2. In Zed (or Brewery), run `zed: install dev extension` and pick `extensions/brewery-lite`.
+   It is compiled and installed. A Brewery Lite installed from the registry is uninstalled
+   first, work directory included, so copy the jar only after this step.
+3. Copy `brewery-daemon/build/libs/brewery-daemon-all.jar` into the extension's work
+   directory as `brewery-daemon-<version>.jar` (the version in `extension.toml`). The
+   extension uses a jar that is already there and skips the download (and the checksum).
+   The work directory is `extensions/work/brewery-lite/` in the app's data directory:
+   - Zed: `%LOCALAPPDATA%\Zed\` on Windows, `~/Library/Application Support/Zed/` on macOS,
+     `~/.local/share/zed/` (or `$XDG_DATA_HOME/zed/`) on Linux;
+   - Brewery: the same with `Brewery` (`brewery` on Linux) in place of `Zed` (`zed`).
+4. Open a Spring Boot project. If the language server already failed to download the jar
+   before step 3, run `editor: restart language server`.
+5. Check:
+   - completion in `src/main/resources/application.yml` (type `server.` or `server:` and a
+     new indented line); the first resolution of the project's classpath can take a while
+     on a large build. Messages are in `dev: open language server logs`, server
+     `brewery-spring-config`;
+   - the agent panel's settings list the `brewery` context server as running, and the
+     agent can call `spring_endpoints` in the project.
+6. Delete the copied jar when done, so a later install downloads and verifies the released
+   one.
+
+### Publishing
+
+After the release `v<version>` (with its jar) is published, open a PR to
+[zed-industries/extensions](https://github.com/zed-industries/extensions) that adds this
+repository as a git submodule (`extensions/brewery-lite`) and an entry in its
+`extensions.toml`:
+
+```toml
+[brewery-lite]
+submodule = "extensions/brewery-lite"
+path = "extensions/brewery-lite"
+version = "0.1.6"
+```
+
+The submodule points at the release's commit. Each later release bumps the submodule
+commit and `version` in a new PR to that repository; the registry's version must equal
+`extension.toml`, and the release `v<version>` must be published first, or the published
+extension cannot download its daemon. Read that repository's README for its current rules
+(licence file, naming, CI checks) before each first submission.
