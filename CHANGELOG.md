@@ -3,6 +3,28 @@
 The text under `## <version>` is the top of that version's GitHub Release (install notes and checksums are added below it; see
 "Releasing" in docs/brewery/FORK.md). A version without a section gets a generic intro in its place.
 
+## 0.1.5
+
+- Databases:
+  - the result grid has scrollbars, keyboard cell navigation, range selection and copying of rows and ranges;
+  - console SQL is saved as you type and consoles come back after a restart;
+  - Run All runs every statement and shows one result tab each;
+  - an "In transaction" indicator with Commit and Rollback, and an open transaction is never closed while idle;
+  - each console has its own connection, so stopping or expiring results no longer affects other consoles;
+  - PostgreSQL results stay readable for 5 minutes;
+  - tables and views have a context menu; a "Show System Objects" toggle; a rejected password opens the data source dialog;
+  - MySQL `#` comments, backslash escapes and `BEGIN ... END` bodies are split and completed correctly;
+  - the Database tree stays fast on large schemas.
+- Git:
+  - one Ctrl+K (Cmd+K) focuses the commit message;
+  - in the merge editor Ctrl+S only saves; Apply resolves; Accept Left/Right keep hand-edited changes;
+  - merge editor changes now match the conflicts git marked;
+  - the Branches popup has Stashes, deleting remote branches, Smart Checkout and asks before changing a branch's upstream;
+  - the Conflicts dialog, file history and the Log graph are faster on large repositories.
+- Java: build.gradle editing works offline (the Gradle language server is bundled); jdtls starts faster on Windows.
+- macOS: Cmd+0 inside the Commit tool window closes it.
+- Releases include the OpenJDK source archive for the bundled Java runtime.
+
 ## 0.1.4
 
 - Based on Zed 1.26.0 (upstream changes up to 2026-10-17):
