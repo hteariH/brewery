@@ -46,19 +46,40 @@ fn env_var<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// The environment for probing `java -version` as the worktree shell would run it: just its PATH,
-/// with `dir` in front when given, so that a bare `java` resolves inside `dir` first.
-fn probe_env(env: &[(String, String)], dir: Option<&str>, windows: bool) -> Vec<(String, String)> {
-    let separator = if windows { ';' } else { ':' };
-    let path = env_var(env, "PATH");
-    let value = match (dir, path) {
-        (Some(dir), Some(path)) => format!("{dir}{separator}{path}"),
-        (Some(dir), None) => dir.to_owned(),
+/// The environment for probing `java -version`. With `dir` (JAVA_HOME's bin) PATH is only `dir`,
+/// so a bare `java` can only be the one in `dir`: a stale JAVA_HOME must fail the probe rather than
+/// pass with some other java further down PATH. Without `dir` it is the worktree shell's PATH.
+///
+/// Windows caveat: when `dir` has no java.exe, process creation on Windows still falls back to the
+/// system directories and Zed's own PATH, so a stale JAVA_HOME can pass there. The extension cannot
+/// check that `dir` holds java.exe first: WASI only sees its work directory and the worktree, not
+/// arbitrary host paths, and the manifest only allows running `java -version`.
+fn probe_env(env: &[(String, String)], dir: Option<&str>) -> Vec<(String, String)> {
+    let value = match (dir, env_var(env, "PATH")) {
+        (Some(dir), _) => dir.to_owned(),
         (None, Some(path)) => path.to_owned(),
         (None, None) => return Vec::new(),
     };
     vec![("PATH".to_owned(), value)]
 }
+
+/// Files whose presence at the worktree root makes it a Maven or Gradle project.
+const BUILD_FILES: [&str; 5] = [
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+];
+
+/// True when one of [`BUILD_FILES`] exists, by `exists` (a worktree-relative lookup).
+fn has_build_file(exists: impl Fn(&str) -> bool) -> bool {
+    BUILD_FILES.iter().any(|file| exists(file))
+}
+
+const NOT_A_JVM_PROJECT: &str = "Brewery Spring Config only runs in Maven or Gradle projects: \
+     this folder has no pom.xml, build.gradle(.kts) or settings.gradle(.kts) at its root, so the \
+     server was not started";
 
 /// `<home>/bin/java` (or `java.exe`) with the platform's separator.
 fn java_in_home(home: &str, windows: bool) -> (String, String) {
@@ -277,18 +298,18 @@ impl BreweryLite {
     }
 
     /// Java 21+ from the worktree shell: `$JAVA_HOME/bin/java`, else `java` on its PATH. Each is
-    /// probed by running `java -version` with that directory first on PATH.
+    /// probed by running `java -version` with PATH set as [`probe_env`] describes.
     fn worktree_java(worktree: &zed::Worktree) -> Option<String> {
         let windows = zed::current_platform().0 == zed::Os::Windows;
         let env = worktree.shell_env();
         if let Some(home) = env_var(&env, "JAVA_HOME").filter(|h| !h.trim().is_empty()) {
             let (bin, java) = java_in_home(home, windows);
-            if java_is_recent(&probe_env(&env, Some(&bin), windows)) {
+            if java_is_recent(&probe_env(&env, Some(&bin))) {
                 return Some(java);
             }
         }
         let java = worktree.which("java")?;
-        java_is_recent(&probe_env(&env, None, windows)).then_some(java)
+        java_is_recent(&probe_env(&env, None)).then_some(java)
     }
 }
 
@@ -302,6 +323,13 @@ impl zed::Extension for BreweryLite {
         id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> zed::Result<zed::Command> {
+        // Zed's API has no quiet "not for this worktree": an Err shows "Failed to run" in the
+        // status bar, once per worktree (Zed does not retry for each YAML file). That is still
+        // better than downloading a JRE and the daemon and running a JVM for every project with a
+        // docker-compose.yml or CI workflow.
+        if !has_build_file(|file| worktree.read_text_file(file).is_ok()) {
+            return Err(NOT_A_JVM_PROJECT.into());
+        }
         let status = |s: zed::LanguageServerInstallationStatus| {
             zed::set_language_server_installation_status(id, &s)
         };
@@ -385,26 +413,25 @@ mod tests {
     }
 
     #[test]
-    fn probe_env_puts_dir_first_on_path() {
+    fn probe_env_restricts_path_to_the_java_home_bin() {
+        // With JAVA_HOME's bin as the whole PATH, a stale JAVA_HOME cannot pass the probe with some
+        // other java further down PATH.
         let windows = env(&[("Path", r"C:\Windows"), ("X", "1")]);
         assert_eq!(
-            probe_env(&windows, Some(r"C:\jdk\bin"), true),
-            env(&[("PATH", r"C:\jdk\bin;C:\Windows")])
+            probe_env(&windows, Some(r"C:\jdk\bin")),
+            env(&[("PATH", r"C:\jdk\bin")])
         );
-        assert_eq!(
-            probe_env(&windows, None, true),
-            env(&[("PATH", r"C:\Windows")])
-        );
+        assert_eq!(probe_env(&windows, None), env(&[("PATH", r"C:\Windows")]));
         let unix = env(&[("PATH", "/usr/bin")]);
         assert_eq!(
-            probe_env(&unix, Some("/jdk/bin"), false),
-            env(&[("PATH", "/jdk/bin:/usr/bin")])
-        );
-        assert_eq!(
-            probe_env(&[], Some("/jdk/bin"), false),
+            probe_env(&unix, Some("/jdk/bin")),
             env(&[("PATH", "/jdk/bin")])
         );
-        assert_eq!(probe_env(&[], None, false), Vec::new());
+        assert_eq!(
+            probe_env(&[], Some("/jdk/bin")),
+            env(&[("PATH", "/jdk/bin")])
+        );
+        assert_eq!(probe_env(&[], None), Vec::new());
         assert_eq!(
             env_var(&env(&[("java_home", "/jdk")]), "JAVA_HOME"),
             Some("/jdk")
@@ -421,6 +448,21 @@ mod tests {
             java_in_home("C:\\jdk-21", true),
             ("C:\\jdk-21\\bin".into(), "C:\\jdk-21\\bin\\java.exe".into())
         );
+    }
+
+    #[test]
+    fn build_files_mark_a_maven_or_gradle_project() {
+        for file in [
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ] {
+            assert!(has_build_file(|name| name == file), "{file}");
+        }
+        assert!(!has_build_file(|name| name == "docker-compose.yml"));
+        assert!(!has_build_file(|_| false));
     }
 
     #[test]
