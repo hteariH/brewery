@@ -8,7 +8,7 @@ use crate::panel::WAITING_FOR_DAEMON;
 use crate::result_grid::{MORE_RESULTS_DROPPED, ResultGrid};
 use crate::schema_cache::SchemaCache;
 use crate::sql_context::is_schema_change;
-use crate::statements::{split_statements, statements_to_run};
+use crate::statements::{SqlFlavor, split_statements_for, statements_to_run};
 use crate::{
     CancelStatement, CommitTransaction, RollbackTransaction, RunAllStatements, RunStatement,
 };
@@ -381,8 +381,13 @@ impl QueryConsole {
             let selection = editor.selections.newest::<MultiBufferOffset>(&snapshot);
             (editor.text(cx), selection.start.0..selection.end.0)
         });
-        let statements = statements_to_run(&text, selection);
+        let statements = statements_to_run(&text, selection, self.flavor());
         self.run_ranges(&text, statements, cx);
+    }
+
+    /// How the data source's SQL splits into statements (comments, string escapes).
+    fn flavor(&self) -> SqlFlavor {
+        SqlFlavor::for_driver(&self.connection.driver_id)
     }
 
     /// Runs every statement of the console, in order.
@@ -391,7 +396,7 @@ impl QueryConsole {
             return;
         }
         let text = self.editor.read(cx).text(cx);
-        let statements = split_statements(&text);
+        let statements = split_statements_for(&text, self.flavor());
         self.run_ranges(&text, statements, cx);
     }
 

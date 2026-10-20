@@ -5,7 +5,7 @@
 //! The lexer knows the same strings, quoted identifiers, comments and dollar-quoted bodies as
 //! `statements::split_statements`, and shares its helpers.
 
-use crate::statements::{RESERVED, block_comment_end, dollar_tag};
+use crate::statements::{RESERVED, SqlFlavor, block_comment_end, dollar_tag, quoted_end};
 use std::ops::Range;
 
 /// What the completion menu lists.
@@ -322,7 +322,7 @@ fn is_word_char(char: char) -> bool {
     char.is_alphanumeric() || char == '_' || char == '$'
 }
 
-fn tokenize(sql: &str) -> Vec<Token> {
+fn tokenize(sql: &str, flavor: SqlFlavor) -> Vec<Token> {
     let bytes = sql.as_bytes();
     let len = bytes.len();
     let mut tokens = Vec::new();
@@ -342,33 +342,30 @@ fn tokenize(sql: &str) -> Vec<Token> {
                 ix = sql[ix..].find('\n').map_or(len, |newline| ix + newline);
                 (Kind::LineComment, true)
             }
+            '#' if flavor.hash_comments() => {
+                ix = sql[ix..].find('\n').map_or(len, |newline| ix + newline);
+                (Kind::LineComment, true)
+            }
             '/' if next == Some(b'*') => {
                 ix = block_comment_end(bytes, ix);
                 let closed = ix >= start + 4 && sql[..ix].ends_with("*/");
                 (Kind::BlockComment, closed)
             }
             '\'' | '"' | '`' => {
-                let quote = bytes[ix];
-                ix += 1;
-                let mut closed = false;
-                while ix < len {
-                    if bytes[ix] == quote {
-                        if bytes.get(ix + 1) == Some(&quote) {
-                            ix += 2;
-                            continue;
-                        }
-                        ix += 1;
-                        closed = true;
-                        break;
-                    }
-                    ix += 1;
-                }
+                let (end, closed) = quoted_end(bytes, ix, flavor.backslash_escapes(bytes, ix));
+                ix = end.min(len);
                 let kind = if char == '\'' {
                     Kind::Str
                 } else {
                     Kind::Quoted
                 };
                 (kind, closed)
+            }
+            // PostgreSQL's `E'..'`: one string with its prefix, not the word `E`.
+            'E' | 'e' if next == Some(b'\'') && flavor.backslash_escapes(bytes, ix + 1) => {
+                let (end, closed) = quoted_end(bytes, ix + 1, true);
+                ix = end.min(len);
+                (Kind::Str, closed)
             }
             '$' => match dollar_tag(sql, ix) {
                 Some(tag) => {
@@ -418,7 +415,7 @@ fn tokenize(sql: &str) -> Vec<Token> {
 /// Whether `sql` starts (after comments) with a keyword that changes the schema, so that what
 /// completion knows about the schema is out of date once it ran.
 pub fn is_schema_change(sql: &str) -> bool {
-    tokenize(sql)
+    tokenize(sql, SqlFlavor::Standard)
         .iter()
         .find(|token| !token.is_comment())
         .is_some_and(|token| token.is_keyword_in(sql, SCHEMA_CHANGES))
@@ -643,8 +640,9 @@ fn table_refs(
     (tables, table_scopes)
 }
 
-/// The completion context for a cursor at byte `offset` of `sql`.
-pub fn context_at(sql: &str, offset: usize) -> SqlContext {
+/// The completion context for a cursor at byte `offset` of `sql`, read with the rules of
+/// `flavor` (which comments and string escapes there are).
+pub fn context_at(sql: &str, offset: usize, flavor: SqlFlavor) -> SqlContext {
     let mut offset = offset.min(sql.len());
     while !sql.is_char_boundary(offset) {
         offset -= 1;
@@ -659,7 +657,7 @@ pub fn context_at(sql: &str, offset: usize) -> SqlContext {
         scopes: Vec::new(),
         offset,
     };
-    let tokens = tokenize(sql);
+    let tokens = tokenize(sql, flavor);
     if tokens.iter().any(|token| token.swallows(offset)) {
         return nothing;
     }
