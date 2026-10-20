@@ -2,6 +2,7 @@ package dev.brewery.daemon
 
 import dev.brewery.daemon.mcp.McpServer
 import dev.brewery.daemon.mcp.McpTool
+import dev.brewery.daemon.mcp.ProjectTools
 import dev.brewery.daemon.springconfig.SpringConfigServer
 import org.eclipse.lsp4j.jsonrpc.Launcher
 import org.eclipse.lsp4j.launch.LSPLauncher
@@ -47,7 +48,7 @@ fun runMcp(root: Path, input: InputStream, rpcOut: OutputStream, tools: List<Mcp
 }
 
 /** Every MCP tool for [root]; the tool sets are added by later tasks. */
-fun mcpTools(root: Path): List<McpTool> = emptyList()
+fun mcpTools(root: Path): List<McpTool> = ProjectTools(root).tools()
 
 private fun daemonVersion(): String = McpServer::class.java.`package`?.implementationVersion ?: "dev"
 

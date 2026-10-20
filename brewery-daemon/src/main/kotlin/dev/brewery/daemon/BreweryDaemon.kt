@@ -24,10 +24,8 @@ import dev.brewery.daemon.db.DbTestResult
 import dev.brewery.daemon.db.DriverInfo
 import dev.brewery.daemon.db.KeyringSecretStore
 import dev.brewery.daemon.db.SecretStore
-import dev.brewery.daemon.project.GradleModelReader
-import dev.brewery.daemon.project.MavenModelReader
-import dev.brewery.daemon.project.detectBuildTool
 import dev.brewery.daemon.project.isBuildFileName
+import dev.brewery.daemon.project.readProjectModel
 import dev.brewery.daemon.run.RunConfiguration
 import dev.brewery.daemon.run.RunConfigurations
 import dev.brewery.daemon.run.RunConfigurationsParams
@@ -316,12 +314,7 @@ class BreweryDaemon(
 
     private fun readModel(dir: Path): ProjectModel {
         try {
-            val reader = when (detectBuildTool(dir)) {
-                BuildTool.gradle -> GradleModelReader()
-                BuildTool.maven -> MavenModelReader()
-                BuildTool.none -> return ProjectModel(BuildTool.none, dir.toString(), emptyList())
-            }
-            return reader.read(dir)
+            return readProjectModel(dir)
         } catch (e: ResponseErrorException) {
             throw e
         } catch (e: Throwable) {

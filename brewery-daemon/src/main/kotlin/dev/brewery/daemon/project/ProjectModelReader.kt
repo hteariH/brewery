@@ -25,3 +25,13 @@ private val GRADLE_INPUT_FILES = setOf("gradle.properties", "libs.versions.toml"
 
 fun isBuildFileName(name: String): Boolean =
     name in GRADLE_BUILD_FILES || name in GRADLE_INPUT_FILES || name == MAVEN_BUILD_FILE
+
+/** The model of the project in [dir], read by the reader its build files call for. Throws whatever the reader throws. */
+fun readProjectModel(dir: Path): ProjectModel {
+    val reader = when (detectBuildTool(dir)) {
+        BuildTool.gradle -> GradleModelReader()
+        BuildTool.maven -> MavenModelReader()
+        BuildTool.none -> return ProjectModel(BuildTool.none, dir.toString(), emptyList())
+    }
+    return reader.read(dir)
+}
