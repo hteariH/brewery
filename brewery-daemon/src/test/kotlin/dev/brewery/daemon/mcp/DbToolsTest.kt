@@ -108,4 +108,40 @@ class DbToolsTest {
             assertTrue(e.message!!.contains("Could not read the Spring configuration"), e.message)
         }
     }
+
+    @Test
+    fun `a jdbc mysql url is handed to the driver as jdbc mariadb`() {
+        var seen: String? = null
+        assertFailsWith<SQLException> {
+            openJdbc(Datasource("jdbc:mysql://db.local:3306/shop", "u", "p", root)) { url, _ -> seen = url; throw SQLException("stop") }
+        }
+        assertEquals("jdbc:mariadb://db.local:3306/shop", seen)
+        assertFailsWith<SQLException> {
+            openJdbc(Datasource("jdbc:postgresql://db.local/shop", null, null, root)) { url, _ -> seen = url; throw SQLException("stop") }
+        }
+        assertEquals("jdbc:postgresql://db.local/shop", seen)
+    }
+
+    @Test
+    fun `a connect error does not echo the url parameters`() {
+        val dir = Files.createTempDirectory("secreturl")
+        val res = dir.resolve("src/main/resources")
+        Files.createDirectories(res)
+        Files.writeString(
+            res.resolve("application.properties"),
+            "spring.datasource.url=jdbc:postgresql://db.local/shop?user=app&password=s3cret\n",
+        )
+        val failing = DbTools(dir, env = { null }, connect = { throw SQLException("refused") }).tools().associateBy { it.name }
+        val e = assertFailsWith<McpToolError> { failing.getValue("db_query").call(args("sql" to "select 1")) }
+        assertTrue(e.message!!.contains("jdbc:postgresql://db.local/shop"), e.message)
+        assertFalse(e.message!!.contains("s3cret"), e.message)
+        assertFalse(e.message!!.contains("password"), e.message)
+    }
+
+    @Test
+    fun `redacted urls drop query and semicolon parameters`() {
+        assertEquals("jdbc:postgresql://h/db", redactJdbcUrl("jdbc:postgresql://h/db?password=x"))
+        assertEquals("jdbc:sqlserver://h:1433", redactJdbcUrl("jdbc:sqlserver://h:1433;password=x;user=y"))
+        assertEquals("jdbc:sqlite:/tmp/a.db", redactJdbcUrl("jdbc:sqlite:/tmp/a.db"))
+    }
 }

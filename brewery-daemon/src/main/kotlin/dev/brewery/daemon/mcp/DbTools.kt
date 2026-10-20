@@ -4,6 +4,7 @@ import dev.brewery.daemon.db.Introspector
 import dev.brewery.daemon.db.SchemaSnapshot
 import dev.brewery.daemon.db.SqlText
 import dev.brewery.daemon.db.ValueRenderer
+import dev.brewery.daemon.db.mariaDbDriverUrl
 import java.io.IOException
 import java.io.UncheckedIOException
 import java.nio.file.Path
@@ -22,14 +23,24 @@ private const val SQLITE_OPEN_READONLY = "1"
 
 /**
  * Opens [ds]. SQLite cannot switch an open connection to read-only, so its file is opened read-only from the start
- * (sqlite-jdbc's `open_mode` property); other drivers are switched by [DbTools] with `setReadOnly`.
+ * (sqlite-jdbc's `open_mode` property); other drivers are switched by [DbTools] with `setReadOnly`. A `jdbc:mysql:`
+ * URL is handed to MariaDB Connector/J as `jdbc:mariadb:` (see [mariaDbDriverUrl]).
  */
-internal fun openJdbc(ds: Datasource): Connection {
+internal fun openJdbc(
+    ds: Datasource,
+    open: (String, Properties) -> Connection = DriverManager::getConnection,
+): Connection {
     val props = Properties()
     ds.username?.let { props.setProperty("user", it) }
     ds.password?.let { props.setProperty("password", it) }
     if (ds.url.startsWith("jdbc:sqlite:", ignoreCase = true)) props.setProperty("open_mode", SQLITE_OPEN_READONLY)
-    return DriverManager.getConnection(ds.url, props)
+    return open(mariaDbDriverUrl(ds.url), props)
+}
+
+/** [url] without its parameters (after `?` or `;`), which may hold a password; safe to show in an error. */
+internal fun redactJdbcUrl(url: String): String {
+    val cut = url.indexOfAny(charArrayOf('?', ';'))
+    return if (cut < 0) url else url.substring(0, cut)
 }
 
 /**
@@ -38,7 +49,8 @@ internal fun openJdbc(ds: Datasource): Connection {
  * - it runs on a read-only connection (`setReadOnly(true)`; a connection that refuses it fails the call, it is never
  *   used writable) inside a transaction that is always rolled back.
  * How strictly the driver honours a read-only connection is up to the driver: PostgreSQL runs a READ ONLY
- * transaction, SQLite opens the file read-only (see [openJdbc]).
+ * transaction, MariaDB Connector/J sends `SET SESSION TRANSACTION READ ONLY`, SQLite opens the file read-only
+ * (see [openJdbc]).
  */
 class DbTools(
     private val root: Path,
@@ -63,7 +75,10 @@ class DbTools(
         val connection = try {
             connect(ds)
         } catch (e: SQLException) {
-            throw McpToolError("Could not connect to ${ds.url} (from ${ds.source}): ${e.message}")
+            val url = redactJdbcUrl(ds.url)
+            // Drivers may quote the URL in their message; keep its parameters out of that too.
+            val detail = e.message?.replace(ds.url, url)
+            throw McpToolError("Could not connect to $url (from ${ds.source}): $detail")
         }
         return connection.use {
             // A connection opened read-only (SQLite, see openJdbc) already is; SQLite would throw on the call.

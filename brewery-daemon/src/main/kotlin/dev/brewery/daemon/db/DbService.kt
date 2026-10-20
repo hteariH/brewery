@@ -204,8 +204,7 @@ class DbService(
         (options ?: emptyMap()).forEach { (k, v) -> props.setProperty(k, v) }
         if (!user.isNullOrEmpty()) props.setProperty("user", user)
         if (!password.isNullOrEmpty()) props.setProperty("password", password)
-        // MariaDB Connector/J 3 only accepts the jdbc:mysql: scheme with an extra flag; users expect it to work.
-        val effectiveUrl = if (driverId == "mysql" && url.startsWith("jdbc:mysql:")) "jdbc:mariadb:" + url.removePrefix("jdbc:mysql:") else url
+        val effectiveUrl = if (driverId == "mysql") mariaDbDriverUrl(url) else url
         return driver.connect(effectiveUrl, props)
             ?: throw SQLException("The ${driverId} driver does not accept this URL", "08001")
     }
@@ -427,6 +426,13 @@ fun connectionFailure(error: Throwable): DbException {
 
 /** PostgreSQL only streams a result set (fetch size) inside a transaction. */
 fun isPostgres(connection: Connection): Boolean = connection.metaData.url?.startsWith("jdbc:postgresql:") == true
+
+/**
+ * The URL to hand MariaDB Connector/J for [url]: Connector/J 3 only accepts the `jdbc:mysql:` scheme with an extra
+ * flag, and users expect it to work, so it becomes `jdbc:mariadb:`. Any other URL is returned unchanged.
+ */
+fun mariaDbDriverUrl(url: String): String =
+    if (url.startsWith("jdbc:mysql:")) "jdbc:mariadb:" + url.removePrefix("jdbc:mysql:") else url
 
 /** True for a MariaDB or MySQL JDBC URL, judged from the URL text alone. */
 fun isMariaDbUrl(url: String): Boolean = url.startsWith("jdbc:mariadb:") || url.startsWith("jdbc:mysql:")
