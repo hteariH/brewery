@@ -82,7 +82,8 @@ class McpServer(private val tools: List<McpTool>, private val version: String) {
             gson.toJson(tool.call(args)) to false
         } catch (e: McpToolError) {
             (e.message ?: "Failed") to true
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Errors too (NoClassDefFoundError, StackOverflowError...): one broken tool call must not end the session.
             "${e.javaClass.simpleName}: ${e.message ?: ""}".trim() to true
         }
         return JsonObject().apply {

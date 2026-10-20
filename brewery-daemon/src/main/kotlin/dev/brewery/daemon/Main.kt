@@ -39,8 +39,8 @@ fun runSpringConfigLsp(input: InputStream, rpcOut: OutputStream, exit: (Int) -> 
 }
 
 /**
- * Serves MCP over [input]/[rpcOut] for the project in [root] until EOF. Zed starts context servers in the
- * project's first worktree and sends no MCP roots, so the working directory is the project.
+ * Serves MCP over [input]/[rpcOut] for the project in [root] until EOF. Zed starts the context server with the
+ * active project folder as its working directory and sends no MCP roots, so the working directory is the project.
  */
 fun runMcp(root: Path, input: InputStream, rpcOut: OutputStream, tools: List<McpTool>, exit: (Int) -> Unit) {
     System.err.println("brewery mcp: serving $root")

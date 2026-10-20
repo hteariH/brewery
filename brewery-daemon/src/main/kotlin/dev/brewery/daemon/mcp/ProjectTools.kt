@@ -2,6 +2,7 @@ package dev.brewery.daemon.mcp
 
 import com.google.gson.JsonObject
 import dev.brewery.daemon.ProjectModel
+import dev.brewery.daemon.project.describeImportFailure
 import dev.brewery.daemon.project.readProjectModel
 import dev.brewery.daemon.run.RunConfigurations
 import dev.brewery.daemon.spring.SpringModel
@@ -25,8 +26,9 @@ class ProjectTools(
         if (refresh || model == null) {
             model = try {
                 readModel(root)
-            } catch (e: Exception) {
-                throw McpToolError("Could not import the ${root.fileName} build: ${e.message ?: e.javaClass.simpleName}")
+            } catch (e: Throwable) {
+                // Throwable: a Gradle/Maven linkage Error must become a tool error, not end the MCP session.
+                throw McpToolError("Could not import the ${root.fileName} build: ${describeImportFailure(e)}")
             }
         }
         return model!!

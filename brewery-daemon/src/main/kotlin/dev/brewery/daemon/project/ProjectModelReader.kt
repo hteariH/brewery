@@ -35,3 +35,19 @@ fun readProjectModel(dir: Path): ProjectModel {
     }
     return reader.read(dir)
 }
+
+/**
+ * A build import failure as text: Tooling API (and Maven) wrap the real script error (file, line) in the cause
+ * chain, so the top message alone is useless. Each distinct message once, outermost first, at most [max] chars.
+ */
+fun describeImportFailure(error: Throwable, max: Int = 2000): String {
+    val parts = mutableListOf<String>()
+    var current: Throwable? = error
+    var depth = 0
+    while (current != null && depth++ < 20) {
+        val text = current.message?.trim().takeUnless { it.isNullOrEmpty() } ?: current.javaClass.simpleName
+        if (text !in parts) parts += text
+        current = current.cause
+    }
+    return parts.joinToString("\n").take(max)
+}

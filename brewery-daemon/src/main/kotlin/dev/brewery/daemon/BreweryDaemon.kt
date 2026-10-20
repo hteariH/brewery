@@ -24,6 +24,7 @@ import dev.brewery.daemon.db.DbTestResult
 import dev.brewery.daemon.db.DriverInfo
 import dev.brewery.daemon.db.KeyringSecretStore
 import dev.brewery.daemon.db.SecretStore
+import dev.brewery.daemon.project.describeImportFailure
 import dev.brewery.daemon.project.isBuildFileName
 import dev.brewery.daemon.project.readProjectModel
 import dev.brewery.daemon.run.RunConfiguration
@@ -318,21 +319,8 @@ class BreweryDaemon(
         } catch (e: ResponseErrorException) {
             throw e
         } catch (e: Throwable) {
-            throw ResponseErrorException(ResponseError(ErrorCodes.BUILD_IMPORT_FAILED, describe(e), null))
+            throw ResponseErrorException(ResponseError(ErrorCodes.BUILD_IMPORT_FAILED, describeImportFailure(e, MAX_MESSAGE), null))
         }
-    }
-
-    // Tooling API wraps the real script error (file, line) in its cause chain, so the top message alone is useless.
-    private fun describe(error: Throwable): String {
-        val parts = mutableListOf<String>()
-        var current: Throwable? = error
-        var depth = 0
-        while (current != null && depth++ < 20) {
-            val text = current.message?.trim().takeUnless { it.isNullOrEmpty() } ?: current.javaClass.simpleName
-            if (text !in parts) parts += text
-            current = current.cause
-        }
-        return parts.joinToString("\n").take(MAX_MESSAGE)
     }
 
     internal fun onBuildFileChanged(dir: Path) {

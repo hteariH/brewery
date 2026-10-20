@@ -15,7 +15,8 @@ class McpServerTest {
     }
     private val failing = McpTool("fail", "Always fails", objectSchema()) { throw McpToolError("no datasource") }
     private val crashing = McpTool("crash", "Throws", objectSchema()) { error("boom") }
-    private val server = McpServer(listOf(echo, failing, crashing), "1.2.3")
+    private val linkage = McpTool("linkage", "Throws an Error", objectSchema()) { throw NoClassDefFoundError("org/example/Missing") }
+    private val server = McpServer(listOf(echo, failing, crashing, linkage), "1.2.3")
 
     private fun call(line: String): JsonObject = JsonParser.parseString(server.handle(line)!!).asJsonObject
 
@@ -49,7 +50,7 @@ class McpServerTest {
     @Test
     fun `tools list carries name description and schema`() {
         val tools = call("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""").getAsJsonObject("result").getAsJsonArray("tools")
-        assertEquals(listOf("echo", "fail", "crash"), tools.map { it.asJsonObject.get("name").asString })
+        assertEquals(listOf("echo", "fail", "crash", "linkage"), tools.map { it.asJsonObject.get("name").asString })
         val schema = tools[0].asJsonObject.getAsJsonObject("inputSchema")
         assertEquals("object", schema.get("type").asString)
         assertEquals("text", schema.getAsJsonArray("required")[0].asString)
@@ -66,7 +67,7 @@ class McpServerTest {
 
     @Test
     fun `tool errors are results with isError`() {
-        for ((name, text) in listOf("fail" to "no datasource", "crash" to "boom")) {
+        for ((name, text) in listOf("fail" to "no datasource", "crash" to "boom", "linkage" to "org/example/Missing")) {
             val result = call("""{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"$name"}}""").getAsJsonObject("result")
             assertTrue(result.get("isError").asBoolean)
             assertTrue(result.getAsJsonArray("content")[0].asJsonObject.get("text").asString.contains(text))

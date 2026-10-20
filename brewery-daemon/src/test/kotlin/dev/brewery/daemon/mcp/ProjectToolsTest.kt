@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test
 import java.io.File
 import java.nio.file.Path
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class ProjectToolsTest {
@@ -50,5 +51,23 @@ class ProjectToolsTest {
         val configs = tools.getValue("run_configurations").call(args()) as List<RunConfiguration>
         assertTrue(configs.isNotEmpty())
         assertTrue(configs.all { "bootRun" in it.args.joinToString(" ") })
+    }
+
+    @Test
+    fun `a failed import carries the cause chain`() {
+        val failing = ProjectTools(petshop, readModel = {
+            throw RuntimeException("Could not fetch model", IllegalStateException("build.gradle.kts:3: Unresolved reference: foo"))
+        }, windows = false).tools().associateBy { it.name }
+        val e = assertFailsWith<McpToolError> { failing.getValue("project_model").call(args()) }
+        assertTrue(e.message!!.contains("Could not fetch model"), e.message)
+        assertTrue(e.message!!.contains("build.gradle.kts:3: Unresolved reference: foo"), e.message)
+    }
+
+    @Test
+    fun `an Error during import is a tool error`() {
+        val failing = ProjectTools(petshop, readModel = { throw NoClassDefFoundError("org/gradle/Missing") }, windows = false)
+            .tools().associateBy { it.name }
+        val e = assertFailsWith<McpToolError> { failing.getValue("project_model").call(args()) }
+        assertTrue(e.message!!.contains("org/gradle/Missing"), e.message)
     }
 }
