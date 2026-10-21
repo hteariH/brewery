@@ -410,34 +410,32 @@ with it and add the `wasm32-wasip2` target themselves).
 
 ### Publishing
 
-After the release `v<version>` (with its jar) is published, open a PR to
-[zed-industries/extensions](https://github.com/zed-industries/extensions) that adds a
-repository holding the extension as a git submodule (`extensions/brewery-lite`, with an
-HTTPS URL such as `https://github.com/hteariH/brewery.git`, never an SSH one: the registry's
-CI clones submodules anonymously) and an entry in its `extensions.toml`:
+The registry gets the extension from the mirror
+[hteariH/brewery-lite](https://github.com/hteariH/brewery-lite), which holds only
+`extensions/brewery-lite` at its root (the registry would otherwise clone the whole Zed fork).
+Development stays here; the mirror is refreshed for each release with
+`git subtree split`, which is deterministic, so each release's split extends the previous one
+and the mirror keeps the extension's history:
+
+    split=$(git subtree split --prefix=extensions/brewery-lite v<version>)
+    git push https://github.com/hteariH/brewery-lite.git "$split:refs/heads/main" "$split:refs/tags/v<version>"
+
+The extension still downloads its daemon from `hteariH/brewery` releases.
+
+After the release `v<version>` (with its jar) is published and the mirror is pushed, open a PR
+to [zed-industries/extensions](https://github.com/zed-industries/extensions) that adds the
+mirror as a git submodule (with its HTTPS URL `https://github.com/hteariH/brewery-lite.git`,
+never an SSH one: the registry's CI clones submodules anonymously) and an entry in its
+`extensions.toml`:
 
 ```toml
 [brewery-lite]
 submodule = "extensions/brewery-lite"
-path = "extensions/brewery-lite"
 version = "0.1.6"
 ```
 
-The submodule points at the release's commit. Each later release bumps the submodule
-commit and `version` in a new PR to that repository; the registry's version must equal
-`extension.toml`, and the release `v<version>` must be published first, or the published
-extension cannot download its daemon. Read that repository's README for its current rules
-(licence file, naming, CI checks) before each first submission.
-
-Using this repository as the submodule makes the registry clone the whole Brewery repository
-(a full Zed fork, gigabytes of history) for a small extension, and its maintainers may refuse
-that. The alternative is a small mirror repository with only `extensions/brewery-lite` at its
-root, for example `hteariH/brewery-lite`, refreshed for each release:
-
-    # the split is deterministic, so each release's split extends the previous one
-    split=$(git subtree split --prefix=extensions/brewery-lite v<version>)
-    git push https://github.com/hteariH/brewery-lite.git "$split:refs/heads/main" "$split:refs/tags/v<version>"
-
-The submodule then points at the mirror (`https://github.com/hteariH/brewery-lite.git`) and
-the registry entry drops `path`, since the extension is the mirror's root. The extension
-still downloads its daemon from `hteariH/brewery` releases, so nothing else changes.
+The submodule points at the mirror's `v<version>` commit. Each later release bumps the
+submodule commit and `version` in a new PR to that repository; the registry's version must
+equal `extension.toml`, and the release `v<version>` must be published first, or the
+published extension cannot download its daemon. Read that repository's README for its
+current rules (licence file, naming, CI checks) before each first submission.

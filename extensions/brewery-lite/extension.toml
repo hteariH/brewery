@@ -4,7 +4,7 @@ description = "Spring Boot config completion, an MCP server for Java/Spring proj
 version = "0.1.6"
 schema_version = 1
 authors = ["hteariH <https://github.com/hteariH>"]
-repository = "https://github.com/hteariH/brewery"
+repository = "https://github.com/hteariH/brewery-lite"
 
 [language_servers.brewery-spring-config]
 name = "Brewery Spring Config"

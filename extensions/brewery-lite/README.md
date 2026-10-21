@@ -95,6 +95,14 @@ Brewery Lite is a subset. Brewery itself adds Java navigation and refactoring, r
 debug configurations, a database tool window, Spring tooling and more:
 <https://github.com/hteariH/brewery>.
 
+## Source and issues
+
+Brewery Lite is developed in the Brewery repository, under
+[`extensions/brewery-lite`](https://github.com/hteariH/brewery/tree/main/extensions/brewery-lite).
+[hteariH/brewery-lite](https://github.com/hteariH/brewery-lite) is a mirror refreshed for each
+release, so please open issues and pull requests in
+[hteariH/brewery](https://github.com/hteariH/brewery/issues).
+
 ## Licence
 
 Apache License 2.0, see [LICENSE-APACHE](LICENSE-APACHE). The icons come from
